@@ -27,15 +27,6 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""")
-    db.execute("""CREATE TABLE IF NOT EXISTS key_types(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        is_active INTEGER NOT NULL DEFAULT 1,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        compute_target INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS calendar_days(
         day TEXT PRIMARY KEY,
         is_weekend INTEGER NOT NULL DEFAULT 0,
@@ -52,8 +43,8 @@ def init_db():
     if not _col_exists(db, "calendar_days", "is_weekend"):
         db.execute("ALTER TABLE calendar_days ADD COLUMN is_weekend INTEGER NOT NULL DEFAULT 0")
 
-    if not _col_exists(db, "key_types", "compute_target"):
-        db.execute("ALTER TABLE key_types ADD COLUMN compute_target INTEGER NOT NULL DEFAULT 1")
+    # Drop legacy key_types table (no longer used)
+    db.execute("DROP TABLE IF EXISTS key_types")
 
     # --- time entries (single per day; legacy) ---
     db.execute("""
@@ -226,19 +217,6 @@ def init_db():
 
 def seed_defaults():
     db = connect()
-    defaults = [
-        ("Anwesend", 1, 10, 1),
-        ("Urlaub", 1, 20, 1),
-        ("Krank", 1, 30, 1),
-        ("Flextag", 1, 40, 1),
-        ("Verdi", 1, 50, 1),
-    ]
-    for n,a,s,c in defaults:
-        db.execute(
-            "INSERT OR IGNORE INTO key_types(name,is_active,sort_order,compute_target,updated_at) VALUES(?,?,?,?,datetime('now'))",
-            (n,a,s,c),
-        )
-
     # default absence types (Feiertag removed – handled via calendar_seed)
     absence_defaults = [
         ('Urlaub', '#198754', 1),

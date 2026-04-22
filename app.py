@@ -2244,13 +2244,7 @@ def calendar_view():
     # Anwesenheit / Tagesstatus (genau 1 Eintrag pro Tag)
     try:
         pres_rows = db.execute(
-            """
-            SELECT p.day, kt.name AS key_name, kt.color AS key_color
-            FROM daily_presence p
-            LEFT JOIN key_types kt ON kt.id = p.key_type_id
-            WHERE p.user_id = ?
-              AND p.day BETWEEN ? AND ?
-            """,
+            "SELECT p.day FROM daily_presence p WHERE p.user_id=? AND p.day BETWEEN ? AND ?",
             (u["id"], first_iso, last_iso),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -3875,21 +3869,18 @@ def export_presence_csv():
     bootstrap()
     u = current_user()
     db = connect()
-    rows = db.execute(
-        """
-        SELECT p.day, kt.name AS key, p.comment, p.created_at, p.updated_at
-        FROM daily_presence p
-        JOIN key_types kt ON kt.id = p.key_type_id
-        WHERE p.user_id = ?
-        ORDER BY p.day
-        """,
-        (u["id"],),
-    ).fetchall()
+    try:
+        rows = db.execute(
+            "SELECT p.day, p.comment, p.created_at, p.updated_at FROM daily_presence p WHERE p.user_id=? ORDER BY p.day",
+            (u["id"],),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
     db.close()
-    data = [[r["day"], r["key"], r["comment"] or "", r["created_at"] or "", r["updated_at"] or ""] for r in rows]
+    data = [[r["day"], r["comment"] or "", r["created_at"] or "", r["updated_at"] or ""] for r in rows]
     return _csv_response(
         f"presence_{u['username']}.csv",
-        ["day", "key", "comment", "created_at", "updated_at"],
+        ["day", "comment", "created_at", "updated_at"],
         data,
     )
 
@@ -4087,141 +4078,6 @@ def admin_users_edit_post(user_id: int):
 
     add_flash("Benutzer gespeichert.", "success")
     return redirect(url_for("admin_users"))
-
-# -------------------------
-# Admin: Schlüsseltypen (key_types)
-# -------------------------
-
-@app.get("/admin/key-types")
-@admin_required
-def admin_key_types():
-    bootstrap()
-    u = current_user()
-    db = connect()
-    rows = db.execute("SELECT id, name, is_active, sort_order, compute_target FROM key_types ORDER BY sort_order, name").fetchall()
-    db.close()
-
-    trs = ""
-    for r in rows:
-        act = "ja" if r["is_active"] else "nein"
-        trs += f"<tr><td>{r['name']}</td><td>{r['sort_order']}</td><td>{act}</td><td>{r['compute_target']}</td><td><a href='/admin/key-types/{r['id']}/edit'>Bearbeiten</a></td></tr>"
-
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Schlüsseltypen</h3>
-        <a class="btn" href="/admin/key-types/new">+ Neu</a>
-      </div>
-      <table>
-        <thead><tr><th>Name</th><th>Sort</th><th>Aktiv</th><th>Compute</th><th></th></tr></thead>
-        <tbody>{trs}</tbody>
-      </table>
-      <p class="small">Diese Typen erscheinen in der Anwesenheits-Tagesdoku.</p>
-    </div>
-    """
-    return render_template_string(layout("Admin: Schlüsseltypen", body, u, APP_VERSION))
-
-
-@app.get("/admin/key-types/new")
-@admin_required
-def admin_key_types_new():
-    bootstrap()
-    u = current_user()
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <h3>Schlüsseltyp anlegen</h3>
-      <form method="post" action="/admin/key-types/new">
-        <div><label>Name</label><br><input name="name" required></div><br>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>Sort Order</label><br><input name="sort_order" type="number" value="10"></div>
-          <div><label>Compute Target</label><br><input name="compute_target" type="number" value="1"></div>
-        </div><br>
-        <label><input type="checkbox" name="is_active" value="1" checked> aktiv</label><br><br>
-        <button class="btn" type="submit">Anlegen</button>
-        <a class="btn" href="/admin/key-types">Abbrechen</a>
-      </form>
-    </div>
-    """
-    return render_template_string(layout("Admin: Schlüsseltyp", body, u, APP_VERSION))
-
-
-@app.post("/admin/key-types/new")
-@admin_required
-def admin_key_types_new_post():
-    bootstrap()
-    name = (request.form.get("name") or "").strip()
-    sort_order = int(request.form.get("sort_order") or 10)
-    compute_target = int(request.form.get("compute_target") or 1)
-    is_active = 1 if (request.form.get("is_active") == "1") else 0
-
-    db = connect()
-    try:
-        db.execute(
-            "INSERT INTO key_types(name,is_active,sort_order,compute_target,updated_at) VALUES(?,?,?,?,datetime('now'))",
-            (name, is_active, sort_order, compute_target),
-        )
-        db.commit()
-    except Exception:
-        db.close()
-        add_flash("Konnte nicht anlegen (Name evtl. schon vorhanden).", "error")
-        return redirect("/admin/key-types/new")
-    db.close()
-    add_flash("Schlüsseltyp angelegt.", "success")
-    return redirect("/admin/key-types")
-
-
-@app.get("/admin/key-types/<int:key_id>/edit")
-@admin_required
-def admin_key_types_edit(key_id: int):
-    bootstrap()
-    u = current_user()
-    db = connect()
-    r = db.execute("SELECT id, name, is_active, sort_order, compute_target FROM key_types WHERE id=?", (key_id,)).fetchone()
-    db.close()
-    if not r:
-        abort(404)
-
-    checked = "checked" if r["is_active"] else ""
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <h3>Schlüsseltyp bearbeiten</h3>
-      <form method="post" action="/admin/key-types/{key_id}/edit">
-        <div><label>Name</label><br><input name="name" value="{r['name']}" required></div><br>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>Sort Order</label><br><input name="sort_order" type="number" value="{r['sort_order']}"></div>
-          <div><label>Compute Target</label><br><input name="compute_target" type="number" value="{r['compute_target']}"></div>
-        </div><br>
-        <label><input type="checkbox" name="is_active" value="1" {checked}> aktiv</label><br><br>
-        <button class="btn" type="submit">Speichern</button>
-        <a class="btn" href="/admin/key-types">Zurück</a>
-      </form>
-    </div>
-    """
-    return render_template_string(layout("Admin: Schlüsseltyp", body, u, APP_VERSION))
-
-
-@app.post("/admin/key-types/<int:key_id>/edit")
-@admin_required
-def admin_key_types_edit_post(key_id: int):
-    bootstrap()
-    name = (request.form.get("name") or "").strip()
-    sort_order = int(request.form.get("sort_order") or 10)
-    compute_target = int(request.form.get("compute_target") or 1)
-    is_active = 1 if (request.form.get("is_active") == "1") else 0
-
-    db = connect()
-    db.execute(
-        "UPDATE key_types SET name=?, is_active=?, sort_order=?, compute_target=?, updated_at=datetime('now') WHERE id=?",
-        (name, is_active, sort_order, compute_target, key_id),
-    )
-    db.commit()
-    db.close()
-    add_flash("Gespeichert.", "success")
-    return redirect("/admin/key-types")
-
 
 
 if __name__ == "__main__":
