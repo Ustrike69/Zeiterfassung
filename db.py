@@ -165,6 +165,16 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_absences_user_from_to ON absences(user_id, date_from, date_to)")
 
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS absence_remarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        remark TEXT NOT NULL,
+        UNIQUE(user_id, remark),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    """)
+
     # Rename legacy 'Sonstiges' → 'Sonstige'
     db.execute("UPDATE absence_types SET name='Sonstige', updated_at=datetime('now') WHERE name='Sonstiges'")
 

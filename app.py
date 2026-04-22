@@ -1748,6 +1748,59 @@ def _has_overlap(conn, user_id: int, date_from: str, date_to: str, exclude_id=No
     return (r["c"] if r else 0) > 0
 
 
+FIXED_REMARKS = ["Flextag", "Verdi"]
+
+_REMARK_JS = """
+function syncRemarkNew(rowId, inpId, sel) {
+  var isNew = sel && sel.value === '__new__';
+  var row = document.getElementById(rowId);
+  var inp = document.getElementById(inpId);
+  if (!row || !inp) return;
+  row.style.display = isNew ? '' : 'none';
+  inp.required = isNew;
+}"""
+
+def _remark_select_html(user_remarks: list, selected: str = "", pfx: str = "") -> str:
+    """Dropdown for Sonstige remark field with preset options + free-text fallback."""
+    all_opts: list[str] = list(FIXED_REMARKS)
+    seen: set[str] = set(FIXED_REMARKS)
+    for r in sorted(user_remarks):
+        if r not in seen:
+            all_opts.append(r)
+            seen.add(r)
+    is_new = bool(selected) and selected not in seen
+    opts_html = ""
+    for r in all_opts:
+        s = "selected" if (r == selected and not is_new) else ""
+        opts_html += f'<option value="{r}" {s}>{r}</option>'
+    new_sel = "selected" if is_new else ""
+    opts_html += f'<option value="__new__" {new_sel}>Neuer Eintrag …</option>'
+    new_display = "" if is_new else "none"
+    new_val = selected if is_new else ""
+    new_req = "required" if is_new else ""
+    return (
+        f'<label>Bemerkung <span style="color:var(--danger);">*</span></label><br>'
+        f'<select name="remark_select" id="{pfx}remark_sel" '
+        f'onchange="syncRemarkNew(\'{pfx}remark_new_row\',\'{pfx}remark_new_inp\',this)">'
+        f'{opts_html}</select>'
+        f'<div id="{pfx}remark_new_row" style="margin-top:6px;display:{new_display};">'
+        f'<input name="remark_new" id="{pfx}remark_new_inp" '
+        f'placeholder="Bemerkung eingeben …" style="width:100%;" '
+        f'value="{new_val}" {new_req}></div>'
+    )
+
+def _resolve_comment_from_form() -> str:
+    """Read remark_select / remark_new / comment from the current request and return the final value."""
+    remark_select = (request.form.get("remark_select") or "").strip()
+    remark_new = (request.form.get("remark_new") or "").strip()
+    comment_plain = (request.form.get("comment") or "").strip()
+    if remark_select == "__new__":
+        return remark_new
+    if remark_select:
+        return remark_select
+    return comment_plain
+
+
 @app.get("/absences")
 @login_required
 def absences_list():
@@ -1828,22 +1881,25 @@ def absences_new():
     u = current_user()
     db = connect()
     types = db.execute("SELECT id, name, color FROM absence_types WHERE active=1 ORDER BY name").fetchall()
+    user_remarks = [r["remark"] for r in db.execute(
+        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
+    ).fetchall()]
     db.close()
 
     options = "".join([f'<option value="{t["id"]}">{t["name"]}</option>' for t in types])
     sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
+    remark_html = _remark_select_html(user_remarks)
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
 <script>
+{_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  var lbl = document.getElementById('comment_lbl');
-  var inp = document.getElementById('comment_inp');
-  if (!lbl || !inp) return;
-  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
-  inp.required = isSonstige;
+  document.getElementById('comment_plain_row').style.display = isSonstige ? 'none' : '';
+  document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
+  if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
 </script>
     <div class="card">
@@ -1857,7 +1913,8 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div><label id="comment_lbl">Kommentar (optional)</label><br><input id="comment_inp" style="width:100%;" name="comment"></div><br>
+        <div id="comment_plain_row"><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment"></div>
+        <div id="remark_row" style="display:none;">{remark_html}</div><br>
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
@@ -1876,23 +1933,21 @@ def absences_new_post():
     date_from = _parse_date_input(request.form.get("date_from") or "") or ""
     date_to = _parse_date_input(request.form.get("date_to") or "") or ""
     is_half_day = 1 if request.form.get("is_half_day") == "1" else 0
-    comment = (request.form.get("comment") or "").strip()
+    comment = _resolve_comment_from_form()
 
     err = _validate_absence_dates(date_from, date_to, is_half_day)
     if err:
         add_flash(err, "error")
         return redirect(url_for("absences_new"))
 
-    # Sonstige requires a comment (server-side guard)
-    if not comment:
-        db_chk = connect()
-        type_row = db_chk.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
-        db_chk.close()
-        if type_row and type_row["name"] == "Sonstige":
-            add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
-            return redirect(url_for("absences_new"))
-
     db = connect()
+    type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
+    type_name = type_row["name"] if type_row else ""
+    if type_name == "Sonstige" and not comment:
+        db.close()
+        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        return redirect(url_for("absences_new"))
+
     if _has_overlap(db, u["id"], date_from, date_to):
         db.close()
         add_flash("Überschneidung mit vorhandener Abwesenheit. Bitte Zeitraum anpassen.", "error")
@@ -1902,6 +1957,8 @@ def absences_new_post():
         "INSERT INTO absences(user_id,type_id,date_from,date_to,is_half_day,comment) VALUES(?,?,?,?,?,?)",
         (u["id"], type_id, date_from, date_to, is_half_day, comment),
     )
+    if type_name == "Sonstige" and comment:
+        db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
     add_flash("Abwesenheit gespeichert.", "success")
@@ -1923,6 +1980,9 @@ def absences_edit(absence_id: int):
         abort(404)
 
     types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
+    user_remarks = [r["remark"] for r in db.execute(
+        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
+    ).fetchall()]
     db.close()
 
     options = ""
@@ -1933,22 +1993,22 @@ def absences_edit(absence_id: int):
     sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
     current_type_name = next((t["name"] for t in types if t["id"] == row["type_id"]), "")
     is_sonstige_now = current_type_name == "Sonstige"
-    comment_lbl_html = 'Bemerkung <span style="color:var(--danger);">*</span>' if is_sonstige_now else "Kommentar (optional)"
-    comment_required = "required" if is_sonstige_now else ""
     checked = "checked" if row["is_half_day"] else ""
     comment = row["comment"] or ""
+    remark_html = _remark_select_html(user_remarks, selected=comment if is_sonstige_now else "")
+    plain_display = "none" if is_sonstige_now else ""
+    remark_display = "" if is_sonstige_now else "none"
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
 <script>
+{_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  var lbl = document.getElementById('comment_lbl');
-  var inp = document.getElementById('comment_inp');
-  if (!lbl || !inp) return;
-  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
-  inp.required = isSonstige;
+  document.getElementById('comment_plain_row').style.display = isSonstige ? 'none' : '';
+  document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
+  if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
 </script>
     <div class="card">
@@ -1962,7 +2022,8 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", str(row["date_to"]), required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div><label id="comment_lbl">{comment_lbl_html}</label><br><input id="comment_inp" style="width:100%;" name="comment" value="{comment}" {comment_required}></div><br>
+        <div id="comment_plain_row" style="display:{plain_display};"><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment" value="{comment if not is_sonstige_now else ''}"></div>
+        <div id="remark_row" style="display:{remark_display};">{remark_html}</div><br>
         <button class="btn" type="submit">Aktualisieren</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
@@ -1981,23 +2042,21 @@ def absences_edit_post(absence_id: int):
     date_from = _parse_date_input(request.form.get("date_from") or "") or ""
     date_to = _parse_date_input(request.form.get("date_to") or "") or ""
     is_half_day = 1 if request.form.get("is_half_day") == "1" else 0
-    comment = (request.form.get("comment") or "").strip()
+    comment = _resolve_comment_from_form()
 
     err = _validate_absence_dates(date_from, date_to, is_half_day)
     if err:
         add_flash(err, "error")
         return redirect(f"/absences/{absence_id}/edit")
 
-    # Sonstige requires a comment (server-side guard)
-    if not comment:
-        db_chk = connect()
-        type_row = db_chk.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
-        db_chk.close()
-        if type_row and type_row["name"] == "Sonstige":
-            add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
-            return redirect(f"/absences/{absence_id}/edit")
-
     db = connect()
+    type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
+    type_name = type_row["name"] if type_row else ""
+    if type_name == "Sonstige" and not comment:
+        db.close()
+        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        return redirect(f"/absences/{absence_id}/edit")
+
     row = db.execute(
         "SELECT id FROM absences WHERE id=? AND user_id=?",
         (absence_id, u["id"]),
@@ -2016,6 +2075,8 @@ def absences_edit_post(absence_id: int):
         "WHERE id=? AND user_id=?",
         (type_id, date_from, date_to, is_half_day, comment, absence_id, u["id"]),
     )
+    if type_name == "Sonstige" and comment:
+        db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
     add_flash("Abwesenheit aktualisiert.", "success")
@@ -2411,6 +2472,9 @@ def day_detail(day: str):
 
     abs_types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
     abs_sonstige_id = next((t["id"] for t in abs_types if t["name"] == "Sonstige"), 0)
+    abs_user_remarks = [r["remark"] for r in db.execute(
+        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
+    ).fetchall()]
     trip = db.execute(
         "SELECT * FROM business_trips WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL) ORDER BY id DESC LIMIT 1",
         (u["id"], day, day),
@@ -2461,6 +2525,7 @@ def day_detail(day: str):
 
     abs_opts = "".join([f"<option value='{t['id']}'>{t['name']}</option>" for t in abs_types])
     abs_sonstige_id_js = abs_sonstige_id
+    abs_remark_html = _remark_select_html(abs_user_remarks, pfx="d_")
 
     body = f"""
     {flash_html()}
@@ -2517,13 +2582,12 @@ def day_detail(day: str):
     <div class="card" style="margin-top:10px;">
       <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
 <script>
+{_REMARK_JS}
 function syncDayBemerkung(sel) {{
   var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
-  var lbl = document.getElementById('day_comment_lbl');
-  var inp = document.getElementById('day_comment_inp');
-  if (!lbl || !inp) return;
-  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
-  inp.required = isSonstige;
+  document.getElementById('d_comment_plain_row').style.display = isSonstige ? 'none' : '';
+  document.getElementById('d_remark_row').style.display = isSonstige ? '' : 'none';
+  if (isSonstige) syncRemarkNew('d_remark_new_row','d_remark_new_inp',document.getElementById('d_remark_sel'));
 }}
 </script>
       <form method="post" action="/day/{day}/absence/add">
@@ -2531,7 +2595,10 @@ function syncDayBemerkung(sel) {{
           <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
           <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
         </div>
-        <div style="margin-top:8px;"><label id="day_comment_lbl">Kommentar (optional)</label><br><input id="day_comment_inp" name="comment" placeholder="" style="width:100%;"></div>
+        <div style="margin-top:8px;">
+          <div id="d_comment_plain_row"><label>Kommentar (optional)</label><br><input name="comment" style="width:100%;"></div>
+          <div id="d_remark_row" style="display:none;">{abs_remark_html}</div>
+        </div>
         <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
       </form>
       <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
@@ -2914,12 +2981,12 @@ def day_absence_add(day: str):
     u = current_user()
     type_id = int(request.form.get("type_id") or 0)
     is_half_day = 1 if (request.form.get("is_half_day") == "1") else 0
-    comment = (request.form.get("comment") or "").strip()
+    comment = _resolve_comment_from_form()
 
     db = connect()
-    # Sonstige requires a comment
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
-    if type_row and type_row["name"] == "Sonstige" and not comment:
+    type_name = type_row["name"] if type_row else ""
+    if type_name == "Sonstige" and not comment:
         db.close()
         add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
         return redirect(f"/day/{day}")
@@ -2942,6 +3009,8 @@ def day_absence_add(day: str):
         "INSERT INTO absences(user_id, type_id, date_from, date_to, is_half_day, comment, updated_at) VALUES(?,?,?,?,?,?,datetime('now'))",
         (u["id"], type_id, day, day, is_half_day, comment),
     )
+    if type_name == "Sonstige" and comment:
+        db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
     add_flash("Abwesenheit gespeichert.", "success")
