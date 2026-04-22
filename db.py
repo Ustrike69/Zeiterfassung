@@ -214,11 +214,10 @@ def seed_defaults():
             (n,a,s,c),
         )
 
-    # default absence types
+    # default absence types (Feiertag removed – handled via calendar_seed)
     absence_defaults = [
         ('Urlaub', '#198754', 1),
         ('Krank', '#dc3545', 1),
-        ('Feiertag', '#0dcaf0', 1),
         ('Sonstiges', '#6c757d', 1),
     ]
     for name, color, active in absence_defaults:
@@ -226,5 +225,17 @@ def seed_defaults():
             "INSERT OR IGNORE INTO absence_types(name,color,active,updated_at) VALUES(?,?,?,datetime('now'))",
             (name, color, active),
         )
+
+    # Migration: remove Feiertag absence type if no absences reference it
+    row = db.execute(
+        "SELECT id FROM absence_types WHERE LOWER(name)='feiertag' LIMIT 1"
+    ).fetchone()
+    if row:
+        in_use = db.execute(
+            "SELECT 1 FROM absences WHERE type_id=? LIMIT 1", (row["id"],)
+        ).fetchone()
+        if not in_use:
+            db.execute("DELETE FROM absence_types WHERE id=?", (row["id"],))
+
     db.commit()
     db.close()
