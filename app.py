@@ -1425,58 +1425,103 @@ def _calc_balance(user_id: int, start_iso: str, end_iso: str) -> dict:
 def balance_view():
     bootstrap()
     u = current_user()
-
     today = datetime.date.today()
-    default_from = datetime.date(today.year, 1, 1).isoformat()
-    default_to = today.isoformat()
 
-    q_from = _parse_date_input(request.args.get("from") or default_from) or default_from
-    q_to   = _parse_date_input(request.args.get("to")   or default_to)   or default_to
-    only = (request.args.get("only") or "").strip()  # "1" => nur Tage mit Einträgen
-
-    # validate dates
     try:
-        datetime.date.fromisoformat(q_from)
-        datetime.date.fromisoformat(q_to)
+        sel_year = int(request.args.get("y") or today.year)
+    except (ValueError, TypeError):
+        sel_year = today.year
+    try:
+        sel_month = int(request.args.get("m") if request.args.get("m") is not None else today.month)
+    except (ValueError, TypeError):
+        sel_month = today.month
+    only = (request.args.get("only") or "").strip()
+
+    # Available years: from earliest data entry to current year
+    db = connect()
+    try:
+        row = db.execute("""
+            SELECT MIN(y) AS min_y FROM (
+                SELECT CAST(SUBSTR(day,1,4) AS INTEGER) AS y FROM time_blocks WHERE user_id=?
+                UNION ALL
+                SELECT CAST(SUBSTR(date_from,1,4) AS INTEGER) AS y FROM absences WHERE user_id=?
+            ) t
+        """, (u["id"], u["id"])).fetchone()
+        min_year = int(row["min_y"]) if row and row["min_y"] else today.year
     except Exception:
-        add_flash("Ungültiges Datum (von/bis).", "error")
-        return redirect("/balance")
+        min_year = today.year
+    db.close()
+    min_year = min(min_year, today.year)
+    available_years = list(range(min_year, today.year + 1))
+    if sel_year not in available_years:
+        sel_year = today.year
+    if sel_month not in range(0, 13):
+        sel_month = today.month
 
-    if q_from > q_to:
-        add_flash("Von-Datum darf nicht nach Bis-Datum liegen.", "error")
-        return redirect("/balance")
+    # ── Kumulativer Saldo ab 01.01 des gewählten Jahres ──────────────────
+    # Bug-Fix: _calc_balance startete immer bei global start_minutes ohne
+    # vorangegangene Monate zu akkumulieren. Die neue Logik berechnet immer
+    # das gesamte Jahr und filtert nur die Anzeige auf den gewählten Monat.
+    year_start = datetime.date(sel_year, 1, 1).isoformat()
+    year_end   = min(datetime.date(sel_year, 12, 31), today).isoformat()
+    start_minutes = _get_start_balance_minutes(u["id"])
+    running = int(start_minutes)
+    all_rows: list[dict] = []
+    for iso in _iter_days(year_start, year_end):
+        expected = int(_expected_minutes_for_day(u["id"], iso) or 0)
+        actual   = int(_actual_minutes_for_day(u["id"], iso) or 0)
+        delta    = actual - expected
+        running += delta
+        all_rows.append({"day": iso, "expected": expected, "actual": actual,
+                         "delta": delta, "running": running})
 
-    # optional: nur Tage mit Einträgen (Zeitblöcke, Presence, Abwesenheiten)
-    if only == "1":
-        days = sorted(_days_with_any_entry(u["id"], q_from, q_to))
-        start_minutes = _get_start_balance_minutes(u["id"])
-        running = int(start_minutes)
-        rows = []
-        for iso in days:
-            expected = int(_expected_minutes_for_day(u["id"], iso) or 0)
-            actual = int(_actual_minutes_for_day(u["id"], iso) or 0)
-            delta = int(actual - expected)
-            running += delta
-            rows.append({"day": iso, "expected": expected, "actual": actual, "delta": delta, "running": running})
-        calc = {"start_minutes": int(start_minutes), "end_minutes": int(running), "rows": rows}
+    # ── Anzeigebereich bestimmen ─────────────────────────────────────────
+    if sel_month == 0:
+        display_start = year_start
+        display_end   = year_end
+        period_label  = f"Gesamtes Jahr {sel_year}"
+        period_start_balance = start_minutes
     else:
-        calc = _calc_balance(u["id"], q_from, q_to)
+        m_last_day    = calendar.monthrange(sel_year, sel_month)[1]
+        display_start = datetime.date(sel_year, sel_month, 1).isoformat()
+        display_end   = datetime.date(sel_year, sel_month, m_last_day).isoformat()
+        prior = [r for r in all_rows if r["day"] < display_start]
+        period_start_balance = prior[-1]["running"] if prior else start_minutes
+        period_label = f"{MONTH_NAMES_DE[sel_month]} {sel_year}"
 
-    # show last 31 rows (for large ranges)
-    rows = calc["rows"]
-    tail = rows[-31:] if len(rows) > 31 else rows
+    display_rows_full = [r for r in all_rows if display_start <= r["day"] <= display_end]
 
+    if only == "1":
+        entry_days = _days_with_any_entry(u["id"], display_start, display_end)
+        display_rows = [r for r in display_rows_full if r["day"] in entry_days]
+    else:
+        display_rows = display_rows_full
+
+    period_end_balance = display_rows_full[-1]["running"] if display_rows_full else period_start_balance
+
+    # ── Dropdowns ────────────────────────────────────────────────────────
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
+        for y in reversed(available_years)
+    )
+    month_opts = f'<option value="0" {"selected" if sel_month == 0 else ""}>Gesamtes Jahr</option>'
+    for mi in range(1, 13):
+        month_opts += f'<option value="{mi}" {"selected" if mi == sel_month else ""}>{MONTH_NAMES_DE[mi]}</option>'
+
+    # ── Tabellenzeilen ───────────────────────────────────────────────────
     trs = ""
-    for r in tail:
+    for r in display_rows:
         trs += (
             "<tr>"
             f"<td>{r['day']}</td>"
-            f"<td style='text-align:right;'>"\
-            f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;'>"\
-            f"<input type='hidden' name='day' value='{r['day']}'>"\
-            f"<input name='expected' value='{_fmt_minutes(r['expected'])}' style='width:70px;text-align:right;' placeholder='HH:MM'>"\
-            f"<button class='btn' type='submit' style='padding:4px 8px;'>OK</button>"\
-            f"</form>"\
+            f"<td style='text-align:right;'>"
+            f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;'>"
+            f"<input type='hidden' name='day' value='{r['day']}'>"
+            f"<input type='hidden' name='y' value='{sel_year}'>"
+            f"<input type='hidden' name='m' value='{sel_month}'>"
+            f"<input name='expected' value='{_fmt_minutes(r['expected'])}' style='width:70px;text-align:right;' placeholder='HH:MM'>"
+            f"<button class='btn' type='submit' style='padding:4px 8px;'>OK</button>"
+            f"</form>"
             f"</td>"
             f"<td style='text-align:right;'>{_fmt_minutes(r['actual'])}</td>"
             f"<td style='text-align:right;'><b>{_fmt_minutes_signed(r['delta'])}</b></td>"
@@ -1484,79 +1529,69 @@ def balance_view():
             "</tr>"
         )
 
-    start_hhmm = _fmt_minutes_signed(calc["start_minutes"])
-    end_hhmm = _fmt_minutes_signed(calc["end_minutes"])
+    start_hhmm        = _fmt_minutes_signed(start_minutes)
+    period_start_hhmm = _fmt_minutes_signed(period_start_balance)
+    period_end_hhmm   = _fmt_minutes_signed(period_end_balance)
 
     body = f"""
     {flash_html()}
-    <div class=\"card\">
-      <div style=\"display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;\">
-        <h3 style=\"margin:0;\">Gleitzeitkonto</h3>
-        <div class=\"small\">Zeitraum: <b>{q_from}</b> bis <b>{q_to}</b></div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="margin:0;">Gleitzeitkonto</h3>
+        <div class="small">{period_label}</div>
       </div>
 
-      <div style=\"display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;\">
-        <div style=\"flex:1;min-width:220px;\">
-          <div class=\"small\">Startsaldo</div>
-          <div style=\"font-size:22px;\"><b>{start_hhmm}</b></div>
+      <form method="get" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:12px;">
+        <div><label>Jahr</label><br><select name="y">{year_opts}</select></div>
+        <div><label>Monat</label><br><select name="m">{month_opts}</select></div>
+        <div class="small" style="padding-bottom:4px;">
+          <label><input type="checkbox" name="only" value="1" {"checked" if only == "1" else ""}> nur Tage mit Einträgen</label>
         </div>
-        <div style=\"flex:1;min-width:220px;\">
-          <div class=\"small\">Aktueller Saldo (inkl. Zeitraum)</div>
-          <div style=\"font-size:22px;\"><b>{end_hhmm}</b></div>
+        <div><button class="btn" type="submit">Anzeigen</button></div>
+      </form>
+
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;">
+        <div style="flex:1;min-width:160px;">
+          <div class="small">Saldo zu Periodenbeginn</div>
+          <div style="font-size:22px;"><b>{period_start_hhmm}</b></div>
+        </div>
+        <div style="flex:1;min-width:160px;">
+          <div class="small">Saldo zum Periodenende</div>
+          <div style="font-size:22px;"><b>{period_end_hhmm}</b></div>
         </div>
       </div>
 
       <hr>
 
-      <form method=\"get\" style=\"display:flex;gap:10px;align-items:end;flex-wrap:wrap;\">
-        {FORM_ASSETS_JS}
-        <input type="hidden" name="only" value="{only}">
-        <div><label>Von</label><br>{_date_input("from", q_from)}</div>
-        <div><label>Bis</label><br>{_date_input("to", q_to)}</div>
-        <div class="small" style="min-width:240px;">
-            <label>
-                <input type="checkbox"
-                       onchange="this.form.only.value = this.checked ? '1' : ''"
-                       {('checked' if only=='1' else '')}>
-                nur Tage mit Einträgen
-            </label>
+      <form method="post" action="/balance/start" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+        <div>
+          <label>Jahresstart-Saldo {sel_year}</label><br>
+          <input name="start_balance" placeholder="+00:00 / -01:30" value="{start_hhmm}" style="min-width:160px;" required>
+          <div class="small">Format: +HH:MM oder -HH:MM</div>
         </div>
-        <div><button class=\"btn\" type=\"submit\">Anzeigen</button></div>
+        <input type="hidden" name="y" value="{sel_year}">
+        <input type="hidden" name="m" value="{sel_month}">
+        <div><button class="btn" type="submit">Speichern</button></div>
       </form>
 
       <hr>
 
-      <form method=\"post\" action=\"/balance/start\" style=\"display:flex;gap:10px;align-items:end;flex-wrap:wrap;\">
-        <div>
-          <label>Startsaldo setzen</label><br>
-          <input name=\"start_balance\" placeholder=\"+00:00 / -01:30\" value=\"{start_hhmm}\" style=\"min-width:160px;\" required>
-          <div class=\"small\">Format: +HH:MM oder -HH:MM</div>
-        </div>
-        <div>
-          <button class=\"btn\" type=\"submit\">Speichern</button>
-        </div>
-      </form>
-
-      <hr>
-
-      <p class=\"small\">Tageslogik: <b>Delta = Ist - Soll</b>. Wochenenden/Feiertage/Abwesenheiten zählen als Soll=0 (gemäß Arbeitsplan).</p>
+      <p class="small">Delta = Ist − Soll. Wochenenden, Feiertage und Abwesenheitstage zählen als Soll = 0.</p>
       <table>
         <thead>
           <tr>
             <th>Tag</th>
-            <th style=\"text-align:right;\">Soll</th>
-            <th style=\"text-align:right;\">Ist</th>
-            <th style=\"text-align:right;\">Delta</th>
-            <th style=\"text-align:right;\">Saldo</th>
+            <th style="text-align:right;">Soll</th>
+            <th style="text-align:right;">Ist</th>
+            <th style="text-align:right;">Delta</th>
+            <th style="text-align:right;">Saldo</th>
           </tr>
         </thead>
         <tbody>{trs}</tbody>
       </table>
-      {("<p class='small'><i>Keine Tage im Zeitraum.</i></p>" if not rows else "")}
-      {("<p class='small'><i>Es werden nur die letzten 31 Tage angezeigt (bei größeren Zeiträumen).</i></p>" if len(rows) > 31 else "")}
+      {("<p class='small'><i>Keine Tage im Zeitraum.</i></p>" if not display_rows else "")}
     </div>
     """
-
     return render_template_string(layout("Gleitzeitkonto", body, u, APP_VERSION))
 
 
@@ -1569,26 +1604,28 @@ def balance_set_expected_override():
 
     day = (request.form.get("day") or "").strip()
     val = (request.form.get("expected") or "").strip()
+    y   = (request.form.get("y") or "").strip()
+    m   = (request.form.get("m") or "").strip()
+    back = f"/balance?y={y}&m={m}" if y and m else "/balance"
 
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         add_flash("Ungültiges Datum.", "error")
-        return redirect("/balance")
+        return redirect(back)
 
-    # empty => delete override
     if not val:
         _set_expected_override_minutes(u["id"], day, None)
         add_flash("Soll-Override entfernt.", "success")
-        return redirect("/balance")
+        return redirect(back)
 
     try:
         mins = _minutes_from_hhmm(val)
     except Exception:
         add_flash("Soll bitte als HH:MM angeben (z.B. 08:00).", "error")
-        return redirect("/balance")
+        return redirect(back)
 
     _set_expected_override_minutes(u["id"], day, int(mins))
     add_flash("Soll gespeichert.", "success")
-    return redirect("/balance")
+    return redirect(back)
 
 
 @app.post("/balance/start")
@@ -1598,15 +1635,19 @@ def balance_set_start():
     u = current_user()
 
     start_balance_raw = (request.form.get("start_balance") or "").strip()
+    y = (request.form.get("y") or "").strip()
+    m = (request.form.get("m") or "").strip()
+    back = f"/balance?y={y}&m={m}" if y and m else "/balance"
+
     try:
         mins = _parse_signed_hhmm_to_minutes(start_balance_raw)
     except Exception:
         add_flash("Ungültiges Format. Bitte +HH:MM oder -HH:MM verwenden.", "error")
-        return redirect("/balance")
+        return redirect(back)
 
     _set_start_balance_minutes(u["id"], mins)
     add_flash("Startsaldo gespeichert.", "success")
-    return redirect("/balance")
+    return redirect(back)
 
 def _month_start_end(year: int, month: int):
     first = datetime.date(year, month, 1)
@@ -1749,6 +1790,9 @@ def _has_overlap(conn, user_id: int, date_from: str, date_to: str, exclude_id=No
 
 
 FIXED_REMARKS = ["Flextag", "Verdi"]
+
+MONTH_NAMES_DE = ["", "Januar", "Februar", "März", "April", "Mai", "Juni",
+                  "Juli", "August", "September", "Oktober", "November", "Dezember"]
 
 _REMARK_JS = """
 function syncRemarkNew(rowId, inpId, sel) {
