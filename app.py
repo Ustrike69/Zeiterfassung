@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v2.18.0"
+APP_VERSION = "v2.19.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1829,18 +1829,25 @@ def absences_list():
     absences = db.execute(rows_sql, params).fetchall()
     db.close()
 
+    def _fmt_iso(iso_val) -> str:
+        try:
+            d = datetime.date.fromisoformat(str(iso_val)[:10])
+            return d.strftime("%d.%m.%Y")
+        except Exception:
+            return str(iso_val)
+
     trs = ""
     for a in absences:
         color = a["type_color"] or "#999"
         scope = "1/2" if a["is_half_day"] else "ganztägig"
-        comment = (a["comment"] or "")
+        bemerkung = (a["comment"] or "") if a["type_name"] == "Sonstige" else ""
         trs += f"""
         <tr>
           <td><span style='display:inline-block;width:10px;height:10px;background:{color};border-radius:2px;margin-right:6px;'></span>{a["type_name"]}</td>
-          <td>{a["date_from"]}</td>
-          <td>{a["date_to"]}</td>
+          <td>{_fmt_iso(a["date_from"])}</td>
+          <td>{_fmt_iso(a["date_to"])}</td>
           <td>{scope}</td>
-          <td>{comment}</td>
+          <td>{bemerkung}</td>
           <td style="white-space:nowrap;">
             <a href="/absences/{a["id"]}/edit">Bearbeiten</a>
             &nbsp;|&nbsp;
@@ -1865,7 +1872,7 @@ def absences_list():
       </form>
       <hr>
       <table>
-        <thead><tr><th>Typ</th><th>Von</th><th>Bis</th><th>Umfang</th><th>Kommentar</th><th></th></tr></thead>
+        <thead><tr><th>Typ</th><th>Von</th><th>Bis</th><th>Umfang</th><th>Bemerkung</th><th></th></tr></thead>
         <tbody>{trs}</tbody>
       </table>
       {("<p class='small'><i>Keine Einträge.</i></p>" if not absences else "")}
@@ -1897,7 +1904,6 @@ def absences_new():
 {_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  document.getElementById('comment_plain_row').style.display = isSonstige ? 'none' : '';
   document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
   if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
@@ -1913,7 +1919,6 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div id="comment_plain_row"><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment"></div>
         <div id="remark_row" style="display:none;">{remark_html}</div><br>
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/absences">Abbrechen</a>
@@ -1996,7 +2001,6 @@ def absences_edit(absence_id: int):
     checked = "checked" if row["is_half_day"] else ""
     comment = row["comment"] or ""
     remark_html = _remark_select_html(user_remarks, selected=comment if is_sonstige_now else "")
-    plain_display = "none" if is_sonstige_now else ""
     remark_display = "" if is_sonstige_now else "none"
 
     body = f"""
@@ -2006,7 +2010,6 @@ def absences_edit(absence_id: int):
 {_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  document.getElementById('comment_plain_row').style.display = isSonstige ? 'none' : '';
   document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
   if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
@@ -2022,7 +2025,6 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", str(row["date_to"]), required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div id="comment_plain_row" style="display:{plain_display};"><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment" value="{comment if not is_sonstige_now else ''}"></div>
         <div id="remark_row" style="display:{remark_display};">{remark_html}</div><br>
         <button class="btn" type="submit">Aktualisieren</button>
         <a class="btn" href="/absences">Abbrechen</a>
@@ -2579,7 +2581,6 @@ def day_detail(day: str):
 {_REMARK_JS}
 function syncDayBemerkung(sel) {{
   var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
-  document.getElementById('d_comment_plain_row').style.display = isSonstige ? 'none' : '';
   document.getElementById('d_remark_row').style.display = isSonstige ? '' : 'none';
   if (isSonstige) syncRemarkNew('d_remark_new_row','d_remark_new_inp',document.getElementById('d_remark_sel'));
 }}
@@ -2589,10 +2590,7 @@ function syncDayBemerkung(sel) {{
           <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
           <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
         </div>
-        <div style="margin-top:8px;">
-          <div id="d_comment_plain_row"><label>Kommentar (optional)</label><br><input name="comment" style="width:100%;"></div>
-          <div id="d_remark_row" style="display:none;">{abs_remark_html}</div>
-        </div>
+        <div id="d_remark_row" style="display:none;margin-top:8px;">{abs_remark_html}</div>
         <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
       </form>
       <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
