@@ -165,6 +165,21 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_absences_user_from_to ON absences(user_id, date_from, date_to)")
 
+    # Rename legacy 'Sonstiges' → 'Sonstige'
+    db.execute("UPDATE absence_types SET name='Sonstige', updated_at=datetime('now') WHERE name='Sonstiges'")
+
+    # Ensure only the three fixed types exist; remap absences of other types to Sonstige then delete
+    sonstige_row = db.execute("SELECT id FROM absence_types WHERE name='Sonstige'").fetchone()
+    if sonstige_row:
+        sonstige_id = sonstige_row["id"]
+        others = db.execute(
+            "SELECT id FROM absence_types WHERE name NOT IN ('Urlaub','Krank','Sonstige')"
+        ).fetchall()
+        for o in others:
+            db.execute("UPDATE absences SET type_id=? WHERE type_id=?", (sonstige_id, o["id"]))
+        if others:
+            db.execute("DELETE FROM absence_types WHERE name NOT IN ('Urlaub','Krank','Sonstige')")
+
     db.execute("""
     CREATE TABLE IF NOT EXISTS business_trips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +233,7 @@ def seed_defaults():
     absence_defaults = [
         ('Urlaub', '#198754', 1),
         ('Krank', '#dc3545', 1),
-        ('Sonstiges', '#6c757d', 1),
+        ('Sonstige', '#6c757d', 1),
     ]
     for name, color, active in absence_defaults:
         db.execute(

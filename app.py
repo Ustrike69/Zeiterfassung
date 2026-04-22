@@ -1831,27 +1831,38 @@ def absences_new():
     db.close()
 
     options = "".join([f'<option value="{t["id"]}">{t["name"]}</option>' for t in types])
+    sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
-
+<script>
+function syncBemerkung(sel, sonstigeId) {{
+  var isSonstige = String(sel.value) === String(sonstigeId);
+  var lbl = document.getElementById('comment_lbl');
+  var inp = document.getElementById('comment_inp');
+  if (!lbl || !inp) return;
+  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
+  inp.required = isSonstige;
+}}
+</script>
     <div class="card">
       <h3>Abwesenheit anlegen</h3>
       <form method="post" action="/absences/new">
         <div><label>Typ</label><br>
-          <select name="type_id" required>{options}</select>
+          <select name="type_id" id="absence_type_sel" required onchange="syncBemerkung(this,{sonstige_id})">{options}</select>
         </div><br>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <div><label>Von</label><br>{_date_input("date_from", required=True, min_target="date_to")}</div>
           <div><label>Bis</label><br>{_date_input("date_to", required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment"></div><br>
+        <div><label id="comment_lbl">Kommentar (optional)</label><br><input id="comment_inp" style="width:100%;" name="comment"></div><br>
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
     </div>
+<script>syncBemerkung(document.getElementById('absence_type_sel'),{sonstige_id});</script>
     """
     return render_template_string(layout("Abwesenheit", body, u, APP_VERSION))
 
@@ -1871,6 +1882,15 @@ def absences_new_post():
     if err:
         add_flash(err, "error")
         return redirect(url_for("absences_new"))
+
+    # Sonstige requires a comment (server-side guard)
+    if not comment:
+        db_chk = connect()
+        type_row = db_chk.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
+        db_chk.close()
+        if type_row and type_row["name"] == "Sonstige":
+            add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+            return redirect(url_for("absences_new"))
 
     db = connect()
     if _has_overlap(db, u["id"], date_from, date_to):
@@ -1910,25 +1930,39 @@ def absences_edit(absence_id: int):
         sel = "selected" if t["id"] == row["type_id"] else ""
         options += f'<option value="{t["id"]}" {sel}>{t["name"]}</option>'
 
+    sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
+    current_type_name = next((t["name"] for t in types if t["id"] == row["type_id"]), "")
+    is_sonstige_now = current_type_name == "Sonstige"
+    comment_lbl_html = 'Bemerkung <span style="color:var(--danger);">*</span>' if is_sonstige_now else "Kommentar (optional)"
+    comment_required = "required" if is_sonstige_now else ""
     checked = "checked" if row["is_half_day"] else ""
     comment = row["comment"] or ""
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
-
+<script>
+function syncBemerkung(sel, sonstigeId) {{
+  var isSonstige = String(sel.value) === String(sonstigeId);
+  var lbl = document.getElementById('comment_lbl');
+  var inp = document.getElementById('comment_inp');
+  if (!lbl || !inp) return;
+  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
+  inp.required = isSonstige;
+}}
+</script>
     <div class="card">
       <h3>Abwesenheit bearbeiten</h3>
       <form method="post" action="/absences/{absence_id}/edit">
         <div><label>Typ</label><br>
-          <select name="type_id" required>{options}</select>
+          <select name="type_id" id="absence_type_sel" required onchange="syncBemerkung(this,{sonstige_id})">{options}</select>
         </div><br>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <div><label>Von</label><br>{_date_input("date_from", str(row["date_from"]), required=True, min_target="date_to")}</div>
           <div><label>Bis</label><br>{_date_input("date_to", str(row["date_to"]), required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment" value="{comment}"></div><br>
+        <div><label id="comment_lbl">{comment_lbl_html}</label><br><input id="comment_inp" style="width:100%;" name="comment" value="{comment}" {comment_required}></div><br>
         <button class="btn" type="submit">Aktualisieren</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
@@ -1953,6 +1987,15 @@ def absences_edit_post(absence_id: int):
     if err:
         add_flash(err, "error")
         return redirect(f"/absences/{absence_id}/edit")
+
+    # Sonstige requires a comment (server-side guard)
+    if not comment:
+        db_chk = connect()
+        type_row = db_chk.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
+        db_chk.close()
+        if type_row and type_row["name"] == "Sonstige":
+            add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+            return redirect(f"/absences/{absence_id}/edit")
 
     db = connect()
     row = db.execute(
@@ -2128,7 +2171,7 @@ def calendar_view():
     # Abwesenheiten (mehrtägig möglich)
     abs_rows = db.execute(
         """
-        SELECT a.date_from, a.date_to, a.is_half_day, t.name AS type_name, t.color AS type_color
+        SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name, t.color AS type_color
         FROM absences a
         JOIN absence_types t ON t.id = a.type_id
         WHERE a.user_id = ?
@@ -2221,6 +2264,8 @@ def calendar_view():
         while cur <= d1:
             iso = cur.isoformat()
             txt = a["type_name"]
+            if a["type_name"] == "Sonstige" and a["comment"]:
+                txt += f": {a['comment']}"
             if a["is_half_day"] and a["date_from"] == a["date_to"]:
                 txt += " (1/2)"
             day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
@@ -2365,6 +2410,7 @@ def day_detail(day: str):
     ).fetchone()
 
     abs_types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
+    abs_sonstige_id = next((t["id"] for t in abs_types if t["name"] == "Sonstige"), 0)
     trip = db.execute(
         "SELECT * FROM business_trips WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL) ORDER BY id DESC LIMIT 1",
         (u["id"], day, day),
@@ -2414,6 +2460,7 @@ def day_detail(day: str):
         """
 
     abs_opts = "".join([f"<option value='{t['id']}'>{t['name']}</option>" for t in abs_types])
+    abs_sonstige_id_js = abs_sonstige_id
 
     body = f"""
     {flash_html()}
@@ -2469,16 +2516,27 @@ def day_detail(day: str):
 
     <div class="card" style="margin-top:10px;">
       <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
+<script>
+function syncDayBemerkung(sel) {{
+  var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
+  var lbl = document.getElementById('day_comment_lbl');
+  var inp = document.getElementById('day_comment_inp');
+  if (!lbl || !inp) return;
+  lbl.innerHTML = isSonstige ? 'Bemerkung <span style="color:var(--danger);">*</span>' : 'Kommentar (optional)';
+  inp.required = isSonstige;
+}}
+</script>
       <form method="post" action="/day/{day}/absence/add">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
-          <div><label>Typ</label><br><select name="type_id" required>{abs_opts}</select></div>
+          <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
           <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
         </div>
-        <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
+        <div style="margin-top:8px;"><label id="day_comment_lbl">Kommentar (optional)</label><br><input id="day_comment_inp" name="comment" placeholder="" style="width:100%;"></div>
         <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
       </form>
       <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
     </div>
+<script>syncDayBemerkung(document.getElementById('day_type_sel'));</script>
 
     <h3 style="margin-top:14px;">Vorhandene Zeitblöcke</h3>
     {blocks_html or "<div class='small' style='color:#777;'>Keine Zeitblöcke erfasst.</div>"}
@@ -2859,6 +2917,13 @@ def day_absence_add(day: str):
     comment = (request.form.get("comment") or "").strip()
 
     db = connect()
+    # Sonstige requires a comment
+    type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
+    if type_row and type_row["name"] == "Sonstige" and not comment:
+        db.close()
+        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        return redirect(f"/day/{day}")
+
     overlap = db.execute(
         """
         SELECT 1 FROM absences
@@ -3817,154 +3882,6 @@ def export_users_csv():
         ["id", "username", "is_admin", "is_active", "created_at", "updated_at"],
         data,
     )
-
-
-# -------------------------
-# Admin: Abwesenheitsarten
-# -------------------------
-
-@app.get("/admin/absence-types")
-@admin_required
-def admin_absence_types():
-    bootstrap()
-    u = current_user()
-    db = connect()
-    rows = db.execute("SELECT id, name, color, active FROM absence_types ORDER BY name").fetchall()
-    db.close()
-
-    trs = ""
-    for r in rows:
-        active = "ja" if r["active"] else "nein"
-        col = r["color"] or "#999"
-        trs += f"<tr><td><span style='display:inline-block;width:10px;height:10px;background:{col};border-radius:2px;margin-right:6px;'></span>{r['name']}</td><td>{col}</td><td>{active}</td><td><a href='/admin/absence-types/{r['id']}/edit'>Bearbeiten</a></td></tr>"
-
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Abwesenheitsarten</h3>
-        <a class="btn" href="/admin/absence-types/new">+ Neu</a>
-      </div>
-      <table>
-        <thead><tr><th>Name</th><th>Farbe</th><th>Aktiv</th><th></th></tr></thead>
-        <tbody>{trs}</tbody>
-      </table>
-    </div>
-    """
-    return render_template_string(layout("Admin: Abwesenheitsarten", body, u, APP_VERSION))
-
-
-@app.get("/admin/absence-types/new")
-@admin_required
-def admin_absence_types_new():
-    bootstrap()
-    u = current_user()
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <h3>Abwesenheitsart anlegen</h3>
-      <form method="post" action="/admin/absence-types/new">
-        <div><label>Name</label><br><input name="name" required></div><br>
-        <div><label>Farbe (optional)</label><br><input name="color" placeholder="#4CAF50"></div><br>
-        <label><input type="checkbox" name="active" value="1" checked> aktiv</label><br><br>
-        <button class="btn" type="submit">Anlegen</button>
-        <a class="btn" href="/admin/absence-types">Abbrechen</a>
-      </form>
-    </div>
-    """
-    return render_template_string(layout("Admin: Abwesenheitsart", body, u, APP_VERSION))
-
-
-@app.post("/admin/absence-types/new")
-@admin_required
-def admin_absence_types_new_post():
-    bootstrap()
-    name = (request.form.get("name") or "").strip()
-    color = (request.form.get("color") or "").strip() or None
-    active = 1 if (request.form.get("active") == "1") else 0
-    if not name:
-        add_flash("Name fehlt.", "error")
-        return redirect("/admin/absence-types/new")
-
-    db = connect()
-    try:
-        db.execute("INSERT INTO absence_types(name,color,active) VALUES(?,?,?)", (name, color, active))
-        db.commit()
-    except Exception:
-        db.close()
-        add_flash("Konnte nicht anlegen (Name evtl. schon vorhanden).", "error")
-        return redirect("/admin/absence-types/new")
-    db.close()
-    add_flash("Abwesenheitsart angelegt.", "success")
-    return redirect("/admin/absence-types")
-
-
-@app.get("/admin/absence-types/<int:type_id>/edit")
-@admin_required
-def admin_absence_types_edit(type_id: int):
-    bootstrap()
-    u = current_user()
-    db = connect()
-    r = db.execute("SELECT id, name, color, active FROM absence_types WHERE id=?", (type_id,)).fetchone()
-    db.close()
-    if not r:
-        abort(404)
-
-    checked = "checked" if r["active"] else ""
-    body = f"""
-    {flash_html()}
-    <div class="card">
-      <h3>Abwesenheitsart bearbeiten</h3>
-      <form method="post" action="/admin/absence-types/{type_id}/edit">
-        <div><label>Name</label><br><input name="name" value="{r['name']}" required></div><br>
-        <div><label>Farbe (optional)</label><br><input name="color" value="{r['color'] or ''}"></div><br>
-        <label><input type="checkbox" name="active" value="1" {checked}> aktiv</label><br><br>
-
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <button class="btn" type="submit">Speichern</button>
-          <a class="btn" href="/admin/absence-types">Zurück</a>
-        </div>
-      </form>
-
-      <form method="post" action="/admin/absence-types/{type_id}/delete" onsubmit="return confirm('Wirklich löschen? (Nur möglich, wenn keine Abwesenheiten diesen Typ nutzen)');" style="margin-top:10px;">
-        <button class="btn danger" type="submit">Löschen</button>
-      </form>
-    </div>
-    """
-    return render_template_string(layout("Admin: Abwesenheitsart", body, u, APP_VERSION))
-
-
-@app.post("/admin/absence-types/<int:type_id>/edit")
-@admin_required
-def admin_absence_types_edit_post(type_id: int):
-    bootstrap()
-    name = (request.form.get("name") or "").strip()
-    color = (request.form.get("color") or "").strip() or None
-    active = 1 if (request.form.get("active") == "1") else 0
-    db = connect()
-    db.execute("UPDATE absence_types SET name=?, color=?, active=? WHERE id=?", (name, color, active, type_id))
-    db.commit()
-    db.close()
-    add_flash("Gespeichert.", "success")
-    return redirect("/admin/absence-types")
-
-
-@app.post("/admin/absence-types/<int:type_id>/delete")
-@admin_required
-def admin_absence_types_delete(type_id: int):
-    bootstrap()
-    db = connect()
-    try:
-        db.execute("DELETE FROM absence_types WHERE id=?", (type_id,))
-        db.commit()
-    except Exception:
-        db.close()
-        add_flash("Löschen nicht möglich (Typ wird verwendet).", "error")
-        return redirect(f"/admin/absence-types/{type_id}/edit")
-    db.close()
-    add_flash("Gelöscht.", "success")
-    return redirect("/admin/absence-types")
-
 
 # -------------------------
 # Admin: Benutzer
