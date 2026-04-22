@@ -165,6 +165,26 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_absences_user_from_to ON absences(user_id, date_from, date_to)")
 
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS business_trips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT,
+        destination TEXT NOT NULL,
+        departure_time TEXT,
+        departure_end_time TEXT,
+        return_time TEXT,
+        return_end_time TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT,
+        UNIQUE(user_id, start_date),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_business_trips_user_date ON business_trips(user_id, start_date)")
+
 
 
 

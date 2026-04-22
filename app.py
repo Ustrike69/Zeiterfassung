@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v2.17.7"
+APP_VERSION = "v2.18.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -20,47 +20,13 @@ app.secret_key = "change-me"  # set via env in production
 
 MOBILE_ASSETS = """
 <style>
-  /* Make mobile browsers (iOS) not zoom on focus: keep inputs >= 16px */
-  input, select, textarea, button { font-size: 16px; }
-
-  /* Better tap targets */
-  .btn { padding: 10px 14px; border-radius: 10px; }
-  .btn.danger { padding: 10px 14px; }
-
-  /* Cards breathe more nicely on phones */
-  .card { margin: 10px 0; }
-
-  /* Forms: stack nicely */
-  label { font-weight: 600; }
-  input[type="text"], input[type="password"], input[type="date"], input[type="time"],
-  input[type="number"], select, textarea {
-    width: 100%;
-    max-width: 100%;
-    box-sizing: border-box;
-    padding: 10px 12px;
-    border-radius: 10px;
-  }
-
-  /* Tables: allow horizontal scroll instead of breaking layout */
-  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  table { width: 100%; }
-
-  /* Calendar day cells: reduce min width on small screens */
+  /* Calendar day cells on small screens */
   @media (max-width: 520px){
-    td.daycell{ min-width: 110px !important; }
+    td.daycell{ min-width: 110px !important; padding-top: 50px !important; }
     td.daycell .addbtn{ right:4px; top:26px; }
-    td.daycell{ padding-top: 50px !important; }
-  }
-
-  /* Reduce excessive gaps on tiny screens */
-  @media (max-width: 520px){
-    .small{ font-size: 13px; }
-    h3{ font-size: 18px; }
   }
 </style>
-
 <script>
-  // Wrap all tables into a horizontal scroll container (mobile-friendly)
   document.addEventListener('DOMContentLoaded', function(){
     try{
       document.querySelectorAll('table').forEach(function(t){
@@ -89,6 +55,7 @@ def bootstrap():
     _ensure_user_prefs_schema()
     _ensure_expected_override_schema()
     _ensure_vacation_schema()
+    _ensure_business_trips_schema()
     seed_calendar_2026_nrw()
 
 
@@ -370,6 +337,39 @@ def _ensure_vacation_schema() -> None:
     db.close()
 
 
+def _ensure_business_trips_schema() -> None:
+    db = connect()
+    # Migrate old Dienstreise absences if any
+    try:
+        dienst = db.execute(
+            "SELECT id FROM absence_types WHERE LOWER(name)='dienstreise' AND active=1 LIMIT 1"
+        ).fetchone()
+        if dienst:
+            type_id = dienst["id"]
+            rows = db.execute(
+                "SELECT user_id, date_from FROM absences WHERE type_id=?", (type_id,)
+            ).fetchall()
+            for a in rows:
+                db.execute(
+                    "INSERT OR IGNORE INTO business_trips(user_id, start_date, destination, updated_at)"
+                    " VALUES(?,?,?,datetime('now'))",
+                    (a["user_id"], str(a["date_from"])[:10], "(migriert)"),
+                )
+            db.execute("UPDATE absence_types SET active=0 WHERE id=?", (type_id,))
+    except Exception:
+        pass
+    # Column migrations: date → start_date, add end_date
+    cols = {r[1] for r in db.execute("PRAGMA table_info(business_trips)").fetchall()}
+    if "date" in cols and "start_date" not in cols:
+        db.execute("ALTER TABLE business_trips RENAME COLUMN date TO start_date")
+        cols = {r[1] for r in db.execute("PRAGMA table_info(business_trips)").fetchall()}
+    if "end_date" not in cols:
+        db.execute("ALTER TABLE business_trips ADD COLUMN end_date TEXT")
+        db.execute("UPDATE business_trips SET end_date=start_date WHERE end_date IS NULL")
+    db.commit()
+    db.close()
+
+
 def _get_vacation_year(user_id: int, year: int) -> dict:
     db = connect()
     try:
@@ -471,6 +471,87 @@ def _vacation_used_days(user_id: int, year: int, date_to_limit: str | None = Non
             cur += datetime.timedelta(days=1)
 
     return float(used)
+
+def _vacation_used_days_started_by(user_id: int, year: int, deadline_iso: str) -> float:
+    """Count workday vacation days in `year` for entries whose date_from <= deadline_iso.
+    The full duration is counted (days after the deadline are included if the entry started before it)."""
+    y0 = datetime.date(int(year), 1, 1)
+    y1 = datetime.date(int(year), 12, 31)
+    db = connect()
+    try:
+        rows = db.execute(
+            """
+            SELECT a.date_from, a.date_to, a.is_half_day
+            FROM absences a
+            JOIN absence_types t ON t.id = a.type_id
+            WHERE a.user_id = ?
+              AND LOWER(t.name) LIKE '%urlaub%'
+              AND a.date_from <= ?
+              AND NOT (a.date_to < ? OR a.date_from > ?)
+            """,
+            (int(user_id), deadline_iso, y0.isoformat(), y1.isoformat()),
+        ).fetchall()
+    finally:
+        db.close()
+    used = 0.0
+    for a in rows:
+        d0 = datetime.date.fromisoformat(str(a["date_from"]))
+        d1 = datetime.date.fromisoformat(str(a["date_to"]))
+        if d0 < y0:
+            d0 = y0
+        if d1 > y1:
+            d1 = y1
+        if int(a["is_half_day"] or 0) == 1 and d0 == d1:
+            if _is_user_workday_by_schedule(user_id, d0.isoformat()):
+                used += 0.5
+            continue
+        cur = d0
+        while cur <= d1:
+            if _is_user_workday_by_schedule(user_id, cur.isoformat()):
+                used += 1.0
+            cur += datetime.timedelta(days=1)
+    return float(used)
+
+
+def _vacation_calc(user_id: int, year: int) -> dict:
+    """Central vacation calculation. Returns all metrics needed for display and the homepage."""
+    today = datetime.date.today()
+    vac = _get_vacation_year(user_id, year)
+    entitlement = float(vac.get("entitlement_days", 0.0) or 0.0)
+    carryover = float(vac.get("carryover_days", 0.0) or 0.0)
+    deadline = datetime.date(year, 3, 31)
+    deadline_iso = deadline.isoformat()
+    deadline_passed = today > deadline
+
+    used_total = float(_vacation_used_days(user_id, year) or 0.0)
+
+    # Carryover is only "effective" to the extent vacations were started by the deadline.
+    # After the deadline, unstarted carryover is forfeited.
+    carryover_started = float(_vacation_used_days_started_by(user_id, year, deadline_iso) or 0.0)
+    if deadline_passed:
+        effective_carryover = min(carryover, carryover_started)
+    else:
+        effective_carryover = carryover
+    carryover_forfeited = max(0.0, carryover - effective_carryover)
+
+    carryover_remaining = max(0.0, effective_carryover - used_total)
+    entitlement_remaining = max(0.0, entitlement - max(0.0, used_total - effective_carryover))
+    remaining_total = max(0.0, entitlement + effective_carryover - used_total)
+
+    return {
+        "entitlement": entitlement,
+        "carryover": carryover,
+        "effective_carryover": effective_carryover,
+        "carryover_forfeited": carryover_forfeited,
+        "carryover_started": carryover_started,
+        "used_total": used_total,
+        "entitlement_remaining": entitlement_remaining,
+        "carryover_remaining": carryover_remaining,
+        "remaining_total": remaining_total,
+        "deadline": deadline_iso,
+        "deadline_passed": deadline_passed,
+    }
+
 
 def _ensure_balance_table(db: sqlite3.Connection) -> None:
     db.execute("""
@@ -935,7 +1016,14 @@ def _timepicker_datalist(id_name: str = "time_suggestions") -> str:
     return f"<datalist id='{id_name}'>" + "".join(opts) + "</datalist>"
 
 
-FORM_ASSETS_JS = """<script>
+FORM_ASSETS_JS = """<style>
+  .dt-wrap,.tm-wrap{display:inline-flex;gap:4px;align-items:center;}
+  .dt-text{width:120px !important;}
+  .dt-pick{width:38px !important;min-width:0 !important;padding:6px 2px !important;cursor:pointer;}
+  .tm-text{width:80px !important;}
+  .tm-pick{width:38px !important;min-width:0 !important;padding:6px 2px !important;cursor:pointer;}
+</style>
+<script>
   function setBreak(el, mins){
     try{
       const form = el.closest('form');
@@ -959,20 +1047,99 @@ FORM_ASSETS_JS = """<script>
       syncTimeMin(ev.target);
     }
   });
-  function syncDateMin(dfrom){
+  /* dual date inputs */
+  function dt_text(inp){
     try{
-      const form = dfrom.closest('form');
-      const dto = form.querySelector('input[name="date_to"]');
-      if(dto){
-        dto.min = dfrom.value || "";
-        if(dto.value && dfrom.value && dto.value < dfrom.value){ dto.value = dfrom.value; }
-      }
+      var m=inp.value.match(/^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})$/);
+      var p=inp.parentElement.querySelector('.dt-pick');
+      var iso='';
+      if(m){iso=m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');if(p)p.value=iso;}
+      else{if(p)p.value='';}
+      var mt=inp.getAttribute('data-min-target');
+      if(mt){var ti=document.querySelector('[name="'+mt+'"]');if(ti){var tp=ti.parentElement.querySelector('.dt-pick');if(tp)tp.min=iso;}}
+    }catch(e){}
+  }
+  function dt_pick(inp){
+    try{
+      var m=inp.value.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+      var t=inp.parentElement.querySelector('.dt-text');
+      if(!t)return;
+      var iso='';
+      if(m){iso=inp.value;t.value=m[3]+'.'+m[2]+'.'+m[1];}
+      var mt=t.getAttribute('data-min-target');
+      if(mt){var ti=document.querySelector('[name="'+mt+'"]');if(ti){var tp=ti.parentElement.querySelector('.dt-pick');if(tp)tp.min=iso;}}
+    }catch(e){}
+  }
+  /* dual time inputs */
+  function tm_text(inp){
+    try{
+      var p=inp.parentElement.querySelector('.tm-pick');
+      if(!p)return;
+      var m=inp.value.match(/^(\\d{1,2}):(\\d{2})$/);
+      if(m){p.value=m[1].padStart(2,'0')+':'+m[2];}else{p.value='';}
+    }catch(e){}
+  }
+  function tm_pick(inp){
+    try{
+      var t=inp.parentElement.querySelector('.tm-text');
+      if(t&&inp.value)t.value=inp.value;
+    }catch(e){}
+  }
+  /* multi-day toggle */
+  function toggleMultiday(cb){
+    try{
+      var wrap=cb.closest('form').querySelector('.multiday-fields');
+      if(wrap)wrap.style.display=cb.checked?'':'none';
     }catch(e){}
   }
   document.addEventListener('DOMContentLoaded', function(){
-    document.querySelectorAll('input.dfrom').forEach(function(inp){ syncDateMin(inp); });
+    document.querySelectorAll('.dt-text.dfrom').forEach(function(inp){ dt_text(inp); });
   });
 </script>"""
+
+def _parse_date_input(s: str) -> str | None:
+    """Accept TT.MM.JJJJ or YYYY-MM-DD, return YYYY-MM-DD or None."""
+    s = (s or "").strip()
+    m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', s)
+    if m:
+        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+        return s
+    return None
+
+
+def _fmt_date_de(iso: str | None, omit_year: bool = False) -> str:
+    """YYYY-MM-DD → TT.MM.JJJJ (or TT.MM. if omit_year=True)."""
+    if not iso:
+        return ""
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', str(iso))
+    if not m:
+        return str(iso)
+    return f"{m.group(3)}.{m.group(2)}." if omit_year else f"{m.group(3)}.{m.group(2)}.{m.group(1)}"
+
+
+def _date_input(name: str, value_iso: str = "", required: bool = False, min_target: str = "") -> str:
+    val_de = _fmt_date_de(value_iso) if value_iso else ""
+    req = "required" if required else ""
+    mta = f' data-min-target="{min_target}"' if min_target else ""
+    return (
+        f'<div class="dt-wrap"><input type="text" name="{name}" class="dt-text" '
+        f'value="{val_de}" placeholder="TT.MM.JJJJ" maxlength="10" {req}{mta} '
+        f'oninput="dt_text(this)">'
+        f'<input type="date" class="dt-pick" value="{value_iso}" tabindex="-1" '
+        f'onchange="dt_pick(this)"></div>'
+    )
+
+
+def _time_input(name: str, value: str = "", required: bool = False) -> str:
+    req = "required" if required else ""
+    return (
+        f'<div class="tm-wrap"><input type="text" name="{name}" class="tm-text" '
+        f'value="{value}" placeholder="HH:MM" maxlength="5" {req} oninput="tm_text(this)">'
+        f'<input type="time" class="tm-pick" value="{value}" tabindex="-1" '
+        f'onchange="tm_pick(this)"></div>'
+    )
+
 
 def flash_html():
     msgs = session.pop("_flash", [])
@@ -1069,22 +1236,77 @@ def logout():
     return redirect(url_for("login"))
 
 
+def _get_missing_entry_days(user_id: int, year: int) -> set:
+    """Return ISO dates of past workdays in `year` with no entry and not a holiday."""
+    today = datetime.date.today()
+    year_start = datetime.date(year, 1, 1).isoformat()
+    yesterday = (today - datetime.timedelta(days=1)).isoformat()
+    if yesterday < year_start:
+        return set()
+    days_with = _days_with_any_entry(user_id, year_start, yesterday)
+    db = connect()
+    try:
+        hol_days = {
+            str(r["day"])[:10]
+            for r in db.execute(
+                "SELECT day FROM calendar_days WHERE day BETWEEN ? AND ? AND is_holiday=1",
+                (year_start, yesterday),
+            ).fetchall()
+        }
+    finally:
+        db.close()
+    missing = set()
+    for iso in _iter_days(year_start, yesterday):
+        if iso in days_with or iso in hol_days:
+            continue
+        if _is_workday_for_user(iso, _get_user_schedule_for_day(user_id, iso)):
+            missing.add(iso)
+    return missing
+
+
 @app.get("/")
 @login_required
 def index():
     bootstrap()
     u = current_user()
+    today = datetime.date.today()
+
+    # Saldo
+    balance_minutes = _calc_balance_end_at(u["id"], today.isoformat())
+    balance_str = _fmt_minutes_signed(balance_minutes)
+    balance_color = "var(--ok)" if balance_minutes >= 0 else "var(--danger)"
+
+    # Resturlaub
+    year = today.year
+    vc = _vacation_calc(u["id"], year)
+    vac_hint = ""
+    if not vc["deadline_passed"] and vc["carryover"] > 0:
+        vac_hint = f" · <span style='color:var(--danger);'>Übertrag verfällt am {vc['deadline']}</span>"
+    elif vc["deadline_passed"] and vc["carryover_forfeited"] > 0:
+        vac_hint = f" · <span style='color:var(--mu);'>{vc['carryover_forfeited']:.1f} Tage Übertrag verfallen</span>"
+
+    # Fehlende Einträge
+    missing_count = len(_get_missing_entry_days(u["id"], year))
+    missing_color = "var(--danger)" if missing_count > 0 else "var(--ok)"
 
     body = f'''
     {flash_html()}
-    <div class="card">
-        <p>Zeiterfassung {APP_VERSION} – eingeloggt als <b>{u["username"]}</b>.</p>
-        <p class="small">Nutze oben das Menü für Abwesenheiten und Admin-Funktionen.</p>
-        <p>
-            <a class="btn" href="/balance">Gleitzeitkonto</a>
-            <a class="btn" href="/balance/monthly">Monatsabschluss</a>
-        </p>
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Gleitzeitkonto</div>
+      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{balance_color};line-height:1;">{balance_str}</div>
+      <div class="small" style="margin-top:6px;">Stand heute · <a href="/balance">Details</a></div>
     </div>
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Resturlaub {year}</div>
+      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;line-height:1;">{vc["remaining_total"]:.1f} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
+      <div class="small" style="margin-top:6px;">von {vc["entitlement"] + vc["effective_carryover"]:.1f} verfügbar{vac_hint} · <a href="/settings/vacation">Details</a></div>
+    </div>
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Fehlende Einträge {year}</div>
+      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1;">{missing_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
+      <div class="small" style="margin-top:6px;">vergangene Arbeitstage ohne Zeiteintrag · <a href="/calendar">Kalender</a></div>
+    </div>
+    <a class="btn primary" href="/day/{today.isoformat()}" style="width:100%;font-size:17px;padding:14px;">Zeiterfassung heute</a>
     '''
     return render_template_string(layout("Übersicht", body, u, APP_VERSION))
 
@@ -1208,8 +1430,8 @@ def balance_view():
     default_from = datetime.date(today.year, 1, 1).isoformat()
     default_to = today.isoformat()
 
-    q_from = (request.args.get("from") or default_from).strip()
-    q_to = (request.args.get("to") or default_to).strip()
+    q_from = _parse_date_input(request.args.get("from") or default_from) or default_from
+    q_to   = _parse_date_input(request.args.get("to")   or default_to)   or default_to
     only = (request.args.get("only") or "").strip()  # "1" => nur Tage mit Einträgen
 
     # validate dates
@@ -1287,9 +1509,10 @@ def balance_view():
       <hr>
 
       <form method=\"get\" style=\"display:flex;gap:10px;align-items:end;flex-wrap:wrap;\">
+        {FORM_ASSETS_JS}
         <input type="hidden" name="only" value="{only}">
-        <div><label>Von</label><br><input type=\"date\" name=\"from\" value=\"{q_from}\"></div>
-        <div><label>Bis</label><br><input type=\"date\" name=\"to\" value=\"{q_to}\"></div>
+        <div><label>Von</label><br>{_date_input("from", q_from)}</div>
+        <div><label>Bis</label><br>{_date_input("to", q_to)}</div>
         <div class="small" style="min-width:240px;">
             <label>
                 <input type="checkbox"
@@ -1582,8 +1805,9 @@ def absences_list():
         <a class="btn" href="/absences/new">+ Neu</a>
       </div>
       <form method="get" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:10px;">
-        <div><label>Von</label><br><input type="date" name="from" value="{q_from}"></div>
-        <div><label>Bis</label><br><input type="date" name="to" value="{q_to}"></div>
+        {FORM_ASSETS_JS}
+        <div><label>Von</label><br>{_date_input("from", q_from)}</div>
+        <div><label>Bis</label><br>{_date_input("to", q_to)}</div>
         <div><button class="btn" type="submit">Filtern</button> <a class="btn" href="/absences">Reset</a></div>
       </form>
       <hr>
@@ -1619,8 +1843,8 @@ def absences_new():
           <select name="type_id" required>{options}</select>
         </div><br>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>Von</label><br><input type="date" class="dfrom" name="date_from" required oninput="syncDateMin(this)"></div>
-          <div><label>Bis</label><br><input type="date" class="dto" name="date_to" required></div>
+          <div><label>Von</label><br>{_date_input("date_from", required=True, min_target="date_to")}</div>
+          <div><label>Bis</label><br>{_date_input("date_to", required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
         <div><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment"></div><br>
@@ -1638,8 +1862,8 @@ def absences_new_post():
     bootstrap()
     u = current_user()
     type_id = int(request.form.get("type_id") or 0)
-    date_from = (request.form.get("date_from") or "").strip()
-    date_to = (request.form.get("date_to") or "").strip()
+    date_from = _parse_date_input(request.form.get("date_from") or "") or ""
+    date_to = _parse_date_input(request.form.get("date_to") or "") or ""
     is_half_day = 1 if request.form.get("is_half_day") == "1" else 0
     comment = (request.form.get("comment") or "").strip()
 
@@ -1700,8 +1924,8 @@ def absences_edit(absence_id: int):
           <select name="type_id" required>{options}</select>
         </div><br>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>Von</label><br><input type="date" class="dfrom" name="date_from" value="{row["date_from"]}" required oninput="syncDateMin(this)"></div>
-          <div><label>Bis</label><br><input type="date" class="dto" name="date_to" value="{row["date_to"]}" required></div>
+          <div><label>Von</label><br>{_date_input("date_from", str(row["date_from"]), required=True, min_target="date_to")}</div>
+          <div><label>Bis</label><br>{_date_input("date_to", str(row["date_to"]), required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
         <div><label>Kommentar (optional)</label><br><input style="width:100%;" name="comment" value="{comment}"></div><br>
@@ -1720,8 +1944,8 @@ def absences_edit_post(absence_id: int):
     u = current_user()
 
     type_id = int(request.form.get("type_id") or 0)
-    date_from = (request.form.get("date_from") or "").strip()
-    date_to = (request.form.get("date_to") or "").strip()
+    date_from = _parse_date_input(request.form.get("date_from") or "") or ""
+    date_to = _parse_date_input(request.form.get("date_to") or "") or ""
     is_half_day = 1 if request.form.get("is_half_day") == "1" else 0
     comment = (request.form.get("comment") or "").strip()
 
@@ -1779,20 +2003,21 @@ def _month_range(year: int, month: int):
     last_day = calendar.monthrange(year, month)[1]
     last = datetime.date(year, month, last_day)
     return first.isoformat(), last.isoformat()
-CALENDAR_DAYMENU_ASSETS = """
+CALENDAR_DAYMENU_ASSETS = (
+"""
 <style>
   td.daycell .addbtn{
     opacity:1;
     position:absolute;
     right:6px;
-    top:30px;
+    top:6px;
     font-size:14px;
     font-weight:700;
-    color:#666;
+    color:var(--mu);
     padding:2px 6px;
     border-radius:8px;
-    background:rgba(255,255,255,.92);
-    border:1px solid #e3e3e3;
+    background:var(--sf);
+    border:1px solid var(--bd);
     z-index:60;
     text-decoration:none;
   }
@@ -1801,12 +2026,12 @@ CALENDAR_DAYMENU_ASSETS = """
     display:none;
     position:absolute;
     right:6px;
-    top:54px;
+    top:32px;
     min-width:170px;
-    background:#fff;
-    border:1px solid #ddd;
+    background:var(--sf);
+    border:1px solid var(--bd);
     border-radius:10px;
-    box-shadow:0 6px 18px rgba(0,0,0,.08);
+    box-shadow:0 6px 18px rgba(0,0,0,.18);
     padding:6px;
     z-index:70;
   }
@@ -1814,13 +2039,15 @@ CALENDAR_DAYMENU_ASSETS = """
     display:block;
     padding:6px 8px;
     border-radius:8px;
-    color:#222;
+    color:var(--tx);
     text-decoration:none;
     font-size:13px;
   }
-  td.daycell .daymenu a:hover{ background:#f2f2f2; }
+  td.daycell .daymenu a:hover{ background:var(--bd); }
 </style>
-{FORM_ASSETS_JS}
+"""
++ FORM_ASSETS_JS +
+"""
 <script>
   function _closeAllDayMenus(){
     try{
@@ -1846,6 +2073,7 @@ CALENDAR_DAYMENU_ASSETS = """
   });
 </script>
 """
+)
 
 
 
@@ -1924,6 +2152,19 @@ def calendar_view():
     except sqlite3.OperationalError:
         pres_rows = []
 
+    trip_rows = db.execute(
+        "SELECT start_date, end_date, destination FROM business_trips"
+        " WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL)",
+        (u["id"], last_iso, first_iso),
+    ).fetchall()
+    trip_map = {}
+    for r in trip_rows:
+        s = str(r["start_date"])[:10]
+        e = str(r["end_date"] or r["start_date"])[:10]
+        for _td in _iter_days(s, e):
+            if first_iso <= _td <= last_iso:
+                trip_map[_td] = r["destination"]
+
     db.close()
     # Nur Tage auswerten, die einen Eintrag haben (Zeitblöcke / Abwesenheit / Presence)
     days_with_entry = set(net_map.keys())
@@ -1964,109 +2205,13 @@ def calendar_view():
     except Exception:
         pass
 
-    # Saldo-Badge pro Tag: laufender Saldo innerhalb des Monats
-    month_days = list(_iter_days(first_iso, last_iso))
-    d0 = datetime.date.fromisoformat(first_iso) - datetime.timedelta(days=1)
-    running = int(_calc_balance_end_at(u["id"], d0.isoformat()))
-
-    saldo_badge = {}
-    for iso in month_days:
-        # Nur an Tagen mit Eintrag verändert sich der Saldo
-        if iso in days_with_entry:
-            expected = int(_expected_minutes_for_day(u["id"], iso) or 0)
-            actual = int(_actual_minutes_for_day(u["id"], iso) or 0)
-            running += int(actual - expected)
-        saldo_badge[iso] = _fmt_minutes_signed(running)
-    # Soll/Ist/Diff pro Tag im Monat + Wochensummen
-    dcur = month_first
-    if isinstance(dcur, str):
-        dcur = datetime.date.fromisoformat(dcur)
-    _ml = month_last
-    if isinstance(_ml, str):
-        _ml = datetime.date.fromisoformat(_ml)
-    month_last_d = _ml
-
-    while dcur <= month_last_d:
-        iso = dcur.isoformat()
-
-        has_entry = iso in days_with_entry
-
-        if has_entry:
-            soll = _expected_minutes_for_day(u["id"], iso)
-            net = _coerce_minutes(net_map.get(iso, 0))
-            diff = int(net) - int(soll or 0)
-        else:
-            soll = 0
-            net = 0
-            diff = 0
-
-        soll_map[iso] = int(soll or 0)
-        diff_map[iso] = int(diff)
-
-        if has_entry:
-            wk = dcur.isocalendar()
-            key = (wk[0], wk[1])
-            week_sum_map[key] = week_sum_map.get(key, 0) + int(net)
-            week_soll_map[key] = week_soll_map.get(key, 0) + int(soll or 0)
-            week_diff_map[key] = week_diff_map.get(key, 0) + int(diff)
-
-        dcur += datetime.timedelta(days=1)
-
-    # Monats-/Wochen-Summen
-    month_ist = sum(int(_coerce_minutes(v)) for v in net_map.values())
-    month_soll = sum(int(soll_map.get(d, 0) or 0) for d in days_with_entry)
-    month_diff = month_ist - month_soll
+    # Vergangene Arbeitstage ohne Eintrag (geteilt mit Startseite)
+    month_isos = set(_iter_days(first_iso, last_iso))
+    missing_days = _get_missing_entry_days(u["id"], year) & month_isos
 
 
-    # Jahr-bis-Monatsende (YTD) + Saldo
-    year_start = datetime.date(year, 1, 1)
-    ytd_end = month_last if isinstance(month_last, datetime.date) else datetime.date.fromisoformat(str(month_last))
-    ytd_first_iso = year_start.isoformat()
-    ytd_last_iso = ytd_end.isoformat()
-
-    db2 = connect()
-    rows_ytd = db2.execute(
-        '''
-        SELECT day, time_in, time_out, break_minutes
-        FROM time_blocks
-        WHERE user_id=? AND day BETWEEN ? AND ?
-        ''',
-        (u["id"], ytd_first_iso, ytd_last_iso),
-    ).fetchall()
-    db2.close()
-
-    ytd_net_map = {}
-    for r in rows_ytd:
-        d = r["day"]
-        mins = _minutes_from_hhmm(r["time_out"]) - _minutes_from_hhmm(r["time_in"]) - int(r["break_minutes"] or 0)
-        ytd_net_map[d] = int(ytd_net_map.get(d, 0)) + int(mins)
-
-    year_ist = sum(int(_coerce_minutes(v)) for v in ytd_net_map.values())
-
-    # Soll YTD: nur Tage, die tatsächlich gepflegt sind (Eintrag vorhanden)
-    entry_days_ytd = _days_with_any_entry(u["id"], year_start.isoformat(), ytd_end.isoformat())
-    year_soll = sum(int(_expected_minutes_for_day(u["id"], d) or 0) for d in entry_days_ytd)
-
-    year_diff = year_ist - year_soll
-    start_balance_minutes = _get_start_balance_minutes(u["id"])
-    saldo_prev = start_balance_minutes + (year_diff - month_diff)
-    saldo_bis = start_balance_minutes + year_diff
-    today = datetime.date.today()
-    cur_key = (today.isocalendar()[0], today.isocalendar()[1])
-    week_ist = int(week_sum_map.get(cur_key, 0) or 0)
-    week_soll = int(week_soll_map.get(cur_key, 0) or 0)
-    week_diff = week_ist - week_soll
-
-
-    # map: day -> list of badges (keys normalized to YYYY-MM-DD)
-    day_badges = {}  # iso -> list of (text, color, style)
-    # Presence badges (neutral style)
-    for r in pres_rows:
-        iso = str(r["day"]).strip()[:10]
-        txt = r["key_name"]
-        if r["comment"]:
-            txt += f" – {r['comment']}"
-        day_badges.setdefault(iso, []).append((txt, "#666", "presence"))
+    # map: day -> list of absence badges (keys normalized to YYYY-MM-DD)
+    day_badges = {}  # iso -> list of (text, color)
 
     # Absence badges
     for a in abs_rows:
@@ -2078,7 +2223,7 @@ def calendar_view():
             txt = a["type_name"]
             if a["is_half_day"] and a["date_from"] == a["date_to"]:
                 txt += " (1/2)"
-            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999", "absence"))
+            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
             cur += datetime.timedelta(days=1)
 
     cal = calendar.Calendar(firstweekday=0)  # Monday
@@ -2086,15 +2231,10 @@ def calendar_view():
 
     def badge_html(items):
         out = ""
-        # sort presence first, then absences for readability
-        items_sorted = sorted(items, key=lambda x: 0 if x[2] == "presence" else 1)
-        for txt, col, kind in items_sorted[:4]:
-            if kind == "presence":
-                out += f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;border:1px dashed #ddd;background:#fafafa;'><span style='display:inline-block;width:8px;height:8px;background:{col};border-radius:2px;margin-right:6px;'></span>{txt}</div>"
-            else:
-                out += f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;border:1px solid #eee;background:#fafafa;'><span style='display:inline-block;width:8px;height:8px;background:{col};border-radius:2px;margin-right:6px;'></span>{txt}</div>"
-        if len(items_sorted) > 4:
-            out += f"<div class='small' style='margin-top:4px;color:#777;'>+{len(items_sorted)-4} mehr…</div>"
+        for txt, col in items[:4]:
+            out += f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:12px;'><span style='display:inline-block;width:8px;height:8px;background:{col};border-radius:2px;margin-right:5px;vertical-align:middle;'></span>{txt}</div>"
+        if len(items) > 4:
+            out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
         return out
 
     _weekday_abbr = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -2111,22 +2251,17 @@ def calendar_view():
 
         hol_txt = ""
         if holiday and holiday["is_holiday"]:
-            hol_txt = f"<div class='small' style='margin-top:4px;color:#b00020;'><b>{holiday['holiday_name']}</b></div>"
+            hol_txt = f"<div style='margin-top:4px;font-size:12px;font-weight:700;color:var(--danger);'>{holiday['holiday_name']}</div>"
 
-        net = net_map.get(iso) if 'net_map' in locals() else None
-        net_html = f"<div class='small' style='position:absolute;right:6px;bottom:6px;color:#555;'><b>{net}</b></div>" if net else ""
-        saldo = saldo_badge.get(iso, "")
-        saldo_html = (
-            f"<span style='position:absolute;right:6px;top:6px;"
-            f"font-size:11px;padding:2px 6px;border:1px solid #ccc;"
-            f"border-radius:10px;color:#333;background:#fff;' title='Saldo'>{saldo}</span>"
-            if saldo else ""
-        )
-        # Add extra top padding to avoid overlap with saldo badge; title shows weekday+date so user can verify which day they click
+        net = net_map.get(iso)
+        net_html = f"<div style='position:absolute;right:6px;bottom:6px;color:var(--mu);font-size:11px;font-weight:600;'>{net}</div>" if net else ""
+        missing_mark = "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>" if iso in missing_days else ""
+        trip_dest = trip_map.get(iso)
+        trip_html = f"<div style='margin-top:4px;font-size:12px;color:var(--ac);'>✈ {trip_dest}</div>" if trip_dest else ""
         return (
-            f"<td class='daycell' style='min-width:130px;vertical-align:top;position:relative;padding-top:54px;' title='{day_title}'>"
-            f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'><b>{wd_abbr} {daynum}</b></div>"
-            f"{saldo_html}{hol_txt}{badge_html(badges)}{net_html}"
+            f"<td class='daycell' style='min-width:130px;vertical-align:top;position:relative;padding-top:28px;' title='{day_title}'>"
+            f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'><b style='color:var(--tx);'>{wd_abbr} {daynum}</b></div>"
+            f"{hol_txt}{trip_html}{badge_html(badges)}{net_html}{missing_mark}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">⋯</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
@@ -2135,20 +2270,10 @@ def calendar_view():
             f"</td>"
         )
 
-    head = "<tr>" + "".join([f"<th>{d}</th>" for d in ["Mo","Di","Mi","Do","Fr","Sa","So"]]) + "<th>Woche</th></tr>"
+    head = "<tr>" + "".join([f"<th>{d}</th>" for d in ["Mo","Di","Mi","Do","Fr","Sa","So"]]) + "</tr>"
     body_rows = ""
     for w in weeks:
-        week_total = 0
-        for daynum in w:
-            if not daynum:
-                continue
-            iso_w = datetime.date(year, month, daynum).isoformat()
-            hhmm = net_map.get(iso_w)
-            if hhmm:
-                h, mi = [int(x) for x in hhmm.split(":")]
-                week_total += h * 60 + mi
-        week_sum_cell = f"<td style='min-width:120px;vertical-align:top;position:relative;background:#fafafa;'><div class='small' style='position:absolute;right:6px;bottom:6px;color:#555;'><b>Σ {_fmt_minutes(week_total)}</b></div></td>"
-        body_rows += "<tr>" + "".join([day_cell(d) for d in w]) + week_sum_cell + "</tr>"
+        body_rows += "<tr>" + "".join([day_cell(d) for d in w]) + "</tr>"
 
     # prev/next
     prev_month = month - 1
@@ -2166,27 +2291,9 @@ def calendar_view():
     {flash_html()}
     {CALENDAR_DAYMENU_ASSETS}
 
-    <div class="card" style="margin:12px 0;">
-      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">
-        <div><b>Monat Soll:</b> {_fmt_minutes(month_soll)}</div>
-        <div><b>Monat Ist:</b> {_fmt_minutes(month_ist)}</div>
-        <div><b>Monat Δ:</b> <span style="font-weight:800;color:{'#0a7' if month_diff>0 else ('#c33' if month_diff<0 else '#666')};">{'+' if month_diff>0 else ('-' if month_diff<0 else '±')}{_fmt_minutes(abs(month_diff))}</span></div>
-        <div style="opacity:.6;">|</div>
-        <div><b>KW Soll:</b> {_fmt_minutes(week_soll)}</div>
-        <div><b>KW Ist:</b> {_fmt_minutes(week_ist)}</div>
-        <div><b>KW Δ:</b> <span style="font-weight:800;color:{'#0a7' if week_diff>0 else ('#c33' if week_diff<0 else '#666')};">{'+' if week_diff>0 else ('-' if week_diff<0 else '±')}{_fmt_minutes(abs(week_diff))}</span></div>
-        <div style="opacity:.6;">|</div>
-        <div><b>YTD Soll:</b> {_fmt_minutes(year_soll)}</div>
-        <div><b>YTD Ist:</b> {_fmt_minutes(year_ist)}</div>
-        <div><b>YTD Δ:</b> <span style="font-weight:800;color:{'#0a7' if year_diff>0 else ('#c33' if year_diff<0 else '#666')}">{('+' if year_diff>0 else ('-' if year_diff<0 else '±'))}{_fmt_minutes(abs(year_diff))}</span></div>
-        <div style="opacity:.6;">|</div>
-        <div><b>Saldo vor Monat:</b> {_fmt_minutes_signed(saldo_prev)}</div>
-        <div><b>Saldo bis Monat:</b> {_fmt_minutes_signed(saldo_bis)}</div>
-      </div>
-    </div>
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Kalender (kombiniert) – {year}-{month:02d}</h3>
+        <h3 style="margin:0;">Kalender – {year}-{month:02d}</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <a class="btn" href="/calendar?y={prev_year}&m={prev_month}">◀︎</a>
           <a class="btn" href="/calendar?y={today.year}&m={today.month}">Heute</a>
@@ -2196,9 +2303,9 @@ def calendar_view():
 
       <div class="small" style="margin-top:6px;">
         <b>Legende:</b>
-        <span style="display:inline-block;margin-left:10px;padding:2px 6px;border-radius:8px;border:1px dashed #ddd;background:#fafafa;">Anwesenheit</span>
-        <span style="display:inline-block;margin-left:10px;padding:2px 6px;border-radius:8px;border:1px solid #eee;background:#fafafa;">Abwesenheit</span>
-        <span style="display:inline-block;margin-left:10px;color:#b00020;"><b>Feiertag</b></span>
+        <span style="display:inline-block;margin-left:10px;padding:2px 6px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);">Abwesenheit</span>
+        <span style="display:inline-block;margin-left:10px;font-weight:700;color:var(--danger);">Feiertag</span>
+        <span style="display:inline-block;margin-left:10px;color:var(--danger);font-weight:700;">✕</span> fehlender Eintrag
       </div>
 
       <table style="margin-top:10px;">
@@ -2258,6 +2365,10 @@ def day_detail(day: str):
     ).fetchone()
 
     abs_types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
+    trip = db.execute(
+        "SELECT * FROM business_trips WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL) ORDER BY id DESC LIMIT 1",
+        (u["id"], day, day),
+    ).fetchone()
     db.close()
 
     total = 0
@@ -2374,8 +2485,155 @@ def day_detail(day: str):
 
     <h3 style="margin-top:14px;">Vorhandene Abwesenheit</h3>
     {abs_html or "<div class='small' style='color:#777;'>Keine Abwesenheit an diesem Tag.</div>"}
+
+    {_business_trip_section(day, trip)}
     """
     return render_template_string(layout("Tages-Editor", body, u, APP_VERSION))
+
+
+def _business_trip_section(day: str, trip) -> str:
+    """Render the Dienstreise card for the day editor."""
+    t = dict(trip) if trip else {}
+    trip_id   = t.get("id") or ""
+    dest      = t.get("destination") or ""
+    dep       = t.get("departure_time") or ""
+    dep_e     = t.get("departure_end_time") or ""
+    ret       = t.get("return_time") or ""
+    ret_e     = t.get("return_end_time") or ""
+    notes     = t.get("notes") or ""
+    start_iso = str(t.get("start_date") or day)[:10]
+    end_iso   = str(t.get("end_date") or start_iso)[:10]
+    is_multi  = (start_iso != end_iso)
+    multi_checked = "checked" if is_multi else ""
+    multi_display = "" if is_multi else "none"
+
+    delete_btn = ""
+    if trip_id:
+        delete_btn = f"""
+        <form method="post" action="/day/{day}/business_trip/delete" style="display:inline;"
+              onsubmit="return confirm('Dienstreise löschen?');">
+          <input type="hidden" name="trip_id" value="{trip_id}">
+          <button class="btn danger" type="submit" style="margin-left:8px;">Löschen</button>
+        </form>"""
+
+    heading = "✈ Dienstreise bearbeiten" if trip else "✈ Dienstreise hinzufügen"
+
+    return f"""
+    <h3 style="margin-top:14px;">Dienstreise</h3>
+    <div class="card" style="margin-top:4px;">
+      <h3 style="margin-top:0;">{heading}</h3>
+      <form method="post" action="/day/{day}/business_trip/save">
+        <input type="hidden" name="trip_id" value="{trip_id}">
+        <div style="margin-bottom:8px;">
+          <label>Ort *</label><br>
+          <input name="destination" required value="{dest}" placeholder="Reiseziel" style="max-width:360px;">
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+          <div>
+            <label>Startdatum *</label><br>
+            {_date_input("start_date", start_iso, required=True)}
+          </div>
+          <div>
+            <label style="font-weight:400;"><input type="checkbox" onchange="toggleMultiday(this)" {multi_checked}> Mehrtägig</label>
+          </div>
+        </div>
+        <div class="multiday-fields" style="display:{multi_display};margin-bottom:8px;">
+          <label>Enddatum</label><br>
+          {_date_input("end_date", end_iso if is_multi else "")}
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+          <div><label>Abreise</label><br>{_time_input("departure_time", dep)}</div>
+          <div><label>Ankunft Ziel</label><br>{_time_input("departure_end_time", dep_e)}</div>
+          <div><label>Rückreise Start</label><br>{_time_input("return_time", ret)}</div>
+          <div><label>Ankunft Zuhause</label><br>{_time_input("return_end_time", ret_e)}</div>
+        </div>
+        <div style="margin-bottom:8px;">
+          <label>Notizen</label><br>
+          <textarea name="notes" rows="2" placeholder="optional">{notes}</textarea>
+        </div>
+        <button class="btn" type="submit">Dienstreise speichern</button>
+        {delete_btn}
+      </form>
+    </div>"""
+
+
+@app.post("/day/<day>/business_trip/save")
+@login_required
+def day_business_trip_save(day: str):
+    bootstrap()
+    u = current_user()
+    day = str(day).strip()[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        abort(400)
+    destination = (request.form.get("destination") or "").strip()
+    if not destination:
+        add_flash("Ort ist Pflichtfeld.", "error")
+        return redirect(f"/day/{day}")
+    start_date = _parse_date_input(request.form.get("start_date") or day)
+    if not start_date:
+        add_flash("Ungültiges Startdatum.", "error")
+        return redirect(f"/day/{day}")
+    end_date_raw = (request.form.get("end_date") or "").strip()
+    end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
+    if end_date and end_date < start_date:
+        end_date = start_date
+    departure_time     = (request.form.get("departure_time") or "").strip() or None
+    departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
+    return_time        = (request.form.get("return_time") or "").strip() or None
+    return_end_time    = (request.form.get("return_end_time") or "").strip() or None
+    notes              = (request.form.get("notes") or "").strip() or None
+    trip_id            = (request.form.get("trip_id") or "").strip() or None
+    db = connect()
+    if trip_id:
+        db.execute(
+            """UPDATE business_trips SET
+                 start_date=?, end_date=?, destination=?,
+                 departure_time=?, departure_end_time=?,
+                 return_time=?, return_end_time=?, notes=?, updated_at=datetime('now')
+               WHERE id=? AND user_id=?""",
+            (start_date, end_date, destination, departure_time, departure_end_time,
+             return_time, return_end_time, notes, int(trip_id), u["id"]),
+        )
+    else:
+        db.execute(
+            """INSERT INTO business_trips
+                   (user_id, start_date, end_date, destination, departure_time, departure_end_time,
+                    return_time, return_end_time, notes, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))
+               ON CONFLICT(user_id, start_date) DO UPDATE SET
+                 end_date=excluded.end_date,
+                 destination=excluded.destination,
+                 departure_time=excluded.departure_time,
+                 departure_end_time=excluded.departure_end_time,
+                 return_time=excluded.return_time,
+                 return_end_time=excluded.return_end_time,
+                 notes=excluded.notes,
+                 updated_at=datetime('now')""",
+            (u["id"], start_date, end_date, destination, departure_time, departure_end_time,
+             return_time, return_end_time, notes),
+        )
+    db.commit()
+    db.close()
+    add_flash("Dienstreise gespeichert.", "success")
+    return redirect(f"/day/{day}")
+
+
+@app.post("/day/<day>/business_trip/delete")
+@login_required
+def day_business_trip_delete(day: str):
+    bootstrap()
+    u = current_user()
+    day = str(day).strip()[:10]
+    trip_id = (request.form.get("trip_id") or "").strip()
+    db = connect()
+    if trip_id:
+        db.execute("DELETE FROM business_trips WHERE id=? AND user_id=?", (int(trip_id), u["id"]))
+    else:
+        db.execute("DELETE FROM business_trips WHERE user_id=? AND start_date=?", (u["id"], day))
+    db.commit()
+    db.close()
+    add_flash("Dienstreise gelöscht.", "success")
+    return redirect(f"/day/{day}")
 
 
 @app.post("/day/<day>/block/add")
@@ -2647,16 +2905,16 @@ def settings_view():
 
     # Urlaub (Inline in Einstellungen)
     vac_year = int(datetime.date.today().year)
-    vac_s = _get_vacation_year(u["id"], vac_year)
-    vac_entitlement = float(vac_s.get("entitlement_days", 0.0) or 0.0)
-    vac_carryover = float(vac_s.get("carryover_days", 0.0) or 0.0)
-    vac_deadline = datetime.date(vac_year, 3, 31).isoformat()
-    vac_used_total = float(_vacation_used_days(u["id"], vac_year) or 0.0)
-    vac_used_until_deadline = float(_vacation_used_days(u["id"], vac_year, vac_deadline) or 0.0)
-    vac_carryover_remaining = max(0.0, vac_carryover - vac_used_until_deadline)
-    vac_used_from_entitlement = max(0.0, vac_used_total - min(vac_carryover, vac_used_total))
-    vac_entitlement_remaining = max(0.0, vac_entitlement - vac_used_from_entitlement)
-    vac_remaining_total = max(0.0, (vac_entitlement + vac_carryover) - vac_used_total)
+    vc = _vacation_calc(u["id"], vac_year)
+    vac_entitlement = vc["entitlement"]
+    vac_carryover = vc["carryover"]
+    vac_deadline = vc["deadline"]
+    vac_used_total = vc["used_total"]
+    vac_carryover_remaining = vc["carryover_remaining"]
+    vac_entitlement_remaining = vc["entitlement_remaining"]
+    vac_remaining_total = vc["remaining_total"]
+    vac_carryover_forfeited = vc["carryover_forfeited"]
+    vac_deadline_passed = vc["deadline_passed"]
 
     # Build schedule list with validity dates
     sched_rows = ""
@@ -2716,7 +2974,7 @@ def settings_view():
       <h3 style="margin-top:0;">Urlaub – {vac_year}</h3>
       <p class="small">
         Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
-        Resturlaub-Regel: Übertrag ist i.d.R. bis <b>{vac_deadline}</b> zu nehmen (sonst verfällt).
+        {"<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + ".")}
       </p>
 
       <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
@@ -2726,7 +2984,7 @@ def settings_view():
           <input name="entitlement_days" type="number" step="0.5" min="0" value="{vac_entitlement}" required>
         </div>
         <div>
-          <label>Übertrag Resturlaub (Tage)</label><br>
+          <label>Übertrag Vorjahr (Tage)</label><br>
           <input name="carryover_days" type="number" step="0.5" min="0" value="{vac_carryover}" required>
         </div>
         <div>
@@ -2738,8 +2996,9 @@ def settings_view():
         <div><div class="small">Genommen (gesamt)</div><div style="font-size:22px;"><b>{vac_used_total:.1f}</b></div></div>
         <div><div class="small">Rest gesamt</div><div style="font-size:22px;"><b>{vac_remaining_total:.1f}</b></div></div>
         <div style="opacity:.6;">|</div>
-        <div><div class="small">Resturlaub (Übertrag) offen</div><div style="font-size:22px;"><b>{vac_carryover_remaining:.1f}</b></div></div>
-        <div><div class="small">Anspruch aktuelles Jahr offen</div><div style="font-size:22px;"><b>{vac_entitlement_remaining:.1f}</b></div></div>
+        <div><div class="small">Übertrag offen</div><div style="font-size:22px;"><b>{vac_carryover_remaining:.1f}</b></div></div>
+        <div><div class="small">Anspruch {vac_year} offen</div><div style="font-size:22px;"><b>{vac_entitlement_remaining:.1f}</b></div></div>
+        {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;color:var(--danger);'><b>" + f"{vac_carryover_forfeited:.1f}" + "</b></div></div>" if vac_carryover_forfeited > 0 else ""}
       </div>
     </div>
 
@@ -2770,12 +3029,12 @@ def settings_view():
       <form method="post" action="/settings/save">
         <div style="margin-bottom:10px;">
           <label><b>Gültig ab</b></label><br>
-          <input type="date" name="valid_from" required value="{sched.get('valid_from', datetime.date.today().isoformat())}">
+          {_date_input("valid_from", sched.get("valid_from", datetime.date.today().isoformat()), required=True)}
           <div class="small" style="color:#777;">Ab diesem Datum wird dieses Zeitschema angewendet.</div>
 
 <div style="margin-bottom:10px;">
   <label><b>Startsaldo Gleitzeit</b></label><br>
-  <input type="text" name="start_balance" value="{start_balance_txt}" pattern="^[+-]?\d{2}:\d{2}$" style="width:120px;">
+  <input type="text" name="start_balance" value="{start_balance_txt}" pattern="^[+-]?\\d{{2}}:\\d{{2}}$" style="width:120px;">
   <div class="small" style="color:#777;">Ausgangspunkt für das Gleitzeitkonto (z. B. +12:30 oder -01:15).</div>
 </div>
 
@@ -2909,21 +3168,24 @@ def settings_vacation():
     u = current_user()
     year = int(request.args.get("y") or datetime.date.today().year)
 
-    s = _get_vacation_year(u["id"], year)
-    entitlement = float(s.get("entitlement_days", 0.0) or 0.0)
-    carryover = float(s.get("carryover_days", 0.0) or 0.0)
+    vc = _vacation_calc(u["id"], year)
+    entitlement = vc["entitlement"]
+    carryover = vc["carryover"]
+    deadline = vc["deadline"]
+    deadline_passed = vc["deadline_passed"]
+    used_total = vc["used_total"]
+    carryover_remaining = vc["carryover_remaining"]
+    entitlement_remaining = vc["entitlement_remaining"]
+    remaining_total = vc["remaining_total"]
+    carryover_forfeited = vc["carryover_forfeited"]
+    effective_carryover = vc["effective_carryover"]
 
-    # Resturlaub-Regel: Carryover aus Vorjahr muss i.d.R. bis 31.03. des Folgejahres genommen werden
-    deadline = datetime.date(year, 3, 31).isoformat()
-
-    used_total = float(_vacation_used_days(u["id"], year) or 0.0)
-    used_until_deadline = float(_vacation_used_days(u["id"], year, deadline) or 0.0)
-
-    carryover_remaining = max(0.0, carryover - used_until_deadline)
-    # Verbrauch nach Ablauf der Carryover-Menge geht vom aktuellen Anspruch ab
-    used_from_entitlement = max(0.0, used_total - min(carryover, used_total))
-    entitlement_remaining = max(0.0, entitlement - used_from_entitlement)
-    remaining_total = max(0.0, (entitlement + carryover) - used_total)
+    if not deadline_passed and carryover > 0:
+        deadline_notice = f"<b style='color:var(--danger);'>Übertrag verfällt am {deadline} – Urlaubsbeginn muss ≤ {deadline} liegen.</b>"
+    elif deadline_passed and carryover_forfeited > 0:
+        deadline_notice = f"Übertrag-Frist war {deadline}. <b style='color:var(--danger);'>{carryover_forfeited:.1f} Tage Übertrag verfallen.</b>"
+    else:
+        deadline_notice = f"Übertrag-Frist: {deadline}."
 
     body = f"""
     {flash_html()}
@@ -2938,9 +3200,7 @@ def settings_vacation():
         </div>
       </div>
 
-      <p class="small">
-        Regel Resturlaub: Übertrag aus Vorjahr ist i.d.R. bis <b>{deadline}</b> zu nehmen (sonst verfällt).
-      </p>
+      <p class="small">{deadline_notice}</p>
 
       <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
         <input type="hidden" name="year" value="{year}">
@@ -2949,7 +3209,7 @@ def settings_vacation():
           <input name="entitlement_days" type="number" step="0.5" min="0" value="{entitlement}" required>
         </div>
         <div>
-          <label>Übertrag Resturlaub (Tage)</label><br>
+          <label>Übertrag Vorjahr (Tage)</label><br>
           <input name="carryover_days" type="number" step="0.5" min="0" value="{carryover}" required>
         </div>
         <div>
@@ -2963,12 +3223,14 @@ def settings_vacation():
         <div><div class="small">Genommen (gesamt)</div><div style="font-size:22px;"><b>{used_total:.1f}</b></div></div>
         <div><div class="small">Rest gesamt</div><div style="font-size:22px;"><b>{remaining_total:.1f}</b></div></div>
         <div style="opacity:.6;">|</div>
-        <div><div class="small">Resturlaub (Übertrag) offen</div><div style="font-size:22px;"><b>{carryover_remaining:.1f}</b></div></div>
-        <div><div class="small">Anspruch aktuelles Jahr offen</div><div style="font-size:22px;"><b>{entitlement_remaining:.1f}</b></div></div>
+        <div><div class="small">Übertrag offen</div><div style="font-size:22px;"><b>{carryover_remaining:.1f}</b></div></div>
+        <div><div class="small">Anspruch {year} offen</div><div style="font-size:22px;"><b>{entitlement_remaining:.1f}</b></div></div>
+        {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;color:var(--danger);'><b>" + f"{carryover_forfeited:.1f}" + "</b></div></div>" if carryover_forfeited > 0 else ""}
       </div>
 
       <p class="small" style="margin-top:10px;">
-        Hinweis: Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß deinem Zeitschema + Wochenenden/Feiertage).
+        Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
+        Effektiver Übertrag: <b>{effective_carryover:.1f}</b> Tage (konfiguriert: {carryover:.1f}, davon bis {deadline} angetreten: {vc['carryover_started']:.1f}).
       </p>
     </div>
     """
@@ -3031,9 +3293,9 @@ def settings_save():
 
     _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "")=="1" else 0)
 
-    valid_from = (request.form.get("valid_from") or "").strip()
+    valid_from = _parse_date_input(request.form.get("valid_from") or "") or ""
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_from):
-        add_flash("Bitte ein gültiges Datum (YYYY-MM-DD) angeben.", "error")
+        add_flash("Bitte ein gültiges Datum (TT.MM.JJJJ) angeben.", "error")
         return redirect("/settings")
 
     # Parse start balance from form (+HH:MM / -HH:MM)
@@ -3129,6 +3391,194 @@ def settings_save():
 
     add_flash("Zeitschema gespeichert.", "success")
     return redirect("/settings")
+
+
+@app.get("/business_trips")
+@login_required
+def business_trips_list():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+    year = int(request.args.get("y") or today.year)
+    show_form = request.args.get("new") == "1"
+
+    db = connect()
+    trips = db.execute(
+        "SELECT * FROM business_trips WHERE user_id=? AND start_date BETWEEN ? AND ? ORDER BY start_date DESC",
+        (u["id"], f"{year}-01-01", f"{year}-12-31"),
+    ).fetchall()
+    db.close()
+
+    prev_year = year - 1
+    next_year = year + 1
+
+    def fmt_time(v):
+        return v if v else "–"
+
+    def fmt_date_range(t):
+        s = str(t["start_date"])[:10]
+        e = str(t["end_date"] or s)[:10]
+        sy = _fmt_date_de(s, omit_year=(int(s[:4]) == year))
+        if s == e:
+            return f"<a href='/day/{s}'>{sy}</a>"
+        ey = _fmt_date_de(e, omit_year=(int(e[:4]) == year))
+        return f"<a href='/day/{s}'>{sy}</a> – <a href='/day/{e}'>{ey}</a>"
+
+    rows_html = ""
+    if trips:
+        for t in trips:
+            rows_html += (
+                f"<tr>"
+                f"<td>{fmt_date_range(t)}</td>"
+                f"<td><b>{t['destination']}</b></td>"
+                f"<td>{fmt_time(t['departure_time'])}</td>"
+                f"<td>{fmt_time(t['departure_end_time'])}</td>"
+                f"<td>{fmt_time(t['return_time'])}</td>"
+                f"<td>{fmt_time(t['return_end_time'])}</td>"
+                f"<td class='small'>{t['notes'] or ''}</td>"
+                f"<td><a href='/day/{t['start_date']}'>Bearb.</a> "
+                f"<form method='post' action='/business_trips/delete' style='display:inline;'"
+                f" onsubmit=\"return confirm('Dienstreise löschen?');\">"
+                f"<input type='hidden' name='trip_id' value='{t['id']}'>"
+                f"<input type='hidden' name='y' value='{year}'>"
+                f"<button class='btn danger' type='submit' style='padding:4px 8px;font-size:13px;'>Löschen</button></form></td>"
+                f"</tr>"
+            )
+    else:
+        rows_html = f"<tr><td colspan='8' class='small' style='color:var(--mu);'>Keine Dienstreisen in {year}.</td></tr>"
+
+    new_form_html = ""
+    if show_form:
+        new_form_html = f"""
+        <div class="card" style="margin-top:12px;">
+          <h3 style="margin-top:0;">+ Neue Dienstreise</h3>
+          {FORM_ASSETS_JS}
+          <form method="post" action="/business_trips/add">
+            <input type="hidden" name="y" value="{year}">
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+              <div>
+                <label>Ort *</label><br>
+                <input name="destination" required placeholder="Reiseziel" style="max-width:280px;">
+              </div>
+              <div>
+                <label>Startdatum *</label><br>
+                {_date_input("start_date", today.isoformat(), required=True)}
+              </div>
+              <div>
+                <label style="font-weight:400;"><input type="checkbox" onchange="toggleMultiday(this)"> Mehrtägig</label>
+              </div>
+            </div>
+            <div class="multiday-fields" style="display:none;margin-bottom:8px;">
+              <label>Enddatum</label><br>
+              {_date_input("end_date")}
+            </div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+              <div><label>Abreise</label><br>{_time_input("departure_time")}</div>
+              <div><label>Ankunft Ziel</label><br>{_time_input("departure_end_time")}</div>
+              <div><label>Rückreise Start</label><br>{_time_input("return_time")}</div>
+              <div><label>Ankunft Zuhause</label><br>{_time_input("return_end_time")}</div>
+            </div>
+            <div style="margin-bottom:8px;">
+              <label>Notizen</label><br>
+              <textarea name="notes" rows="2" placeholder="optional" style="max-width:500px;"></textarea>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary" type="submit">Speichern</button>
+              <a class="btn" href="/business_trips?y={year}">Abbrechen</a>
+            </div>
+          </form>
+        </div>"""
+
+    body = f"""
+    {flash_html()}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="margin:0;">✈ Dienstreisen – {year}</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <a class="btn" href="/business_trips?y={prev_year}">◀︎ {prev_year}</a>
+          <a class="btn" href="/business_trips?y={today.year}">Heute</a>
+          <a class="btn" href="/business_trips?y={next_year}">{next_year} ▶︎</a>
+          <a class="btn primary" href="/business_trips?y={year}&new=1">+ Neue Dienstreise</a>
+        </div>
+      </div>
+      <table style="margin-top:10px;">
+        <thead>
+          <tr>
+            <th>Datum</th><th>Ort</th>
+            <th>Abreise</th><th>Ankunft Ziel</th>
+            <th>Rückreise</th><th>Ankunft Hause</th>
+            <th>Notizen</th><th>Aktionen</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>
+    {new_form_html}
+    """
+    return render_template_string(layout("Dienstreisen", body, u, APP_VERSION))
+
+
+@app.post("/business_trips/add")
+@login_required
+def business_trips_add():
+    bootstrap()
+    u = current_user()
+    year = (request.form.get("y") or str(datetime.date.today().year)).strip()
+    destination = (request.form.get("destination") or "").strip()
+    if not destination:
+        add_flash("Ort ist Pflichtfeld.", "error")
+        return redirect(f"/business_trips?y={year}&new=1")
+    start_date = _parse_date_input(request.form.get("start_date") or "")
+    if not start_date:
+        add_flash("Ungültiges Startdatum.", "error")
+        return redirect(f"/business_trips?y={year}&new=1")
+    end_date_raw = (request.form.get("end_date") or "").strip()
+    end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
+    if end_date and end_date < start_date:
+        end_date = start_date
+    departure_time     = (request.form.get("departure_time") or "").strip() or None
+    departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
+    return_time        = (request.form.get("return_time") or "").strip() or None
+    return_end_time    = (request.form.get("return_end_time") or "").strip() or None
+    notes              = (request.form.get("notes") or "").strip() or None
+    db = connect()
+    db.execute(
+        """INSERT INTO business_trips
+               (user_id, start_date, end_date, destination, departure_time, departure_end_time,
+                return_time, return_end_time, notes, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))
+           ON CONFLICT(user_id, start_date) DO UPDATE SET
+             end_date=excluded.end_date,
+             destination=excluded.destination,
+             departure_time=excluded.departure_time,
+             departure_end_time=excluded.departure_end_time,
+             return_time=excluded.return_time,
+             return_end_time=excluded.return_end_time,
+             notes=excluded.notes,
+             updated_at=datetime('now')""",
+        (u["id"], start_date, end_date, destination, departure_time, departure_end_time,
+         return_time, return_end_time, notes),
+    )
+    db.commit()
+    db.close()
+    add_flash("Dienstreise gespeichert.", "success")
+    return redirect(f"/business_trips?y={year}")
+
+
+@app.post("/business_trips/delete")
+@login_required
+def business_trips_delete():
+    bootstrap()
+    u = current_user()
+    trip_id = (request.form.get("trip_id") or "").strip()
+    year = (request.form.get("y") or str(datetime.date.today().year)).strip()
+    if trip_id:
+        db = connect()
+        db.execute("DELETE FROM business_trips WHERE id=? AND user_id=?", (int(trip_id), u["id"]))
+        db.commit()
+        db.close()
+        add_flash("Dienstreise gelöscht.", "success")
+    return redirect(f"/business_trips?y={year}")
 
 
 @app.get("/export")
