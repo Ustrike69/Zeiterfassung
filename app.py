@@ -1214,9 +1214,33 @@ def _timepicker_datalist(id_name: str = "time_suggestions") -> str:
 
 
 FORM_ASSETS_JS = """<style>
-  .dt-wrap,.tm-wrap{display:inline-flex;gap:4px;align-items:center;}
-  .dt-text{width:120px !important;}
-  .dt-pick{width:38px !important;min-width:0 !important;padding:6px 2px !important;cursor:pointer;}
+  /* ---- Unified date input ---- */
+  .dt-wrap{
+    position:relative;display:inline-flex;align-items:stretch;width:160px;
+  }
+  .dt-text{
+    width:100%!important;padding-right:34px!important;box-sizing:border-box;
+  }
+  .dt-pick{
+    position:absolute!important;right:0;top:0;bottom:0;
+    width:36px!important;min-width:0!important;padding:0!important;
+    opacity:0;cursor:pointer;z-index:2;
+    border:none!important;background:transparent!important;color:transparent!important;
+    overflow:hidden;
+  }
+  .dt-wrap::after{
+    content:'';position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    width:15px;height:15px;pointer-events:none;z-index:1;
+    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E") no-repeat center;
+    background-size:contain;
+  }
+  @media(prefers-color-scheme:dark){
+    .dt-wrap::after{
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E");
+    }
+  }
+  /* ---- Time input ---- */
+  .tm-wrap{display:inline-flex;gap:4px;align-items:center;}
   .tm-text{width:80px !important;}
   .tm-pick{width:38px !important;min-width:0 !important;padding:6px 2px !important;cursor:pointer;}
 </style>
@@ -4727,23 +4751,114 @@ def periods_unlock():
 def export_home():
     bootstrap()
     u = current_user()
+    today = datetime.date.today()
+    year = today.year
+    month = today.month
+    default_from = f"{year}-01-01"
+    default_to   = f"{year}-12-31"
+    default_from_de = f"01.01.{year}"
+    default_to_de   = f"31.12.{year}"
+    admin_btn = f'<button class="btn" type="button" onclick="dlExport(\'/export/users.csv\',false)">Benutzer (Admin)</button>' if u.get("is_admin") else ""
+
     body = f"""
     {flash_html()}
+    {FORM_ASSETS_JS}
     <div class="card">
-      <h3>Export (CSV)</h3>
-      <p class="small">Trennzeichen ist <b>;</b> (Excel-freundlich in DE).</p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <a class="btn" href="/export/absences.csv">Abwesenheiten</a>
-        
-        
-        <a class="btn" href="/export/times.csv">Zeiten</a>
-        <a class="btn" href="/export/presence.csv">Anwesenheit</a>
-        <a class="btn" href="/export/calendar_days.csv">Kalender/Feiertage</a>
-        {'<a class="btn" href="/export/users.csv">Benutzer (Admin)</a>' if u.get('is_admin') else ''}
+      <h3 style="margin-top:0;">Zeitraum</h3>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:12px;">
+        <div>
+          <label>Von</label><br>
+          <div class="dt-wrap">
+            <input type="text" id="exp-from-txt" class="dt-text" placeholder="TT.MM.JJJJ"
+                   value="{default_from_de}" maxlength="10" oninput="expDtText(this,'exp-from-iso')">
+            <input type="date" id="exp-from-iso" class="dt-pick" value="{default_from}"
+                   onchange="expDtPick(this,'exp-from-txt')">
+          </div>
+        </div>
+        <div>
+          <label>Bis</label><br>
+          <div class="dt-wrap">
+            <input type="text" id="exp-to-txt" class="dt-text" placeholder="TT.MM.JJJJ"
+                   value="{default_to_de}" maxlength="10" oninput="expDtText(this,'exp-to-iso')">
+            <input type="date" id="exp-to-iso" class="dt-pick" value="{default_to}"
+                   onchange="expDtPick(this,'exp-to-txt')">
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+        <button class="btn" type="button" onclick="setExpRange('month')">Akt. Monat</button>
+        <button class="btn" type="button" onclick="setExpRange('lastmonth')">Letzter Monat</button>
+        <button class="btn" type="button" onclick="setExpRange('year')">Akt. Jahr</button>
+        <button class="btn" type="button" onclick="setExpRange('lastyear')">Letztes Jahr</button>
       </div>
     </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Download (CSV)</h3>
+      <p class="small">Trennzeichen <b>;</b> – Excel-freundlich. Dateiname enthält den gewählten Zeitraum.</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn" type="button" onclick="dlExport('/export/time_blocks.csv',true)">Zeitblöcke</button>
+        <button class="btn" type="button" onclick="dlExport('/export/absences.csv',true)">Abwesenheiten</button>
+        <button class="btn" type="button" onclick="dlExport('/export/trips.csv',true)">Dienstreisen</button>
+        <button class="btn" type="button" onclick="dlExport('/export/balance.csv',true)">Gleitzeitkonto</button>
+        <button class="btn" type="button" onclick="dlExport('/export/calendar_days.csv',false)">Feiertage</button>
+        {admin_btn}
+      </div>
+    </div>
+
+    <script>
+    function pad2(n){{return n<10?'0'+n:''+n;}}
+    function lastDay(y,m){{return new Date(y,m,0).getDate();}}
+    function isoToDE(s){{var p=s.split('-');return p[2]+'.'+p[1]+'.'+p[0];}}
+    function deToIso(s){{var m=s.match(/^(\\d{{1,2}})\\.(\\d{{1,2}})\\.(\\d{{4}})$/);return m?m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0'):null;}}
+    function expDtText(inp,isoId){{
+      var iso=deToIso(inp.value);
+      var pk=document.getElementById(isoId);
+      if(pk)pk.value=iso||'';
+    }}
+    function expDtPick(inp,txtId){{
+      var txt=document.getElementById(txtId);
+      if(txt&&inp.value)txt.value=isoToDE(inp.value);
+    }}
+    function setExpRange(preset){{
+      var now=new Date(),y=now.getFullYear(),m=now.getMonth()+1,fy,fm,ty,tm;
+      if(preset==='month'){{fy=y;fm=m;ty=y;tm=m;}}
+      else if(preset==='lastmonth'){{var d=new Date(y,m-2,1);fy=d.getFullYear();fm=d.getMonth()+1;ty=fy;tm=fm;}}
+      else if(preset==='year'){{fy=y;fm=1;ty=y;tm=12;}}
+      else{{fy=y-1;fm=1;ty=y-1;tm=12;}}
+      var from=fy+'-'+pad2(fm)+'-01';
+      var to=ty+'-'+pad2(tm)+'-'+pad2(lastDay(ty,tm));
+      document.getElementById('exp-from-txt').value=isoToDE(from);
+      document.getElementById('exp-to-txt').value=isoToDE(to);
+      document.getElementById('exp-from-iso').value=from;
+      document.getElementById('exp-to-iso').value=to;
+    }}
+    function dlExport(base,withRange){{
+      if(!withRange){{window.location=base;return;}}
+      var from=document.getElementById('exp-from-iso').value;
+      var to=document.getElementById('exp-to-iso').value;
+      if(!from||!to){{alert('Bitte Von- und Bis-Datum auswählen.');return;}}
+      window.location=base+'?from='+from+'&to='+to;
+    }}
+    </script>
     """
     return render_template_string(layout("Export", body, u, APP_VERSION))
+
+
+def _export_date_range():
+    """Return (date_from_iso, date_to_iso) from request args, defaulting to current year."""
+    today = datetime.date.today()
+    df = request.args.get("from") or f"{today.year}-01-01"
+    dt = request.args.get("to")   or f"{today.year}-12-31"
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', df):
+        df = f"{today.year}-01-01"
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', dt):
+        dt = f"{today.year}-12-31"
+    return df, dt
+
+
+def _export_filename(prefix: str, date_from: str, date_to: str) -> str:
+    return f"{prefix}_{date_from}_{date_to}.csv"
 
 
 @app.get("/export/absences.csv")
@@ -4751,22 +4866,23 @@ def export_home():
 def export_absences_csv():
     bootstrap()
     u = current_user()
+    date_from, date_to = _export_date_range()
     db = connect()
     rows = db.execute(
         """
         SELECT a.id, t.name AS type, a.date_from, a.date_to, a.is_half_day, a.comment, a.created_at, a.updated_at
         FROM absences a
         JOIN absence_types t ON t.id = a.type_id
-        WHERE a.user_id = ?
+        WHERE a.user_id = ? AND NOT (a.date_to < ? OR a.date_from > ?)
         ORDER BY a.date_from, a.id
         """,
-        (u["id"],),
+        (u["id"], date_from, date_to),
     ).fetchall()
     db.close()
 
     data = [[r["id"], r["type"], r["date_from"], r["date_to"], r["is_half_day"], r["comment"] or "", r["created_at"] or "", r["updated_at"] or ""] for r in rows]
     return _csv_response(
-        f"absences_{u['username']}.csv",
+        _export_filename("abwesenheiten", date_from, date_to),
         ["id", "type", "date_from", "date_to", "is_half_day", "comment", "created_at", "updated_at"],
         data,
     )
@@ -4779,15 +4895,16 @@ def export_absences_csv():
 def export_time_blocks_csv():
     bootstrap()
     u = current_user()
+    date_from, date_to = _export_date_range()
     db = connect()
     rows = db.execute(
         """
         SELECT day, time_in, time_out, break_minutes, comment, created_at, updated_at
         FROM time_blocks
-        WHERE user_id = ?
+        WHERE user_id = ? AND day BETWEEN ? AND ?
         ORDER BY day, time_in
         """,
-        (u["id"],),
+        (u["id"], date_from, date_to),
     ).fetchall()
     db.close()
 
@@ -4806,7 +4923,7 @@ def export_time_blocks_csv():
         ])
 
     return _csv_response(
-        f"time_blocks_{u['username']}.csv",
+        _export_filename("zeitbloecke", date_from, date_to),
         ["day", "time_in", "time_out", "break_minutes", "net_hhmm", "comment", "created_at", "updated_at"],
         data,
     )
@@ -4904,21 +5021,86 @@ def export_presence_csv():
 def export_times_csv():
     bootstrap()
     u = current_user()
+    date_from, date_to = _export_date_range()
     db = connect()
     rows = db.execute(
         """
         SELECT day, time_in, time_out, break_minutes, comment, created_at, updated_at
         FROM time_entries
-        WHERE user_id = ?
+        WHERE user_id = ? AND day BETWEEN ? AND ?
         ORDER BY day
         """,
-        (u["id"],),
+        (u["id"], date_from, date_to),
     ).fetchall()
     db.close()
     data = [[r["day"], r["time_in"], r["time_out"], r["break_minutes"], r["comment"] or "", r["created_at"] or "", r["updated_at"] or ""] for r in rows]
     return _csv_response(
-        f"times_{u['username']}.csv",
+        _export_filename("zeiten", date_from, date_to),
         ["day", "time_in", "time_out", "break_minutes", "comment", "created_at", "updated_at"],
+        data,
+    )
+
+
+@app.get("/export/trips.csv")
+@login_required
+def export_trips_csv():
+    bootstrap()
+    u = current_user()
+    date_from, date_to = _export_date_range()
+    db = connect()
+    rows = db.execute(
+        """
+        SELECT start_date, end_date, destination, departure_time, departure_end_time,
+               return_time, return_end_time, notes, created_at
+        FROM business_trips
+        WHERE user_id = ? AND start_date BETWEEN ? AND ?
+        ORDER BY start_date
+        """,
+        (u["id"], date_from, date_to),
+    ).fetchall()
+    db.close()
+    data = [
+        [r["start_date"], r["end_date"] or "", r["destination"],
+         r["departure_time"] or "", r["departure_end_time"] or "",
+         r["return_time"] or "", r["return_end_time"] or "",
+         r["notes"] or "", r["created_at"] or ""]
+        for r in rows
+    ]
+    return _csv_response(
+        _export_filename("dienstreisen", date_from, date_to),
+        ["start_date", "end_date", "destination", "departure_time", "departure_end_time",
+         "return_time", "return_end_time", "notes", "created_at"],
+        data,
+    )
+
+
+@app.get("/export/balance.csv")
+@login_required
+def export_balance_csv():
+    bootstrap()
+    u = current_user()
+    date_from, date_to = _export_date_range()
+    today_iso = datetime.date.today().isoformat()
+    date_to = min(date_to, today_iso)
+
+    start_minutes = _get_start_balance_minutes(u["id"])
+    flextag_ranges = _fetch_flextag_ranges(u["id"])
+    running = int(start_minutes)
+    data = []
+    for iso in _iter_days(date_from, date_to):
+        expected = int(_expected_minutes_for_day(u["id"], iso) or 0)
+        actual   = int(_actual_minutes_for_day(u["id"], iso) or 0)
+        flextag_min = 0
+        if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
+            flextag_min = _scheduled_minutes_ignoring_absence(u["id"], iso)
+        delta = actual - expected - flextag_min
+        running += delta
+        if expected or actual:
+            data.append([iso, _fmt_minutes(expected), _fmt_minutes(actual),
+                         _fmt_minutes_signed(delta), _fmt_minutes_signed(running)])
+    return _csv_response(
+        _export_filename("gleitzeitkonto", date_from, date_to),
+        ["day", "soll", "ist", "delta", "saldo"],
         data,
     )
 
