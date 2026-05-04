@@ -1,4 +1,4 @@
-# Zeiterfassung v3.1.0
+# Zeiterfassung v4.0.0
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung.
 
@@ -7,16 +7,17 @@ Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von 
 ## Inhaltsverzeichnis
 
 1. [Erste Schritte](#erste-schritte)
-2. [Übersicht (Startseite)](#übersicht-startseite)
-3. [Zeiterfassung](#zeiterfassung)
-4. [Kalender](#kalender)
-5. [Abwesenheiten](#abwesenheiten)
-6. [Dienstreisen](#dienstreisen)
-7. [Stundensaldo](#stundensaldo)
-8. [Einstellungen](#einstellungen)
-9. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
-10. [Admin-Bereich](#admin-bereich)
-11. [Technischer Betrieb](#technischer-betrieb)
+2. [Einrichtungs-Wizard (Onboarding)](#einrichtungs-wizard-onboarding)
+3. [Übersicht (Startseite)](#übersicht-startseite)
+4. [Zeiterfassung](#zeiterfassung)
+5. [Kalender](#kalender)
+6. [Abwesenheiten](#abwesenheiten)
+7. [Dienstreisen](#dienstreisen)
+8. [Stundensaldo](#stundensaldo)
+9. [Einstellungen](#einstellungen)
+10. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
+11. [Admin-Bereich](#admin-bereich)
+12. [Technischer Betrieb](#technischer-betrieb)
 
 ---
 
@@ -27,6 +28,23 @@ Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von 
 Aufruf der App im Browser. Beim ersten Start wird ein Admin-Konto über `/setup` angelegt.
 
 Anmeldung mit Benutzername (Kleinschreibung) und Passwort unter `/login`.
+
+---
+
+## Einrichtungs-Wizard (Onboarding)
+
+Neue Nutzer werden beim ersten Login automatisch durch einen 6-stufigen Einrichtungs-Wizard geführt (`/onboarding`). Alle anderen Seiten sind bis zum Abschluss des Wizards gesperrt.
+
+| Schritt | Inhalt |
+|---------|--------|
+| 1 | **Passwort ändern** – Pflicht; ersetzt das temporäre Admin-Passwort |
+| 2 | **Profil** – Anzeigename und E-Mail (optional) |
+| 3 | **Zeitschema** – Wochenstunden, Modus, Arbeitstage (überspringbar) |
+| 4 | **Urlaubskontingent** – Anspruch und Übertrag für das aktuelle Jahr (überspringbar) |
+| 5 | **Startsaldo & Erfassung ab** – Gleitzeitguthaben und frühestes Erfassungsdatum (überspringbar) |
+| 6 | **Zusammenfassung** – Bestätigung, Wizard abschließen |
+
+Schritte 2–5 können übersprungen und jederzeit in den Einstellungen nachgeholt werden. Der Admin-Account bei `/setup` überspringt den Wizard.
 
 ### Sprache und Format
 
@@ -203,6 +221,11 @@ Unterhalb der Tabelle: Aufschlüsselung der Abwesenheitstage im gewählten Zeitr
 
 Aufruf unter `/settings`.
 
+### Profil
+
+- **Anzeigename** – Wird im Header und in der Admin-Übersicht angezeigt (Fallback: Benutzername)
+- **E-Mail** – Optionales Kontaktfeld
+
 ### Arbeitszeitmodell
 
 Zwei Modi:
@@ -249,10 +272,15 @@ Aufruf unter `/admin`. Nur für Benutzer mit Admin-Rolle zugänglich.
 
 ### Benutzerverwaltung (`/admin/users`)
 
-- Neue Benutzer anlegen
+- Neue Benutzer anlegen (mit „Erfassung ab"-Datum und temporärem Passwort)
 - Passwörter zurücksetzen
 - Admin-Rechte vergeben/entziehen
 - Benutzer deaktivieren
+- **Benutzer löschen** – löscht alle zugehörigen Daten (Zeitblöcke, Abwesenheiten, Dienstreisen, Saldo, Periodenabschlüsse etc.)
+
+**Schutzregeln beim Löschen:**
+- Der eigene Account kann nicht gelöscht werden
+- Der letzte aktive Admin-Account kann nicht gelöscht werden
 
 ### Abwesenheits-Entsperrung
 
@@ -314,4 +342,4 @@ cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 
 ---
 
-*Zeiterfassung v3.1.0 – Flask + SQLite – NRW*
+*Zeiterfassung v4.0.0 – Flask + SQLite – NRW*

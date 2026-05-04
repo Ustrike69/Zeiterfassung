@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v3.1.0"
+APP_VERSION = "v4.0.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1384,7 +1384,7 @@ def setup_post():
     if not username or not password:
         add_flash("Bitte Username und Passwort angeben.", "error")
         return redirect(url_for("setup"))
-    create_user(username, password, is_admin=True, is_active=True)
+    create_user(username, password, is_admin=True, is_active=True, onboarding_done=1)
     add_flash("Admin angelegt. Bitte einloggen.", "success")
     return redirect(url_for("login"))
 
@@ -1433,11 +1433,376 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ─── Onboarding Wizard ────────────────────────────────────────────────────────
+
+def _onboarding_step_indicator(current_step: int) -> str:
+    steps = ["Passwort", "Profil", "Zeitschema", "Urlaub", "Startsaldo", "Fertig"]
+    items = []
+    for i, label in enumerate(steps, 1):
+        if i < current_step:
+            style = "color:var(--ok);font-weight:700;"
+            icon = "✓ "
+        elif i == current_step:
+            style = "font-weight:700;color:var(--ac);"
+            icon = ""
+        else:
+            style = "color:var(--mu);"
+            icon = ""
+        items.append(f"<span style='{style}'>{icon}{i}. {label}</span>")
+    sep = " <span style='color:var(--mu);'>·</span> "
+    return f"<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px;font-size:13px;'>{sep.join(items)}</div>"
+
+
+@app.get("/onboarding")
+@login_required
+def onboarding():
+    bootstrap()
+    u = current_user()
+    if u.get("onboarding_done"):
+        return redirect(url_for("index"))
+
+    try:
+        step = int(request.args.get("step") or 1)
+    except (ValueError, TypeError):
+        step = 1
+    step = max(1, min(6, step))
+
+    today = datetime.date.today()
+    indicator = _onboarding_step_indicator(step)
+
+    if step == 1:
+        body = f"""
+        {flash_html()}
+        {FORM_ASSETS_JS}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 1 – Passwort ändern</h3>
+          <p class="small">Bitte ändere dein temporäres Passwort.</p>
+          <form method="post" action="/onboarding?step=1" style="display:flex;flex-direction:column;gap:10px;max-width:340px;margin-top:12px;">
+            <div><label>Aktuelles Passwort</label><br><input type="password" name="current_password" required></div>
+            <div><label>Neues Passwort</label><br><input type="password" name="new_password" required></div>
+            <div><label>Wiederholung</label><br><input type="password" name="new_password2" required></div>
+            <div><button class="btn primary" type="submit">Weiter →</button></div>
+          </form>
+        </div>
+        """
+
+    elif step == 2:
+        dn = u.get("display_name") or ""
+        em = u.get("email") or ""
+        body = f"""
+        {flash_html()}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 2 – Persönliche Daten</h3>
+          <p class="small">Optional – kann jederzeit in den Einstellungen geändert werden.</p>
+          <form method="post" action="/onboarding?step=2" style="display:flex;flex-direction:column;gap:10px;max-width:340px;margin-top:12px;">
+            <div><label>Anzeigename</label><br><input name="display_name" value="{dn}" placeholder="Max Mustermann"></div>
+            <div><label>E-Mail</label><br><input type="email" name="email" value="{em}" placeholder="max@example.com"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary" type="submit">Weiter →</button>
+              <a class="btn" href="/onboarding?step=3">Überspringen</a>
+            </div>
+          </form>
+        </div>
+        """
+
+    elif step == 3:
+        sched = _get_user_schedule_current(u["id"])
+
+        def chk3(bit):
+            return "checked" if (int(sched.get("workdays_mask", 31)) & bit) else ""
+
+        def hm3(mins):
+            return _fmt_minutes(int(mins or 0))
+
+        body = f"""
+        {flash_html()}
+        {FORM_ASSETS_JS}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 3 – Zeitschema</h3>
+          <p class="small">Dein Arbeitszeitmodell. Kann jederzeit in den Einstellungen angepasst werden.</p>
+          <form method="post" action="/onboarding?step=3" style="margin-top:12px;">
+            <div style="margin-bottom:10px;">
+              <label><b>Gültig ab</b></label><br>
+              {_date_input("valid_from", today.isoformat(), required=True)}
+            </div>
+            <div style="margin-bottom:10px;">
+              <label><b>Modus</b></label><br>
+              <label><input type="radio" name="mode" value="weekly" {"checked" if sched.get("mode","weekly")=="weekly" else ""}> Wochenarbeitszeit verteilen</label><br>
+              <label><input type="radio" name="mode" value="daily" {"checked" if sched.get("mode")=="daily" else ""}> Sollstunden je Wochentag</label>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label><b>Wochenstunden</b></label><br>
+              <input type="number" name="weekly_hours" min="0" step="0.25" value="{(int(sched.get('weekly_minutes',2400))/60):g}" style="width:120px;">
+            </div>
+            <div style="margin-bottom:10px;">
+              <label><b>Arbeitstage</b></label><br>
+              <label><input type="checkbox" name="wd_mon" value="1" {chk3(1)}> Mo</label>
+              <label><input type="checkbox" name="wd_tue" value="1" {chk3(2)}> Di</label>
+              <label><input type="checkbox" name="wd_wed" value="1" {chk3(4)}> Mi</label>
+              <label><input type="checkbox" name="wd_thu" value="1" {chk3(8)}> Do</label>
+              <label><input type="checkbox" name="wd_fri" value="1" {chk3(16)}> Fr</label>
+              <label><input type="checkbox" name="wd_sat" value="1" {chk3(32)}> Sa</label>
+              <label><input type="checkbox" name="wd_sun" value="1" {chk3(64)}> So</label>
+            </div>
+            <div class="card" style="margin-bottom:10px;">
+              <b>Sollstunden je Wochentag</b> <span class="small">(nur Modus „je Wochentag")</span><br>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
+                <div>Mo<br><input type="text" name="mon" value="{hm3(sched['mon_minutes'])}" style="width:90px;"></div>
+                <div>Di<br><input type="text" name="tue" value="{hm3(sched['tue_minutes'])}" style="width:90px;"></div>
+                <div>Mi<br><input type="text" name="wed" value="{hm3(sched['wed_minutes'])}" style="width:90px;"></div>
+                <div>Do<br><input type="text" name="thu" value="{hm3(sched['thu_minutes'])}" style="width:90px;"></div>
+                <div>Fr<br><input type="text" name="fri" value="{hm3(sched['fri_minutes'])}" style="width:90px;"></div>
+                <div>Sa<br><input type="text" name="sat" value="{hm3(sched['sat_minutes'])}" style="width:90px;"></div>
+                <div>So<br><input type="text" name="sun" value="{hm3(sched['sun_minutes'])}" style="width:90px;"></div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary" type="submit">Weiter →</button>
+              <a class="btn" href="/onboarding?step=4">Überspringen</a>
+            </div>
+          </form>
+        </div>
+        """
+
+    elif step == 4:
+        vc = _vacation_calc(u["id"], today.year)
+        body = f"""
+        {flash_html()}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 4 – Urlaubskontingent {today.year}</h3>
+          <p class="small">Dein jährlicher Urlaubsanspruch und Übertrag aus dem Vorjahr. Kann jederzeit in den Einstellungen angepasst werden.</p>
+          <form method="post" action="/onboarding?step=4" style="display:flex;flex-direction:column;gap:10px;max-width:340px;margin-top:12px;">
+            <div><label>Urlaubsanspruch (Tage/Jahr)</label><br>
+              <input type="number" name="entitlement_days" step="0.5" min="0" value="{vc['entitlement']}" required></div>
+            <div><label>Übertrag Vorjahr</label><br>
+              <input type="number" name="carryover_days" step="0.5" min="0" value="{vc['carryover']}" required></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary" type="submit">Weiter →</button>
+              <a class="btn" href="/onboarding?step=5">Überspringen</a>
+            </div>
+          </form>
+        </div>
+        """
+
+    elif step == 5:
+        tracking_start = u.get("tracking_start_date") or ""
+        start_balance_minutes = _get_start_balance_minutes(u["id"])
+        start_balance_txt = _fmt_minutes_signed(start_balance_minutes)
+        body = f"""
+        {flash_html()}
+        {FORM_ASSETS_JS}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 5 – Erfassung ab &amp; Startsaldo</h3>
+          <p class="small">Ab wann soll die Zeiterfassung beginnen und welchen Stundensaldo bringst du mit?</p>
+          <form method="post" action="/onboarding?step=5" style="display:flex;flex-direction:column;gap:12px;max-width:380px;margin-top:12px;">
+            <div>
+              <label>Erfassung ab <span class="small">(leer = ab Jahresbeginn)</span></label><br>
+              {_date_input("tracking_start_date", tracking_start)}
+              <div class="small" style="color:#777;margin-top:4px;">Ab diesem Datum werden fehlende Einträge und der Saldo berechnet.</div>
+            </div>
+            <div>
+              <label>Startsaldo Gleitzeit</label><br>
+              <input type="text" name="start_balance" value="{start_balance_txt}" placeholder="+00:00" style="width:120px;">
+              <div class="small" style="color:#777;margin-top:4px;">Überstunden die du mitbringst (z. B. +12:30 oder -01:15).</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary" type="submit">Weiter →</button>
+              <a class="btn" href="/onboarding?step=6">Überspringen</a>
+            </div>
+          </form>
+        </div>
+        """
+
+    elif step == 6:
+        sched = _get_user_schedule_for_day(u["id"], today.isoformat()) or {}
+        vc = _vacation_calc(u["id"], today.year)
+        start_balance_minutes = _get_start_balance_minutes(u["id"])
+        tracking_start = _fmt_date_de(u.get("tracking_start_date")) or "ab Jahresbeginn"
+        mode_txt = "Wochenarbeitszeit" if sched.get("mode") == "weekly" else "Je Wochentag"
+        weekly_h = f"{(int(sched.get('weekly_minutes', 0))/60):g}h" if sched.get("weekly_minutes") else "—"
+        dn = u.get("display_name") or u.get("username") or ""
+        body = f"""
+        {flash_html()}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 6 – Alles bereit!</h3>
+          <p>Hallo <b>{dn}</b>, dein Konto ist konfiguriert.</p>
+          <div style="display:flex;flex-direction:column;gap:6px;margin:14px 0;font-size:14px;">
+            <div><b>Erfassung ab:</b> {tracking_start}</div>
+            <div><b>Zeitschema:</b> {mode_txt}, {weekly_h}</div>
+            <div><b>Urlaub {today.year}:</b> {vc['entitlement']:.1f} Tage + {vc['carryover']:.1f} Übertrag</div>
+            <div><b>Startsaldo:</b> {_fmt_minutes_signed(start_balance_minutes)}</div>
+          </div>
+          <p class="small">Alle Einstellungen können jederzeit unter <b>Einstellungen</b> angepasst werden.</p>
+          <form method="post" action="/onboarding?step=6" style="margin-top:14px;">
+            <button class="btn primary" type="submit">Zeiterfassung starten →</button>
+          </form>
+        </div>
+        """
+
+    else:
+        body = f"""<div class="card"><h3>Unbekannter Schritt</h3></div>"""
+
+    return render_template_string(layout("Willkommen", body, u, APP_VERSION))
+
+
+@app.post("/onboarding")
+@login_required
+def onboarding_post():
+    bootstrap()
+    u = current_user()
+    if u.get("onboarding_done"):
+        return redirect(url_for("index"))
+
+    try:
+        step = int(request.args.get("step") or 1)
+    except (ValueError, TypeError):
+        step = 1
+
+    if step == 1:
+        current_password = request.form.get("current_password") or ""
+        new_password = (request.form.get("new_password") or "").strip()
+        new_password2 = (request.form.get("new_password2") or "").strip()
+
+        from auth import authenticate as _auth_check
+        if not _auth_check(u["username"], current_password):
+            add_flash("Aktuelles Passwort falsch.", "error")
+            return redirect("/onboarding?step=1")
+        if len(new_password) < 6:
+            add_flash("Neues Passwort muss mindestens 6 Zeichen haben.", "error")
+            return redirect("/onboarding?step=1")
+        if new_password != new_password2:
+            add_flash("Passwörter stimmen nicht überein.", "error")
+            return redirect("/onboarding?step=1")
+        set_password(u["id"], new_password)
+        return redirect("/onboarding?step=2")
+
+    elif step == 2:
+        display_name = (request.form.get("display_name") or "").strip() or None
+        email = (request.form.get("email") or "").strip() or None
+        db = connect()
+        db.execute(
+            "UPDATE users SET display_name=?, email=?, updated_at=datetime('now') WHERE id=?",
+            (display_name, email, u["id"]),
+        )
+        db.commit()
+        db.close()
+        return redirect("/onboarding?step=3")
+
+    elif step == 3:
+        valid_from = _parse_date_input(request.form.get("valid_from") or "") or ""
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_from):
+            add_flash("Bitte ein gültiges Datum angeben.", "error")
+            return redirect("/onboarding?step=3")
+        mode = (request.form.get("mode") or "weekly").strip().lower()
+        if mode not in ("weekly", "daily"):
+            mode = "weekly"
+        weekly_hours_raw = (request.form.get("weekly_hours") or "0").strip().replace(",", ".")
+        try:
+            weekly_minutes = int(round(float(weekly_hours_raw) * 60))
+        except Exception:
+            weekly_minutes = 0
+        mask = 0
+        for i, key in enumerate(["wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun"]):
+            if (request.form.get(key) or "") == "1":
+                mask |= _workday_bit(i)
+
+        def _day_min(name):
+            raw = (request.form.get(name) or "").strip()
+            return _coerce_minutes(raw) if raw else 0
+
+        row = {
+            "user_id": int(u["id"]),
+            "valid_from": valid_from,
+            "mode": mode,
+            "weekly_minutes": int(weekly_minutes),
+            "workdays_mask": int(mask),
+            "block_weekends_holidays": 1,
+            "mon_minutes": _day_min("mon"),
+            "tue_minutes": _day_min("tue"),
+            "wed_minutes": _day_min("wed"),
+            "thu_minutes": _day_min("thu"),
+            "fri_minutes": _day_min("fri"),
+            "sat_minutes": _day_min("sat"),
+            "sun_minutes": _day_min("sun"),
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        db = connect()
+        cols = [r["name"] for r in db.execute("PRAGMA table_info(user_schedules)").fetchall()]
+        row = {k: v for k, v in row.items() if k in cols}
+        db.execute("DELETE FROM user_schedules WHERE user_id=? AND valid_from=?", (row["user_id"], row["valid_from"]))
+        col_list = ", ".join(row.keys())
+        ph_list = ", ".join(["?"] * len(row))
+        db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+        db.commit()
+        db.close()
+        return redirect("/onboarding?step=4")
+
+    elif step == 4:
+        year = datetime.date.today().year
+        try:
+            entitlement = float(request.form.get("entitlement_days") or 0)
+            carryover = float(request.form.get("carryover_days") or 0)
+            if entitlement < 0 or carryover < 0:
+                raise ValueError()
+        except Exception:
+            add_flash("Bitte gültige Werte eingeben.", "error")
+            return redirect("/onboarding?step=4")
+        _set_vacation_year(u["id"], year, entitlement, carryover)
+        return redirect("/onboarding?step=5")
+
+    elif step == 5:
+        tracking_start_raw = (request.form.get("tracking_start_date") or "").strip()
+        tracking_start_iso = _parse_date_input(tracking_start_raw) if tracking_start_raw else None
+        start_balance_raw = (request.form.get("start_balance") or "").strip()
+        try:
+            start_minutes = _parse_signed_hhmm_to_minutes(start_balance_raw) if start_balance_raw else 0
+        except Exception:
+            add_flash("Startsaldo: Bitte +HH:MM oder -HH:MM angeben.", "error")
+            return redirect("/onboarding?step=5")
+        _set_start_balance_minutes(u["id"], start_minutes)
+        if tracking_start_iso:
+            db = connect()
+            db.execute(
+                "UPDATE users SET tracking_start_date=?, updated_at=datetime('now') WHERE id=?",
+                (tracking_start_iso, u["id"]),
+            )
+            db.commit()
+            db.close()
+        return redirect("/onboarding?step=6")
+
+    elif step == 6:
+        db = connect()
+        db.execute("UPDATE users SET onboarding_done=1, updated_at=datetime('now') WHERE id=?", (u["id"],))
+        db.commit()
+        db.close()
+        return redirect(url_for("index"))
+
+    return redirect("/onboarding?step=1")
+
+
 def _get_missing_entry_days(user_id: int, year: int) -> set:
     """Return ISO dates of past workdays in `year` with no entry and not a holiday."""
     today = datetime.date.today()
     year_start = datetime.date(year, 1, 1).isoformat()
     yesterday = (today - datetime.timedelta(days=1)).isoformat()
+
+    # Respect tracking_start_date: don't flag days before tracking began
+    db = connect()
+    try:
+        r = db.execute("SELECT tracking_start_date FROM users WHERE id=?", (user_id,)).fetchone()
+        tracking_start = r["tracking_start_date"] if r else None
+    finally:
+        db.close()
+    if tracking_start:
+        year_start = max(year_start, tracking_start)
+
     if yesterday < year_start:
         return set()
     days_with = _days_with_any_entry(user_id, year_start, yesterday)
@@ -1771,6 +2136,9 @@ def balance_view():
     # ── Kumulativer Saldo ab 01.01 des gewählten Jahres ──────────────────
     year_start = datetime.date(sel_year, 1, 1).isoformat()
     year_end   = min(datetime.date(sel_year, 12, 31), today).isoformat()
+    # Respect tracking_start_date
+    if u.get("tracking_start_date"):
+        year_start = max(year_start, u["tracking_start_date"])
     today_iso  = today.isoformat()
     start_minutes = _get_start_balance_minutes(u["id"])
     flextag_ranges = _fetch_flextag_ranges(u["id"])
@@ -3507,6 +3875,9 @@ def settings_view():
     def hm(mins):
         return _fmt_minutes(int(mins or 0))
 
+    profile_dn = u.get("display_name") or ""
+    profile_em = u.get("email") or ""
+
     body = f"""
     {flash_html()}
     <div class="card">
@@ -3514,6 +3885,22 @@ def settings_view():
         <h3 style="margin:0;">Einstellungen</h3>
         <a class="btn" href="/settings/password">Passwort ändern</a>
       </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Profil</h3>
+      <form method="post" action="/settings/profile" style="display:flex;flex-direction:column;gap:10px;max-width:380px;">
+        <div>
+          <label>Anzeigename</label><br>
+          <input name="display_name" value="{profile_dn}" placeholder="{u['username']}">
+          <div class="small" style="color:#777;margin-top:3px;">Wird im Header und in der Admin-Übersicht angezeigt. Leer = Benutzername.</div>
+        </div>
+        <div>
+          <label>E-Mail</label><br>
+          <input type="email" name="email" value="{profile_em}" placeholder="max@example.com">
+        </div>
+        <div><button class="btn" type="submit">Speichern</button></div>
+      </form>
     </div>
 
     <div class="card">
@@ -3675,6 +4062,24 @@ def settings_password():
     </div>
     """
     return render_template_string(layout("Passwort ändern", body, u, APP_VERSION))
+
+
+@app.post("/settings/profile")
+@login_required
+def settings_profile_save():
+    bootstrap()
+    u = current_user()
+    display_name = (request.form.get("display_name") or "").strip() or None
+    email = (request.form.get("email") or "").strip() or None
+    db = connect()
+    db.execute(
+        "UPDATE users SET display_name=?, email=?, updated_at=datetime('now') WHERE id=?",
+        (display_name, email, u["id"]),
+    )
+    db.commit()
+    db.close()
+    add_flash("Profil gespeichert.", "success")
+    return redirect("/settings")
 
 
 @app.post("/settings/password")
@@ -4561,18 +4966,37 @@ def admin_users():
     bootstrap()
     u = current_user()
     db = connect()
-    users = db.execute("SELECT id, username, is_admin, is_active, created_at FROM users ORDER BY username").fetchall()
+    users = db.execute(
+        "SELECT id, username, display_name, is_admin, is_active, created_at FROM users ORDER BY username"
+    ).fetchall()
     db.close()
 
     trs = ""
     for r in users:
+        display = r["display_name"] or r["username"]
+        sub = r["username"] if r["display_name"] else ""
         flags = []
         if r["is_admin"]:
             flags.append("Admin")
         if not r["is_active"]:
             flags.append("inaktiv")
-        fl = (" · " + ", ".join(flags)) if flags else ""
-        trs += f'<tr><td>{r["username"]}{fl}</td><td class="small">{r["created_at"] or ""}</td><td><a href="/admin/users/{r["id"]}/edit">Bearbeiten</a></td></tr>'
+        fl = (" <span class='small'>· " + ", ".join(flags) + "</span>") if flags else ""
+        sub_html = f" <span class='small' style='color:var(--mu);'>({sub})</span>" if sub else ""
+        delete_btn = ""
+        if r["id"] != u["id"]:
+            safe_name = display.replace("'", "\\'")
+            delete_btn = (
+                f'<form method="post" action="/admin/users/{r["id"]}/delete" style="display:inline;margin-left:8px;" '
+                f'onsubmit="return confirm(\'Nutzer {safe_name} und alle zugehörigen Daten unwiderruflich löschen?\')">'
+                f'<button class="btn danger" type="submit" style="padding:4px 10px;font-size:13px;">Löschen</button></form>'
+            )
+        trs += (
+            f'<tr>'
+            f'<td>{display}{sub_html}{fl}</td>'
+            f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
+            f'<td style="white-space:nowrap;"><a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>{delete_btn}</td>'
+            f'</tr>'
+        )
 
     body = f'''
     {flash_html()}
@@ -4585,7 +5009,7 @@ def admin_users():
         <thead><tr><th>Name</th><th>Angelegt</th><th></th></tr></thead>
         <tbody>{trs}</tbody>
       </table>
-      <p class="small">Benutzernamen sind nicht änderbar.</p>
+      <p class="small">Benutzernamen sind nicht änderbar. Eigener Account kann nicht gelöscht werden.</p>
     </div>
     '''
     return render_template_string(layout("Admin: Benutzer", body, u, APP_VERSION))
@@ -4596,18 +5020,25 @@ def admin_users():
 def admin_users_new():
     bootstrap()
     u = current_user()
+    today_iso = datetime.date.today().isoformat()
     body = f'''
     {flash_html()}
+    {FORM_ASSETS_JS}
     <div class="card">
       <h3>Benutzer anlegen</h3>
+      <p class="small">Das Passwort ist temporär – der Nutzer wird beim ersten Login durch den Einrichtungs-Wizard geführt.</p>
       <form method="post" action="/admin/users/new">
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
           <div><label>Username</label><br><input name="username" required></div>
-          <div><label>Passwort</label><br><input type="password" name="password" required></div>
-        </div><br>
+          <div><label>Temporäres Passwort</label><br><input type="password" name="password" required></div>
+        </div>
+        <div style="margin-bottom:10px;">
+          <label>Erfassung ab <span class="small">(leer = ab Jahresbeginn)</span></label><br>
+          {_date_input("tracking_start_date", today_iso)}
+        </div>
         <label><input type="checkbox" name="is_admin" value="1"> Admin</label><br>
         <label><input type="checkbox" name="is_active" value="1" checked> aktiv</label><br><br>
-        <button class="btn" type="submit">Anlegen</button>
+        <button class="btn primary" type="submit">Anlegen</button>
         <a class="btn" href="/admin/users">Abbrechen</a>
       </form>
     </div>
@@ -4623,18 +5054,26 @@ def admin_users_new_post():
     password = (request.form.get("password") or "").strip()
     is_admin = (request.form.get("is_admin") or "0") == "1"
     is_active = (request.form.get("is_active") or "0") == "1"
+    tracking_start_date = _parse_date_input(request.form.get("tracking_start_date") or "")
 
     if not username or not password:
         add_flash("Bitte Username/Passwort angeben.", "error")
         return redirect(url_for("admin_users_new"))
 
     try:
-        create_user(username, password, is_admin=is_admin, is_active=is_active)
+        create_user(
+            username,
+            password,
+            is_admin=is_admin,
+            is_active=is_active,
+            tracking_start_date=tracking_start_date,
+            onboarding_done=0,
+        )
     except Exception:
         add_flash("Benutzer konnte nicht angelegt werden (evtl. Username bereits vorhanden).", "error")
         return redirect(url_for("admin_users_new"))
 
-    add_flash("Benutzer angelegt.", "success")
+    add_flash("Benutzer angelegt. Der Nutzer wird beim Login durch den Einrichtungs-Wizard geführt.", "success")
     return redirect(url_for("admin_users"))
 
 
@@ -4685,6 +5124,40 @@ def admin_users_edit_post(user_id: int):
         set_password(user_id, new_pw)
 
     add_flash("Benutzer gespeichert.", "success")
+    return redirect(url_for("admin_users"))
+
+
+@app.post("/admin/users/<int:user_id>/delete")
+@admin_required
+def admin_users_delete(user_id: int):
+    bootstrap()
+    u = current_user()
+
+    if user_id == u["id"]:
+        add_flash("Eigener Account kann nicht gelöscht werden.", "error")
+        return redirect(url_for("admin_users"))
+
+    db = connect()
+    target = db.execute(
+        "SELECT id, username, display_name, is_admin FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    if not target:
+        db.close()
+        abort(404)
+
+    # Prevent deleting the last admin
+    if target["is_admin"]:
+        admin_count = db.execute("SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1").fetchone()[0]
+        if admin_count <= 1:
+            db.close()
+            add_flash("Letzter Admin-Account kann nicht gelöscht werden.", "error")
+            return redirect(url_for("admin_users"))
+
+    display = target["display_name"] or target["username"]
+    db.execute("DELETE FROM users WHERE id=?", (user_id,))
+    db.commit()
+    db.close()
+    add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
     return redirect(url_for("admin_users"))
 
 

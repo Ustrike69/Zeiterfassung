@@ -16,7 +16,14 @@ def _username_canonical(username: str) -> str:
     return (username or "").strip().lower()
 
 
-def create_user(username: str, password: str, is_admin: bool = False, is_active: bool = True) -> int:
+def create_user(
+    username: str,
+    password: str,
+    is_admin: bool = False,
+    is_active: bool = True,
+    tracking_start_date: str = None,
+    onboarding_done: int = 0,
+) -> int:
     canonical = _username_canonical(username)
     if not canonical:
         raise ValueError("Username is required")
@@ -30,9 +37,17 @@ def create_user(username: str, password: str, is_admin: bool = False, is_active:
         db.close()
         raise ValueError("Username already exists")
     cur.execute(
-        "INSERT INTO users(username,password_hash,is_admin,is_active,updated_at) "
-        "VALUES(?,?,?,?,datetime('now'))",
-        (canonical, generate_password_hash(password), 1 if is_admin else 0, 1 if is_active else 0),
+        "INSERT INTO users(username,password_hash,is_admin,is_active,password_changed,"
+        "onboarding_done,tracking_start_date,updated_at) "
+        "VALUES(?,?,?,?,0,?,?,datetime('now'))",
+        (
+            canonical,
+            generate_password_hash(password),
+            1 if is_admin else 0,
+            1 if is_active else 0,
+            1 if onboarding_done else 0,
+            tracking_start_date,
+        ),
     )
     db.commit()
     user_id = cur.lastrowid
@@ -61,13 +76,13 @@ def authenticate(username: str, password: str):
 
 
 def current_user():
-    import sqlite3
     uid = session.get("user_id")
     if not uid:
         return None
     db = connect()
     u = db.execute(
-        "SELECT id, username, is_admin, is_active FROM users WHERE id=?",
+        "SELECT id, username, is_admin, is_active, tracking_start_date, "
+        "password_changed, onboarding_done, display_name, email FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
@@ -77,7 +92,7 @@ def current_user():
 def set_password(user_id: int, new_password: str) -> None:
     db = connect()
     db.execute(
-        "UPDATE users SET password_hash=?, updated_at=datetime('now') WHERE id=?",
+        "UPDATE users SET password_hash=?, password_changed=1, updated_at=datetime('now') WHERE id=?",
         (generate_password_hash(new_password), user_id),
     )
     db.commit()
@@ -103,6 +118,8 @@ def login_required(view):
         if not u or not u.get("is_active"):
             session.clear()
             return redirect(url_for("login"))
+        if not u.get("onboarding_done") and request.endpoint != "onboarding" and request.endpoint != "onboarding_post":
+            return redirect(url_for("onboarding"))
         return view(*args, **kwargs)
     return wrapped
 

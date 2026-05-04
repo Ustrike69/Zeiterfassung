@@ -215,7 +215,23 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_period_locks_user_year ON period_locks(user_id, year)")
 
+    # User profile / onboarding columns
+    if not _col_exists(db, "users", "tracking_start_date"):
+        db.execute("ALTER TABLE users ADD COLUMN tracking_start_date TEXT")
 
+    if not _col_exists(db, "users", "password_changed"):
+        db.execute("ALTER TABLE users ADD COLUMN password_changed INTEGER NOT NULL DEFAULT 0")
+
+    if not _col_exists(db, "users", "onboarding_done"):
+        db.execute("ALTER TABLE users ADD COLUMN onboarding_done INTEGER NOT NULL DEFAULT 0")
+        # Existing users are already configured – mark wizard as complete
+        db.execute("UPDATE users SET onboarding_done=1")
+
+    if not _col_exists(db, "users", "display_name"):
+        db.execute("ALTER TABLE users ADD COLUMN display_name TEXT")
+
+    if not _col_exists(db, "users", "email"):
+        db.execute("ALTER TABLE users ADD COLUMN email TEXT")
 
 
 

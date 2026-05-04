@@ -15,6 +15,10 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
   <ul class="nav-menu">{li}</ul>
 </nav>"""
 
+    user_display = ""
+    if user:
+        user_display = (user.get("display_name") or user.get("username") or "").strip()
+
     html = f"""<!doctype html>
 <html lang="de">
 <head>
@@ -144,7 +148,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
 <header class="app-header">
   <div>
     <div class="hdr-title">{title}</div>
-    <div class="hdr-sub">Zeiterfassung {app_version}</div>
+    <div class="hdr-sub">Zeiterfassung {app_version}{" · " + user_display if user_display else ""}</div>
   </div>
   {nav_html}
 </header>
