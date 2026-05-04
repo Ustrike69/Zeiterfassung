@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v2.19.0"
+APP_VERSION = "v3.1.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -804,11 +804,6 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
         w = wd_day.weekday()
         if not _mask_allows(mask, w):
             continue
-        iso2 = wd_day.isoformat()
-        if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso2):
-            continue
-        if _absence_on_day(user_id, iso2):
-            continue
         eligible.append(wd_day)
 
     if not eligible:
@@ -822,6 +817,208 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
     idx = eligible.index(d)
     return base + (1 if idx < rem else 0)
 
+
+
+def _scheduled_minutes_ignoring_absence(user_id: int, iso_day: str) -> int:
+    """Like _expected_minutes_for_day but skips the absence check.
+    Used to compute the Flextag deduction (how many minutes would have been required)."""
+    ov = _get_expected_override_minutes(user_id, iso_day)
+    if ov is not None:
+        return max(0, int(ov))
+    sched = _normalize_schedule(_get_user_schedule_for_day(user_id, iso_day))
+    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day):
+        return 0
+    d = datetime.date.fromisoformat(iso_day)
+    wd = d.weekday()
+    mask = int(sched.get("workdays_mask", _default_workdays_mask()))
+    if not _mask_allows(mask, wd):
+        return 0
+    mode = (sched.get("mode") or "weekly").strip().lower()
+    if mode == "daily":
+        return int(sched.get(_weekday_col(d), 0) or 0)
+    weekly = int(sched.get("weekly_minutes", 0) or 0)
+    week_days = _week_dates_from(iso_day)
+    eligible = []
+    for wd_day in week_days:
+        w = wd_day.weekday()
+        if not _mask_allows(mask, w):
+            continue
+        eligible.append(wd_day)
+    if not eligible:
+        return 0
+    base = weekly // len(eligible)
+    rem = weekly % len(eligible)
+    eligible = sorted(eligible)
+    if d not in eligible:
+        return 0
+    idx = eligible.index(d)
+    return base + (1 if idx < rem else 0)
+
+
+def _fetch_flextag_ranges(user_id: int) -> list:
+    """Return list of (date_from, date_to) for all Flextag (Sonstige/Flextag) absences."""
+    db = connect()
+    try:
+        rows = db.execute("""
+            SELECT a.date_from, a.date_to
+            FROM absences a JOIN absence_types t ON a.type_id = t.id
+            WHERE a.user_id = ? AND t.name = 'Sonstige'
+              AND LOWER(TRIM(COALESCE(a.comment,''))) = 'flextag'
+        """, (user_id,)).fetchall()
+        return [(r["date_from"], r["date_to"]) for r in rows]
+    finally:
+        db.close()
+
+
+def _is_flextag(iso_day: str, flextag_ranges: list) -> bool:
+    return any(df <= iso_day <= dt for df, dt in flextag_ranges)
+
+
+def _absence_summary_for_period(user_id: int, start_iso: str, end_iso: str) -> dict:
+    """Count absence workdays by type/remark, split into past (< today) and planned (>= today)."""
+    today_iso = datetime.date.today().isoformat()
+    db = connect()
+    try:
+        absences = db.execute("""
+            SELECT a.date_from, a.date_to, a.comment, t.name AS type_name
+            FROM absences a JOIN absence_types t ON a.type_id = t.id
+            WHERE a.user_id = ? AND a.date_to >= ? AND a.date_from <= ?
+            ORDER BY a.date_from
+        """, (user_id, start_iso, end_iso)).fetchall()
+    finally:
+        db.close()
+
+    past: dict = {"urlaub": 0, "krank": 0, "sonstige": {}}
+    planned: dict = {"urlaub": 0, "sonstige": {}}
+
+    for iso in _iter_days(start_iso, end_iso):
+        sched = _normalize_schedule(_get_user_schedule_for_day(user_id, iso))
+        mask = int(sched.get("workdays_mask", _default_workdays_mask()))
+        d = datetime.date.fromisoformat(iso)
+        if not _mask_allows(mask, d.weekday()):
+            continue
+        if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso):
+            continue
+        for ab in absences:
+            if ab["date_from"] <= iso <= ab["date_to"]:
+                t = ab["type_name"]
+                if iso < today_iso:
+                    if t == "Urlaub":
+                        past["urlaub"] += 1
+                    elif t == "Krank":
+                        past["krank"] += 1
+                    elif t == "Sonstige":
+                        remark = (ab["comment"] or "").strip()
+                        past["sonstige"][remark] = past["sonstige"].get(remark, 0) + 1
+                else:
+                    if t == "Urlaub":
+                        planned["urlaub"] += 1
+                    elif t == "Sonstige":
+                        remark = (ab["comment"] or "").strip()
+                        planned["sonstige"][remark] = planned["sonstige"].get(remark, 0) + 1
+                break
+
+    return {"past": past, "planned": planned}
+
+
+# ─── Periodenabschluss (Monats- / Jahresabschluss) ───────────────────────────
+
+LOCK_MSG = "Zeitraum ist abgeschlossen und kann nicht mehr bearbeitet werden."
+
+
+def _is_day_locked(user_id: int, iso_day: str) -> bool:
+    """Return True if the month (or year) containing iso_day is locked."""
+    year = int(iso_day[:4])
+    month = int(iso_day[5:7])
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT 1 FROM period_locks WHERE user_id=? AND year=? "
+            "AND (period_type='year' OR (period_type='month' AND month=?)) LIMIT 1",
+            (user_id, year, month),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+    finally:
+        db.close()
+
+
+def _is_range_locked(user_id: int, date_from: str, date_to: str) -> bool:
+    """Return True if any month spanned by date_from..date_to is locked."""
+    try:
+        y, m = int(date_from[:4]), int(date_from[5:7])
+        ye, me = int(date_to[:4]), int(date_to[5:7])
+        db = connect()
+        try:
+            while (y, m) <= (ye, me):
+                row = db.execute(
+                    "SELECT 1 FROM period_locks WHERE user_id=? AND year=? "
+                    "AND (period_type='year' OR (period_type='month' AND month=?)) LIMIT 1",
+                    (user_id, y, m),
+                ).fetchone()
+                if row:
+                    return True
+                m += 1
+                if m > 12:
+                    m, y = 1, y + 1
+            return False
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
+def _lock_period(user_id: int, year: int, month: int | None, locked_by: int) -> None:
+    ptype = "month" if month is not None else "year"
+    db = connect()
+    try:
+        db.execute(
+            "INSERT OR IGNORE INTO period_locks(user_id,period_type,year,month,locked_at,locked_by) "
+            "VALUES(?,?,?,?,datetime('now'),?)",
+            (user_id, ptype, year, month, locked_by),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _unlock_period(user_id: int, year: int, month: int | None) -> None:
+    db = connect()
+    try:
+        if month is not None:
+            db.execute(
+                "DELETE FROM period_locks WHERE user_id=? AND period_type='month' AND year=? AND month=?",
+                (user_id, year, month),
+            )
+        else:
+            db.execute(
+                "DELETE FROM period_locks WHERE user_id=? AND year=? AND period_type='year'",
+                (user_id, year),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _get_period_lock_status(user_id: int, year: int) -> dict:
+    """Return dict: 'year' → lock row  or  'YYYY-MM' → lock row."""
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT period_type, year, month, locked_at, locked_by "
+            "FROM period_locks WHERE user_id=? AND year=?",
+            (user_id, year),
+        ).fetchall()
+    finally:
+        db.close()
+    status: dict = {}
+    for r in rows:
+        if r["period_type"] == "year":
+            status["year"] = dict(r)
+        else:
+            status[f"{year}-{r['month']:02d}"] = dict(r)
+    return status
 
 
 def _normalize_schedule(s: dict) -> dict:
@@ -1289,6 +1486,55 @@ def index():
     missing_count = len(_get_missing_entry_days(u["id"], year))
     missing_color = "var(--danger)" if missing_count > 0 else "var(--ok)"
 
+    # Abwesenheiten Jahresübersicht
+    ab_sum = _absence_summary_for_period(u["id"], f"{year}-01-01", f"{year}-12-31")
+
+    def _ci_get(d: dict, key: str) -> int:
+        kl = key.lower()
+        return sum(v for k, v in d.items() if k.lower() == kl)
+
+    past_urlaub   = ab_sum["past"]["urlaub"]
+    planned_urlaub = ab_sum["planned"]["urlaub"]
+    past_krank    = ab_sum["past"]["krank"]
+    past_verdi    = _ci_get(ab_sum["past"]["sonstige"], "verdi")
+    planned_verdi = _ci_get(ab_sum["planned"]["sonstige"], "verdi")
+    past_flextag  = _ci_get(ab_sum["past"]["sonstige"], "flextag")
+    planned_flextag = _ci_get(ab_sum["planned"]["sonstige"], "flextag")
+    vac_available = int(round(vc["remaining_total"]))
+
+    def _ab_cell(label: str, rows: list) -> str:
+        content = "".join(
+            f"<div style='display:flex;justify-content:space-between;gap:12px;'>"
+            f"<span style='color:var(--mu);'>{k}</span><b>{v}</b></div>"
+            for k, v in rows
+        )
+        return (
+            f"<div style='background:var(--bg);border:1px solid var(--bd);"
+            f"border-radius:var(--rs);padding:10px 12px;'>"
+            f"<div style='font-size:11px;font-weight:600;text-transform:uppercase;"
+            f"letter-spacing:.04em;color:var(--mu);margin-bottom:6px;'>{label}</div>"
+            f"<div style='display:flex;flex-direction:column;gap:3px;font-size:13px;'>{content}</div>"
+            f"</div>"
+        )
+
+    ab_cells = _ab_cell("Urlaub", [
+        ("Genommen", past_urlaub),
+        *([("Geplant", planned_urlaub)] if planned_urlaub else []),
+        ("Verfügbar", vac_available),
+    ])
+    if past_krank:
+        ab_cells += _ab_cell("Krank", [("Tage", past_krank)])
+    if past_verdi or planned_verdi:
+        ab_cells += _ab_cell("Verdi", [
+            *([("Genommen", past_verdi)] if past_verdi else []),
+            *([("Geplant", planned_verdi)] if planned_verdi else []),
+        ])
+    if past_flextag or planned_flextag:
+        ab_cells += _ab_cell("Flextag", [
+            *([("Genommen", past_flextag)] if past_flextag else []),
+            *([("Geplant", planned_flextag)] if planned_flextag else []),
+        ])
+
     body = f'''
     {flash_html()}
     <div class="card" style="margin-bottom:12px;">
@@ -1305,6 +1551,11 @@ def index():
       <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Fehlende Einträge {year}</div>
       <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1;">{missing_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
       <div class="small" style="margin-top:6px;">vergangene Arbeitstage ohne Zeiteintrag · <a href="/calendar">Kalender</a></div>
+    </div>
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;">{ab_cells}</div>
+      <div class="small" style="margin-top:8px;"><a href="/absences">Alle Abwesenheiten →</a></div>
     </div>
     <a class="btn primary" href="/day/{today.isoformat()}" style="width:100%;font-size:17px;padding:14px;">Zeiterfassung heute</a>
     '''
@@ -1396,6 +1647,8 @@ def _iter_days(start_iso: str, end_iso: str):
 def _calc_balance(user_id: int, start_iso: str, end_iso: str) -> dict:
     """Calculate balance details between two dates (inclusive)."""
     start_minutes = _get_start_balance_minutes(user_id)
+    today_iso = datetime.date.today().isoformat()
+    flextag_ranges = _fetch_flextag_ranges(user_id)
 
     rows = []
     running = int(start_minutes)
@@ -1403,7 +1656,10 @@ def _calc_balance(user_id: int, start_iso: str, end_iso: str) -> dict:
     for iso in _iter_days(start_iso, end_iso):
         expected = int(_expected_minutes_for_day(user_id, iso) or 0)
         actual = int(_actual_minutes_for_day(user_id, iso) or 0)
-        delta = int(actual - expected)
+        flextag_min = 0
+        if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
+            flextag_min = _scheduled_minutes_ignoring_absence(user_id, iso)
+        delta = int(actual - expected - flextag_min)
         running += delta
         rows.append({
             "day": iso,
@@ -1411,6 +1667,7 @@ def _calc_balance(user_id: int, start_iso: str, end_iso: str) -> dict:
             "actual": actual,
             "delta": delta,
             "running": running,
+            "flextag_min": flextag_min,
         })
 
     return {
@@ -1418,6 +1675,59 @@ def _calc_balance(user_id: int, start_iso: str, end_iso: str) -> dict:
         "end_minutes": int(running),
         "rows": rows,
     }
+
+
+def _render_absence_summary_card(user_id: int, start_iso: str, end_iso: str) -> str:
+    summary = _absence_summary_for_period(user_id, start_iso, end_iso)
+    past = summary["past"]
+    planned = summary["planned"]
+
+    def _sonstige_line(remark: str, n: int) -> str:
+        label = remark if remark else "Sonstige (ohne Bemerkung)"
+        suffix = " <span class='small' style='color:var(--ac);'>(vom Gleitzeitkonto)</span>" if remark.lower() == "flextag" else ""
+        return f"<div><b>{label}:</b> {n} Tag{'e' if n != 1 else ''}{suffix}</div>"
+
+    past_lines = []
+    if past["urlaub"]:
+        n = past["urlaub"]
+        past_lines.append(f"<div><b>Urlaub:</b> {n} Arbeitstag{'e' if n != 1 else ''}</div>")
+    if past["krank"]:
+        n = past["krank"]
+        past_lines.append(f"<div><b>Krank:</b> {n} Arbeitstag{'e' if n != 1 else ''}</div>")
+    for remark, n in sorted(past["sonstige"].items()):
+        past_lines.append(_sonstige_line(remark, n))
+
+    planned_lines = []
+    if planned["urlaub"]:
+        n = planned["urlaub"]
+        planned_lines.append(f"<div><b>Urlaub:</b> {n} Arbeitstag{'e' if n != 1 else ''}</div>")
+    for remark, n in sorted(planned["sonstige"].items()):
+        planned_lines.append(_sonstige_line(remark, n))
+
+    if not past_lines and not planned_lines:
+        return ""
+
+    def _section(label: str, lines: list) -> str:
+        rows = "".join(lines)
+        return (
+            f"<div style='flex:1;min-width:140px;'>"
+            f"<div class='small' style='font-weight:600;text-transform:uppercase;"
+            f"letter-spacing:.04em;margin-bottom:6px;'>{label}</div>"
+            f"<div style='display:flex;flex-direction:column;gap:5px;'>{rows}</div>"
+            f"</div>"
+        )
+
+    sections = ""
+    if past_lines:
+        sections += _section("Erfasst", past_lines)
+    if planned_lines:
+        sections += _section("Geplant", planned_lines)
+
+    return f"""<div class="card" style="margin-top:12px;">
+  <h3 style="margin-bottom:10px;">Abwesenheiten im Zeitraum</h3>
+  <div style="display:flex;gap:24px;flex-wrap:wrap;">{sections}</div>
+  <p class="small" style="margin-top:8px;">Nur Arbeitstage (ohne Wochenenden/Feiertage)</p>
+</div>"""
 
 
 @app.get("/balance")
@@ -1459,21 +1769,23 @@ def balance_view():
         sel_month = today.month
 
     # ── Kumulativer Saldo ab 01.01 des gewählten Jahres ──────────────────
-    # Bug-Fix: _calc_balance startete immer bei global start_minutes ohne
-    # vorangegangene Monate zu akkumulieren. Die neue Logik berechnet immer
-    # das gesamte Jahr und filtert nur die Anzeige auf den gewählten Monat.
     year_start = datetime.date(sel_year, 1, 1).isoformat()
     year_end   = min(datetime.date(sel_year, 12, 31), today).isoformat()
+    today_iso  = today.isoformat()
     start_minutes = _get_start_balance_minutes(u["id"])
+    flextag_ranges = _fetch_flextag_ranges(u["id"])
     running = int(start_minutes)
     all_rows: list[dict] = []
     for iso in _iter_days(year_start, year_end):
         expected = int(_expected_minutes_for_day(u["id"], iso) or 0)
         actual   = int(_actual_minutes_for_day(u["id"], iso) or 0)
-        delta    = actual - expected
+        flextag_min = 0
+        if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
+            flextag_min = _scheduled_minutes_ignoring_absence(u["id"], iso)
+        delta    = actual - expected - flextag_min
         running += delta
         all_rows.append({"day": iso, "expected": expected, "actual": actual,
-                         "delta": delta, "running": running})
+                         "delta": delta, "running": running, "flextag_min": flextag_min})
 
     # ── Anzeigebereich bestimmen ─────────────────────────────────────────
     if sel_month == 0:
@@ -1511,17 +1823,23 @@ def balance_view():
     # ── Tabellenzeilen ───────────────────────────────────────────────────
     trs = ""
     for r in display_rows:
+        flextag_badge = (
+            f"<span class='small' style='color:var(--ac);white-space:nowrap;'>"
+            f"Flextag −{_fmt_minutes(r['flextag_min'])}</span>"
+            if r.get("flextag_min") else ""
+        )
         trs += (
             "<tr>"
             f"<td>{r['day']}</td>"
             f"<td style='text-align:right;'>"
-            f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;'>"
+            f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;'>"
             f"<input type='hidden' name='day' value='{r['day']}'>"
             f"<input type='hidden' name='y' value='{sel_year}'>"
             f"<input type='hidden' name='m' value='{sel_month}'>"
             f"<input name='expected' value='{_fmt_minutes(r['expected'])}' style='width:70px;text-align:right;' placeholder='HH:MM'>"
             f"<button class='btn' type='submit' style='padding:4px 8px;'>OK</button>"
             f"</form>"
+            f"{flextag_badge}"
             f"</td>"
             f"<td style='text-align:right;'>{_fmt_minutes(r['actual'])}</td>"
             f"<td style='text-align:right;'><b>{_fmt_minutes_signed(r['delta'])}</b></td>"
@@ -1576,7 +1894,7 @@ def balance_view():
 
       <hr>
 
-      <p class="small">Delta = Ist − Soll. Wochenenden, Feiertage und Abwesenheitstage zählen als Soll = 0.</p>
+      <p class="small">Delta = Ist − Soll. Wochenenden, Feiertage und Abwesenheitstage zählen als Soll = 0. Flextage werden zusätzlich vom Gleitzeitkonto abgezogen.</p>
       <table>
         <thead>
           <tr>
@@ -1591,6 +1909,7 @@ def balance_view():
       </table>
       {("<p class='small'><i>Keine Tage im Zeitraum.</i></p>" if not display_rows else "")}
     </div>
+    {_render_absence_summary_card(u["id"], display_start, display_end)}
     """
     return render_template_string(layout("Gleitzeitkonto", body, u, APP_VERSION))
 
@@ -1667,12 +1986,17 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
 
     start_minutes = _get_start_balance_minutes(user_id)
     running = int(start_minutes)
+    today_iso = datetime.date.today().isoformat()
+    flextag_ranges = _fetch_flextag_ranges(user_id)
 
     days = sorted(_days_with_any_entry(user_id, start_iso, end_iso))
     for iso in days:
         expected = int(_expected_minutes_for_day(user_id, iso) or 0)
         actual = int(_actual_minutes_for_day(user_id, iso) or 0)
-        running += int(actual - expected)
+        flextag_min = 0
+        if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
+            flextag_min = _scheduled_minutes_ignoring_absence(user_id, iso)
+        running += int(actual - expected - flextag_min)
 
     return int(running)
 
@@ -1989,6 +2313,10 @@ def absences_new_post():
         add_flash(err, "error")
         return redirect(url_for("absences_new"))
 
+    if date_from and date_to and _is_range_locked(u["id"], date_from, date_to):
+        add_flash(LOCK_MSG, "error")
+        return redirect(url_for("absences_new"))
+
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
     type_name = type_row["name"] if type_row else ""
@@ -2104,12 +2432,19 @@ def absences_edit_post(absence_id: int):
         return redirect(f"/absences/{absence_id}/edit")
 
     row = db.execute(
-        "SELECT id FROM absences WHERE id=? AND user_id=?",
+        "SELECT id, date_from AS df, date_to AS dt FROM absences WHERE id=? AND user_id=?",
         (absence_id, u["id"]),
     ).fetchone()
     if not row:
         db.close()
         abort(404)
+
+    if _is_range_locked(u["id"], row["df"], row["dt"]) or (
+        date_from and date_to and _is_range_locked(u["id"], date_from, date_to)
+    ):
+        db.close()
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/absences/{absence_id}/edit")
 
     if _has_overlap(db, u["id"], date_from, date_to, exclude_id=absence_id):
         db.close()
@@ -2135,6 +2470,14 @@ def absences_delete(absence_id: int):
     bootstrap()
     u = current_user()
     db = connect()
+    row = db.execute(
+        "SELECT date_from, date_to FROM absences WHERE id=? AND user_id=?",
+        (absence_id, u["id"]),
+    ).fetchone()
+    if row and _is_range_locked(u["id"], row["date_from"], row["date_to"]):
+        db.close()
+        add_flash(LOCK_MSG, "error")
+        return redirect(url_for("absences_list"))
     db.execute("DELETE FROM absences WHERE id=? AND user_id=?", (absence_id, u["id"]))
     db.commit()
     db.close()
@@ -2433,13 +2776,16 @@ def calendar_view():
         next_month = 1
         next_year += 1
 
+    cal_locked = _is_day_locked(u["id"], f"{year}-{month:02d}-01")
+    lock_badge = " 🔒" if cal_locked else ""
+
     body = f"""
     {flash_html()}
     {CALENDAR_DAYMENU_ASSETS}
 
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Kalender – {year}-{month:02d}</h3>
+        <h3 style="margin:0;">Kalender – {year}-{month:02d}{lock_badge}</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <a class="btn" href="/calendar?y={prev_year}&m={prev_month}">◀︎</a>
           <a class="btn" href="/calendar?y={today.year}&m={today.month}">Heute</a>
@@ -2534,24 +2880,29 @@ def day_detail(day: str):
         prev_day = day
         next_day = day
 
+    day_locked = _is_day_locked(u["id"], day)
+
     blocks_html = ""
     for b in blocks:
         mins = _minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0)
-        blocks_html += f"""
-        <div class="card" style="margin-top:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-            <div><b>{b['time_in']}–{b['time_out']}</b> · Pause {int(b['break_minutes'] or 0)} min · <b>{_fmt_minutes(mins)}</b></div>
-            <div style="display:flex;gap:10px;align-items:center;">
-              <a href="/day/{day}/block/{b['id']}/edit">Bearbeiten</a>
-              <form method="post" action="/day/{day}/block/delete" style="margin:0;" onsubmit="return confirm('Zeitblock wirklich löschen?');">
-                <input type="hidden" name="block_id" value="{b['id']}">
-                <button class="btn danger" type="submit">Löschen</button>
-              </form>
-            </div>
-          </div>
-          {f"<div class='small'>{b['comment']}</div>" if b['comment'] else ""}
-        </div>
-        """
+        if day_locked:
+            actions = ""
+        else:
+            actions = (
+                f"<div style='display:flex;gap:10px;align-items:center;'>"
+                f"<a href='/day/{day}/block/{b['id']}/edit'>Bearbeiten</a>"
+                f"<form method='post' action='/day/{day}/block/delete' style='margin:0;' onsubmit=\"return confirm('Zeitblock wirklich löschen?');\">"
+                f"<input type='hidden' name='block_id' value='{b['id']}'>"
+                f"<button class='btn danger' type='submit'>Löschen</button></form></div>"
+            )
+        cmt = f"<div class='small'>{b['comment']}</div>" if b["comment"] else ""
+        blocks_html += (
+            f"<div class='card' style='margin-top:10px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;'>"
+            f"<div><b>{b['time_in']}–{b['time_out']}</b> · Pause {int(b['break_minutes'] or 0)} min"
+            f" · <b>{_fmt_minutes(mins)}</b></div>"
+            f"{actions}</div>{cmt}</div>"
+        )
 
     abs_html = ""
     if abs_row:
@@ -2604,6 +2955,7 @@ def day_detail(day: str):
       <p class="small">Mehrere Zeitblöcke pro Tag möglich. Netto-Summe: <b>{_fmt_minutes(total)}</b></p>
     </div>
 
+    {"" if day_locked else f'''
     <div class="card" style="margin-top:10px;">
       <h3 style="margin-top:0;">Zeitblock hinzufügen</h3>
       <form method="post" action="/day/{day}/block/add">
@@ -2611,8 +2963,7 @@ def day_detail(day: str):
           <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
           <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
           <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
-<div style='margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;'><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_add').value='30'">30</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_add').value='45'">45</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
-          <div class='small' style='display:flex;gap:6px;align-items:center;margin-top:6px;'><span style='color:#777;'>Schnellwahl:</span><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,30);">30</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,45);">45</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,60);">60</a><span style='color:#777;'>min</span></div>
+<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'30\'">30</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'45\'">45</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'60\'">60</button></div></div>
         </div>
         <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
         <button class="btn" type="submit" style="margin-top:10px;">Speichern</button>
@@ -2621,14 +2972,6 @@ def day_detail(day: str):
 
     <div class="card" style="margin-top:10px;">
       <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
-<script>
-{_REMARK_JS}
-function syncDayBemerkung(sel) {{
-  var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
-  document.getElementById('d_remark_row').style.display = isSonstige ? '' : 'none';
-  if (isSonstige) syncRemarkNew('d_remark_new_row','d_remark_new_inp',document.getElementById('d_remark_sel'));
-}}
-</script>
       <form method="post" action="/day/{day}/absence/add">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
           <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
@@ -2639,7 +2982,17 @@ function syncDayBemerkung(sel) {{
       </form>
       <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
     </div>
-<script>syncDayBemerkung(document.getElementById('day_type_sel'));</script>
+<script>
+{_REMARK_JS}
+function syncDayBemerkung(sel) {{
+  var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
+  document.getElementById("d_remark_row").style.display = isSonstige ? "" : "none";
+  if (isSonstige) syncRemarkNew("d_remark_new_row","d_remark_new_inp",document.getElementById("d_remark_sel"));
+}}
+syncDayBemerkung(document.getElementById("day_type_sel"));
+</script>
+'''}
+    {"<div class='card' style='margin-top:10px;background:var(--sf);border-color:var(--bd);'><p style='margin:0;'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. <a href=\"/periods\">Abschlüsse verwalten</a></p></div>" if day_locked else ""}
 
     <h3 style="margin-top:14px;">Vorhandene Zeitblöcke</h3>
     {blocks_html or "<div class='small' style='color:#777;'>Keine Zeitblöcke erfasst.</div>"}
@@ -2647,12 +3000,12 @@ function syncDayBemerkung(sel) {{
     <h3 style="margin-top:14px;">Vorhandene Abwesenheit</h3>
     {abs_html or "<div class='small' style='color:#777;'>Keine Abwesenheit an diesem Tag.</div>"}
 
-    {_business_trip_section(day, trip)}
+    {_business_trip_section(day, trip, locked=day_locked)}
     """
     return render_template_string(layout("Tages-Editor", body, u, APP_VERSION))
 
 
-def _business_trip_section(day: str, trip) -> str:
+def _business_trip_section(day: str, trip, locked: bool = False) -> str:
     """Render the Dienstreise card for the day editor."""
     t = dict(trip) if trip else {}
     trip_id   = t.get("id") or ""
@@ -2669,7 +3022,7 @@ def _business_trip_section(day: str, trip) -> str:
     multi_display = "" if is_multi else "none"
 
     delete_btn = ""
-    if trip_id:
+    if trip_id and not locked:
         delete_btn = f"""
         <form method="post" action="/day/{day}/business_trip/delete" style="display:inline;"
               onsubmit="return confirm('Dienstreise löschen?');">
@@ -2678,6 +3031,8 @@ def _business_trip_section(day: str, trip) -> str:
         </form>"""
 
     heading = "✈ Dienstreise bearbeiten" if trip else "✈ Dienstreise hinzufügen"
+    if locked:
+        heading = "✈ Dienstreise (schreibgeschützt)"
 
     return f"""
     <h3 style="margin-top:14px;">Dienstreise</h3>
@@ -2712,9 +3067,9 @@ def _business_trip_section(day: str, trip) -> str:
           <label>Notizen</label><br>
           <textarea name="notes" rows="2" placeholder="optional">{notes}</textarea>
         </div>
-        <button class="btn" type="submit">Dienstreise speichern</button>
+        {"" if locked else '<button class="btn" type="submit">Dienstreise speichern</button>'}
         {delete_btn}
-      </form>
+      {"</form>" if not locked else "<p class='small' style='margin-top:6px;'>🔒 Schreibgeschützt</p>"}
     </div>"""
 
 
@@ -2726,6 +3081,9 @@ def day_business_trip_save(day: str):
     day = str(day).strip()[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
     destination = (request.form.get("destination") or "").strip()
     if not destination:
         add_flash("Ort ist Pflichtfeld.", "error")
@@ -2785,6 +3143,9 @@ def day_business_trip_delete(day: str):
     bootstrap()
     u = current_user()
     day = str(day).strip()[:10]
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
     trip_id = (request.form.get("trip_id") or "").strip()
     db = connect()
     if trip_id:
@@ -2807,6 +3168,9 @@ def day_block_add(day: str):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         add_flash("Ungültiges Datum.", "error")
         return redirect("/calendar")
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays',1)) == 1:
         if (_is_weekend(day) or _is_holiday(day)) and not request.form.get('override_nonwork'):
@@ -2859,6 +3223,9 @@ def day_block_edit(day: str, block_id: int):
     u = current_user()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
 
     db = connect()
     b = db.execute(
@@ -2933,6 +3300,9 @@ def day_block_edit_post(day: str, block_id: int):
     u = current_user()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
 
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays', 1)) == 1:
@@ -3001,6 +3371,9 @@ def day_block_edit_post(day: str, block_id: int):
 def day_block_delete(day: str):
     bootstrap()
     u = current_user()
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
     block_id = int(request.form.get("block_id") or 0)
     db = connect()
     db.execute("DELETE FROM time_blocks WHERE id=? AND user_id=?", (block_id, u["id"]))
@@ -3015,6 +3388,9 @@ def day_block_delete(day: str):
 def day_absence_add(day: str):
     bootstrap()
     u = current_user()
+    if _is_day_locked(u["id"], day):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
     type_id = int(request.form.get("type_id") or 0)
     is_half_day = 1 if (request.form.get("is_half_day") == "1") else 0
     comment = _resolve_comment_from_form()
@@ -3706,6 +4082,9 @@ def business_trips_add():
     end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
     if end_date and end_date < start_date:
         end_date = start_date
+    if _is_range_locked(u["id"], start_date, end_date or start_date):
+        add_flash(LOCK_MSG, "error")
+        return redirect(f"/business_trips?y={year}&new=1")
     departure_time     = (request.form.get("departure_time") or "").strip() or None
     departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
     return_time        = (request.form.get("return_time") or "").strip() or None
@@ -3744,11 +4123,198 @@ def business_trips_delete():
     year = (request.form.get("y") or str(datetime.date.today().year)).strip()
     if trip_id:
         db = connect()
+        trip = db.execute(
+            "SELECT start_date, end_date FROM business_trips WHERE id=? AND user_id=?",
+            (int(trip_id), u["id"]),
+        ).fetchone()
+        if trip and _is_range_locked(u["id"], trip["start_date"], trip["end_date"] or trip["start_date"]):
+            db.close()
+            add_flash(LOCK_MSG, "error")
+            return redirect(f"/business_trips?y={year}")
         db.execute("DELETE FROM business_trips WHERE id=? AND user_id=?", (int(trip_id), u["id"]))
         db.commit()
         db.close()
         add_flash("Dienstreise gelöscht.", "success")
     return redirect(f"/business_trips?y={year}")
+
+
+# ─── Periodenabschluss-Verwaltung ────────────────────────────────────────────
+
+@app.get("/periods")
+@login_required
+def periods_view():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+
+    try:
+        sel_year = int(request.args.get("y") or today.year)
+    except (ValueError, TypeError):
+        sel_year = today.year
+
+    locks = _get_period_lock_status(u["id"], sel_year)
+    year_locked = "year" in locks
+
+    # username cache for "locked_by"
+    db = connect()
+    try:
+        users_map = {r["id"]: r["username"] for r in db.execute("SELECT id, username FROM users").fetchall()}
+    finally:
+        db.close()
+
+    def _lock_who(lock_row: dict) -> str:
+        by = lock_row.get("locked_by")
+        name = users_map.get(by, f"#{by}") if by else "–"
+        ts = (lock_row.get("locked_at") or "")[:16]
+        return f"{ts} · {name}"
+
+    trs = ""
+    for m in range(1, 13):
+        key = f"{sel_year}-{m:02d}"
+        month_locked = year_locked or (key in locks)
+        lock_row = locks.get(key) or locks.get("year") if month_locked else None
+
+        # determine if month is past (lockable)
+        month_is_past = (sel_year < today.year) or (sel_year == today.year and m < today.month)
+
+        if month_locked:
+            status_html = f"<span style='color:var(--ok);'>🔒 Abgeschlossen</span>"
+            if lock_row:
+                status_html += f" <span class='small'>({_lock_who(lock_row)})</span>"
+            action = ""
+            if u.get("is_admin"):
+                # Only allow unlocking individual month locks (not inherited year locks)
+                if key in locks:
+                    action = (
+                        f"<form method='post' action='/periods/unlock' style='display:inline;'>"
+                        f"<input type='hidden' name='year' value='{sel_year}'>"
+                        f"<input type='hidden' name='month' value='{m}'>"
+                        f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Entsperren</button></form>"
+                    )
+                else:
+                    action = "<span class='small' style='color:var(--mu);'>via Jahresabschluss</span>"
+        elif month_is_past:
+            status_html = "<span style='color:var(--mu);'>Offen</span>"
+            action = (
+                f"<form method='post' action='/periods/lock' style='display:inline;'>"
+                f"<input type='hidden' name='year' value='{sel_year}'>"
+                f"<input type='hidden' name='month' value='{m}'>"
+                f"<button class='btn' style='padding:4px 10px;font-size:13px;'>Abschließen</button></form>"
+            )
+        else:
+            status_html = "<span class='small' style='color:var(--mu);'>–</span>"
+            action = ""
+
+        trs += (
+            f"<tr><td><a href='/balance?y={sel_year}&m={m}'>{MONTH_NAMES_DE[m]} {sel_year}</a></td>"
+            f"<td>{status_html}</td><td>{action}</td></tr>"
+        )
+
+    # Year-level lock row
+    year_is_past = sel_year < today.year
+    if year_locked:
+        yr_status = f"<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
+        lr = locks.get("year")
+        if lr:
+            yr_status += f" <span class='small'>({_lock_who(lr)})</span>"
+        yr_action = ""
+        if u.get("is_admin") and "year" in locks:
+            yr_action = (
+                f"<form method='post' action='/periods/unlock' style='display:inline;'>"
+                f"<input type='hidden' name='year' value='{sel_year}'>"
+                f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Jahr entsperren</button></form>"
+            )
+    elif year_is_past:
+        yr_status = "<span style='color:var(--mu);'>Offen</span>"
+        yr_action = (
+            f"<form method='post' action='/periods/lock' style='display:inline;'>"
+            f"<input type='hidden' name='year' value='{sel_year}'>"
+            f"<button class='btn' style='padding:4px 10px;font-size:13px;'>Jahr abschließen</button></form>"
+        )
+    else:
+        yr_status = "<span class='small' style='color:var(--mu);'>Laufendes Jahr</span>"
+        yr_action = ""
+
+    available_years = list(range(max(today.year - 5, 2020), today.year + 1))
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
+        for y in reversed(available_years)
+    )
+
+    body = f"""
+    {flash_html()}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="margin:0;">Abschlüsse</h3>
+        <form method="get" style="display:flex;gap:8px;align-items:end;">
+          <div><label>Jahr</label><br><select name="y">{year_opts}</select></div>
+          <button class="btn" type="submit">Anzeigen</button>
+        </form>
+      </div>
+      <p class="small" style="margin-top:8px;">Abgeschlossene Zeiträume können nicht mehr bearbeitet werden. Entsperren nur durch Admins möglich.</p>
+      <table style="margin-top:12px;">
+        <thead><tr><th>Monat</th><th>Status</th><th></th></tr></thead>
+        <tbody>{trs}</tbody>
+      </table>
+      <hr>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <b>Jahr {sel_year}:</b> {yr_status} {yr_action}
+      </div>
+    </div>
+    """
+    return render_template_string(layout("Abschlüsse", body, u, APP_VERSION))
+
+
+@app.post("/periods/lock")
+@login_required
+def periods_lock():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+    try:
+        year = int(request.form.get("year") or 0)
+        month_raw = request.form.get("month") or ""
+        month = int(month_raw) if month_raw.strip() else None
+    except (ValueError, TypeError):
+        add_flash("Ungültige Eingabe.", "error")
+        return redirect("/periods")
+
+    # Guard: cannot lock current or future month
+    if month is not None:
+        lockable = (year < today.year) or (year == today.year and month < today.month)
+        if not lockable:
+            add_flash("Nur vergangene Monate können abgeschlossen werden.", "error")
+            return redirect(f"/periods?y={year}")
+    else:
+        if year >= today.year:
+            add_flash("Nur vergangene Jahre können als ganzes abgeschlossen werden.", "error")
+            return redirect(f"/periods?y={year}")
+
+    _lock_period(u["id"], year, month, locked_by=u["id"])
+    label = f"{MONTH_NAMES_DE[month]} {year}" if month else f"Jahr {year}"
+    add_flash(f"{label} abgeschlossen.", "success")
+    return redirect(f"/periods?y={year}")
+
+
+@app.post("/periods/unlock")
+@login_required
+def periods_unlock():
+    bootstrap()
+    u = current_user()
+    if not u.get("is_admin"):
+        abort(403)
+    try:
+        year = int(request.form.get("year") or 0)
+        month_raw = request.form.get("month") or ""
+        month = int(month_raw) if month_raw.strip() else None
+    except (ValueError, TypeError):
+        add_flash("Ungültige Eingabe.", "error")
+        return redirect("/periods")
+
+    _unlock_period(u["id"], year, month)
+    label = f"{MONTH_NAMES_DE[month]} {year}" if month else f"Jahr {year}"
+    add_flash(f"{label} entsperrt.", "success")
+    return redirect(f"/periods?y={year}")
 
 
 @app.get("/export")
@@ -4120,6 +4686,115 @@ def admin_users_edit_post(user_id: int):
 
     add_flash("Benutzer gespeichert.", "success")
     return redirect(url_for("admin_users"))
+
+
+@app.get("/admin/periods")
+@admin_required
+def admin_periods():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+
+    try:
+        sel_year = int(request.args.get("y") or today.year)
+    except (ValueError, TypeError):
+        sel_year = today.year
+
+    db = connect()
+    try:
+        all_users = db.execute("SELECT id, username FROM users WHERE is_active=1 ORDER BY username").fetchall()
+        locks_raw = db.execute(
+            "SELECT pl.*, u.username AS locked_by_name FROM period_locks pl "
+            "LEFT JOIN users u ON u.id=pl.locked_by WHERE pl.year=? ORDER BY pl.user_id, pl.period_type, pl.month",
+            (sel_year,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    # Group locks by user_id
+    locks_by_user: dict = {}
+    for r in locks_raw:
+        uid = r["user_id"]
+        locks_by_user.setdefault(uid, {})
+        if r["period_type"] == "year":
+            locks_by_user[uid]["year"] = dict(r)
+        else:
+            locks_by_user[uid][f"{sel_year}-{r['month']:02d}"] = dict(r)
+
+    available_years = list(range(max(today.year - 5, 2020), today.year + 1))
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
+        for y in reversed(available_years)
+    )
+
+    trs = ""
+    for usr in all_users:
+        uid = usr["id"]
+        ulocks = locks_by_user.get(uid, {})
+        year_lk = "year" in ulocks
+        locked_months = [
+            m for m in range(1, 13)
+            if year_lk or f"{sel_year}-{m:02d}" in ulocks
+        ]
+        n_locked = len(locked_months)
+        if n_locked == 0:
+            status_txt = "<span class='small' style='color:var(--mu);'>Keine Abschlüsse</span>"
+        elif n_locked == 12 or year_lk:
+            status_txt = "<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
+        else:
+            names = ", ".join(MONTH_NAMES_DE[m][:3] for m in locked_months)
+            status_txt = f"<span style='color:var(--ok);'>🔒 {n_locked} Monate ({names})</span>"
+
+        unlock_form = (
+            f"<form method='post' action='/admin/periods/unlock' style='display:inline;'>"
+            f"<input type='hidden' name='target_user_id' value='{uid}'>"
+            f"<input type='hidden' name='year' value='{sel_year}'>"
+            f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Alle entsperren</button>"
+            f"</form>"
+        ) if ulocks else ""
+
+        detail_link = f"<a class='btn' href='/periods?y={sel_year}' style='padding:4px 10px;font-size:13px;'>Details</a>" if uid == u["id"] else ""
+
+        trs += f"<tr><td><b>{usr['username']}</b></td><td>{status_txt}</td><td style='white-space:nowrap;'>{detail_link} {unlock_form}</td></tr>"
+
+    body = f"""
+    {flash_html()}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="margin:0;">Admin: Abschlüsse</h3>
+        <form method="get" style="display:flex;gap:8px;align-items:end;">
+          <div><label>Jahr</label><br><select name="y">{year_opts}</select></div>
+          <button class="btn" type="submit">Anzeigen</button>
+        </form>
+      </div>
+      <table style="margin-top:12px;">
+        <thead><tr><th>Benutzer</th><th>Status {sel_year}</th><th></th></tr></thead>
+        <tbody>{trs}</tbody>
+      </table>
+    </div>
+    """
+    return render_template_string(layout("Admin: Abschlüsse", body, u, APP_VERSION))
+
+
+@app.post("/admin/periods/unlock")
+@admin_required
+def admin_periods_unlock():
+    bootstrap()
+    try:
+        target_uid = int(request.form.get("target_user_id") or 0)
+        year = int(request.form.get("year") or 0)
+    except (ValueError, TypeError):
+        add_flash("Ungültige Eingabe.", "error")
+        return redirect("/admin/periods")
+
+    db = connect()
+    try:
+        db.execute("DELETE FROM period_locks WHERE user_id=? AND year=?", (target_uid, year))
+        db.commit()
+    finally:
+        db.close()
+    add_flash(f"Alle Abschlüsse für Jahr {year} entsperrt.", "success")
+    return redirect(f"/admin/periods?y={year}")
 
 
 if __name__ == "__main__":

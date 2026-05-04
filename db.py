@@ -201,6 +201,20 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_business_trips_user_date ON business_trips(user_id, start_date)")
 
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS period_locks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        period_type TEXT NOT NULL CHECK(period_type IN ('month','year')),
+        year INTEGER NOT NULL,
+        month INTEGER,
+        locked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        locked_by INTEGER REFERENCES users(id),
+        UNIQUE(user_id, period_type, year, month)
+    );
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_period_locks_user_year ON period_locks(user_id, year)")
+
 
 
 

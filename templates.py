@@ -1,9 +1,10 @@
 def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> str:
     nav_html = ""
     if user:
-        items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/settings", "Einstellungen"), ("/export", "Export")]
+        items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export")]
         if user.get("is_admin"):
             items.append(("/admin/users", "Admin: Benutzer"))
+            items.append(("/admin/periods", "Admin: Abschlüsse"))
         items.append(("/logout", "Logout"))
         li = "".join([f'<li><a class="nav-link" href="{u}">{t}</a></li>' for u, t in items])
         nav_html = f"""<nav class="app-nav">
