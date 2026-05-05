@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.0.0"
+APP_VERSION = "v4.1.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2867,74 +2867,44 @@ def calendar_view():
     u = current_user()
 
     today = datetime.date.today()
-    year = int(request.args.get("y") or today.year)
+    year  = int(request.args.get("y") or today.year)
     month = int(request.args.get("m") or today.month)
 
     first_iso, last_iso = _month_range(year, month)
-    month_first, month_last = first_iso, last_iso  # alias for compatibility
 
     db = connect()
 
-    # Nettozeit pro Tag (Anzeige unten rechts)
-    net_map = {}
-    soll_map = {}
-    diff_map = {}
-    week_sum_map = {}
-    week_soll_map = {}
-    week_diff_map = {}
-
     totals = {}
-    rows_tb = db.execute(
-        '''
-        SELECT day, time_in, time_out, break_minutes
-        FROM time_blocks
-        WHERE user_id=? AND day BETWEEN ? AND ?
-        ''',
+    for b in db.execute(
+        "SELECT day, time_in, time_out, break_minutes FROM time_blocks WHERE user_id=? AND day BETWEEN ? AND ?",
         (u["id"], first_iso, last_iso),
-    ).fetchall()
-    # Normalize day to YYYY-MM-DD so DB values (e.g. with time) always match calendar keys
-    for b in rows_tb:
+    ).fetchall():
         day_iso = str(b["day"]).strip()[:10]
         mins = _minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0)
         totals[day_iso] = totals.get(day_iso, 0) + mins
-    for day, mins in totals.items():
-        net_map[day] = _fmt_minutes(mins)
+    net_map = {d: _fmt_minutes(m) for d, m in totals.items()}
 
-    # Feiertage (normalize day keys for consistent lookup)
-    hol = db.execute(
-        "SELECT day, is_holiday, holiday_name FROM calendar_days WHERE day BETWEEN ? AND ?",
-        (first_iso, last_iso),
-    ).fetchall()
-    hol_map = {str(r["day"]).strip()[:10]: r for r in hol}
+    hol_map = {
+        str(r["day"]).strip()[:10]: r
+        for r in db.execute(
+            "SELECT day, is_holiday, holiday_name FROM calendar_days WHERE day BETWEEN ? AND ?",
+            (first_iso, last_iso),
+        ).fetchall()
+    }
 
-    # Abwesenheiten (mehrtägig möglich)
     abs_rows = db.execute(
-        """
-        SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name, t.color AS type_color
-        FROM absences a
-        JOIN absence_types t ON t.id = a.type_id
-        WHERE a.user_id = ?
-          AND NOT (a.date_to < ? OR a.date_from > ?)
-        """,
+        """SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name, t.color AS type_color
+           FROM absences a JOIN absence_types t ON t.id = a.type_id
+           WHERE a.user_id = ? AND NOT (a.date_to < ? OR a.date_from > ?)""",
         (u["id"], first_iso, last_iso),
     ).fetchall()
 
-    # Anwesenheit / Tagesstatus (genau 1 Eintrag pro Tag)
-    try:
-        pres_rows = db.execute(
-            "SELECT p.day FROM daily_presence p WHERE p.user_id=? AND p.day BETWEEN ? AND ?",
-            (u["id"], first_iso, last_iso),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        pres_rows = []
-
-    trip_rows = db.execute(
+    trip_map = {}
+    for r in db.execute(
         "SELECT start_date, end_date, destination FROM business_trips"
         " WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL)",
         (u["id"], last_iso, first_iso),
-    ).fetchall()
-    trip_map = {}
-    for r in trip_rows:
+    ).fetchall():
         s = str(r["start_date"])[:10]
         e = str(r["end_date"] or r["start_date"])[:10]
         for _td in _iter_days(s, e):
@@ -2942,48 +2912,223 @@ def calendar_view():
                 trip_map[_td] = r["destination"]
 
     db.close()
-    # Nur Tage auswerten, die einen Eintrag haben (Zeitblöcke / Abwesenheit / Presence)
-    days_with_entry = set(net_map.keys())
 
-    # Presence-Tage (falls vorhanden)
-    try:
-        for r in pres_rows:
-            if hasattr(r, "keys") and "day" in r.keys():
-                days_with_entry.add(str(r["day"]).strip()[:10])
-    except Exception:
-        pass
+    day_badges = {}
+    for a in abs_rows:
+        d0 = datetime.date.fromisoformat(a["date_from"])
+        d1 = datetime.date.fromisoformat(a["date_to"])
+        cur = d0
+        while cur <= d1:
+            iso = cur.isoformat()
+            txt = a["type_name"]
+            if a["type_name"] == "Sonstige" and a["comment"]:
+                txt += f": {a['comment']}"
+            if a["is_half_day"] and a["date_from"] == a["date_to"]:
+                txt += " (1/2)"
+            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
+            cur += datetime.timedelta(days=1)
 
-    # Abwesenheiten: unterstütze Schemas (day/date) oder (date_from/date_to)
-    try:
-        for r in abs_rows:
-            if not hasattr(r, "keys"):
-                continue
-            rk = set(r.keys())
-            if "day" in rk:
-                if r["day"]:
-                    days_with_entry.add(r["day"])
-            elif "date" in rk:
-                if r["date"]:
-                    days_with_entry.add(r["date"])
-            elif "date_from" in rk and "date_to" in rk:
-                df = r["date_from"]
-                dt = r["date_to"]
-                if df and dt:
-                    try:
-                        d1 = datetime.date.fromisoformat(str(df)[:10])
-                        d2 = datetime.date.fromisoformat(str(dt)[:10])
-                        dcur2 = d1
-                        while dcur2 <= d2:
-                            days_with_entry.add(dcur2.isoformat())
-                            dcur2 += datetime.timedelta(days=1)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-    # Vergangene Arbeitstage ohne Eintrag (geteilt mit Startseite)
-    month_isos = set(_iter_days(first_iso, last_iso))
+    month_isos  = set(_iter_days(first_iso, last_iso))
     missing_days = _get_missing_entry_days(u["id"], year) & month_isos
+    cal_locked  = _is_day_locked(u["id"], f"{year}-{month:02d}-01")
+    lock_badge  = " \U0001f512" if cal_locked else ""
+
+    _wd = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+    # ── Desktop grid ──────────────────────────────────────────────────────────
+    def _badge_html(items):
+        out = ""
+        for txt, col in items[:4]:
+            out += (
+                f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;"
+                f"border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:12px;'>"
+                f"<span style='display:inline-block;width:8px;height:8px;background:{col};"
+                f"border-radius:2px;margin-right:5px;vertical-align:middle;'></span>{txt}</div>"
+            )
+        if len(items) > 4:
+            out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
+        return out
+
+    def _day_cell(daynum):
+        if daynum == 0:
+            return "<td></td>"
+        d   = datetime.date(year, month, daynum)
+        iso = d.isoformat()
+        wd  = _wd[d.weekday()]
+        hol = hol_map.get(iso)
+        badges = day_badges.get(iso, [])
+        hol_txt = (
+            f"<div style='margin-top:4px;font-size:12px;font-weight:700;color:var(--danger);'>{hol['holiday_name']}</div>"
+            if hol and hol["is_holiday"] else ""
+        )
+        net   = net_map.get(iso)
+        net_h = f"<div style='position:absolute;right:6px;bottom:6px;color:var(--mu);font-size:11px;font-weight:600;'>{net}</div>" if net else ""
+        miss  = (
+            "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>"
+            if iso in missing_days else ""
+        )
+        trip  = trip_map.get(iso)
+        trip_h = f"<div style='margin-top:4px;font-size:12px;color:var(--ac);'>✈ {trip}</div>" if trip else ""
+        return (
+            f"<td class='daycell' style='min-width:130px;vertical-align:top;position:relative;padding-top:28px;'"
+            f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
+            f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'>"
+            f"<b style='color:var(--tx);'>{wd} {daynum}</b></div>"
+            f"{hol_txt}{trip_h}{_badge_html(badges)}{net_h}{miss}"
+            f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
+            f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
+            f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
+            f"  <a href='/absences/new'>\U0001f3d6 Abwesenheit anlegen</a>"
+            f"</div></td>"
+        )
+
+    cal_obj  = calendar.Calendar(firstweekday=0)
+    weeks    = cal_obj.monthdayscalendar(year, month)
+    grid_head = "<tr>" + "".join(f"<th>{d}</th>" for d in _wd) + "</tr>"
+    grid_rows = "".join(
+        "<tr>" + "".join(_day_cell(d) for d in w) + "</tr>"
+        for w in weeks
+    )
+    grid_html = f'<table style="margin-top:10px;"><thead>{grid_head}</thead><tbody>{grid_rows}</tbody></table>'
+
+    # ── Mobile list ───────────────────────────────────────────────────────────
+    list_rows = []
+    d_it  = datetime.date(year, month, 1)
+    d_end = datetime.date(year, month, calendar.monthrange(year, month)[1])
+    while d_it <= d_end:
+        iso      = d_it.isoformat()
+        wd       = _wd[d_it.weekday()]
+        date_str = f"{d_it.day:02d}.{month:02d}."
+        hol      = hol_map.get(iso)
+        is_hol   = bool(hol and hol["is_holiday"])
+        is_off   = d_it.weekday() >= 5 or is_hol
+        is_today = d_it == today
+        badges   = day_badges.get(iso, [])
+        net      = net_map.get(iso)
+        trip     = trip_map.get(iso)
+        is_miss  = iso in missing_days
+
+        row_cls = "cal-lr" + (" cal-lr-today" if is_today else "") + (" cal-lr-off" if is_off else "")
+
+        cp = ""
+        if net:
+            cp += f"<span class='cal-lr-h'>{net}</span>"
+        for txt, col in badges:
+            cp += f"<span class='cal-lr-b' style='border-left:3px solid {col};padding-left:5px;'>{txt}</span>"
+        if is_hol:
+            cp += f"<span class='cal-lr-hol'>{hol['holiday_name']}</span>"
+        if trip:
+            cp += f"<span class='cal-lr-trip'>✈ {trip}</span>"
+
+        ic = ""
+        if is_miss:
+            ic = "<span class='cal-lr-x' title='Fehlender Eintrag'>✕</span>"
+        elif cal_locked:
+            ic = "<span class='cal-lr-lock'>\U0001f512</span>"
+
+        list_rows.append(
+            f"<a href='/day/{iso}' class='{row_cls}'>"
+            f"<div class='cal-lr-date'><span class='cal-lr-wd'>{wd}</span><span class='cal-lr-dm'>{date_str}</span></div>"
+            f"<div class='cal-lr-cnt'>{cp}</div>"
+            f"<div class='cal-lr-ico'>{ic}</div>"
+            f"</a>"
+        )
+        d_it += datetime.timedelta(days=1)
+
+    list_html = "".join(list_rows)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    prev_m, prev_y = (month - 1, year) if month > 1 else (12, year - 1)
+    next_m, next_y = (month + 1, year) if month < 12 else (1, year + 1)
+    month_label = f"{MONTH_NAMES_DE[month]} {year}"
+
+    # ── Styles (plain strings – no f-string brace escaping needed) ────────────
+    cal_css = """<style>
+.cal-grid-wrap{display:block;}
+.cal-list-wrap{display:none;border-top:1px solid var(--bd);margin-top:8px;}
+@media(max-width:767px){
+  .cal-grid-wrap{display:none;}
+  .cal-list-wrap{display:block;}
+}
+[data-cal-view=month] .cal-grid-wrap{display:block!important;}
+[data-cal-view=month] .cal-list-wrap{display:none!important;}
+[data-cal-view=list]  .cal-grid-wrap{display:none!important;}
+[data-cal-view=list]  .cal-list-wrap{display:block!important;}
+.cal-lr{display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--bd);
+  text-decoration:none;color:var(--tx);min-height:44px;-webkit-tap-highlight-color:transparent;}
+.cal-lr:active{background:var(--bd);}
+.cal-lr-today{background:rgba(37,99,235,.07);border-left:3px solid var(--ac);padding-left:5px;}
+.cal-lr-off .cal-lr-wd,.cal-lr-off .cal-lr-dm{color:var(--mu);}
+.cal-lr-date{min-width:64px;display:flex;flex-direction:column;line-height:1.3;flex-shrink:0;}
+.cal-lr-wd{font-size:11px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
+.cal-lr-dm{font-size:15px;font-weight:700;}
+.cal-lr-cnt{flex:1;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;min-width:0;}
+.cal-lr-h{font-size:13px;font-weight:700;color:var(--ok);}
+.cal-lr-b{font-size:12px;padding:2px 5px;background:var(--bg);border-radius:4px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;}
+.cal-lr-hol{font-size:12px;font-weight:700;color:var(--danger);}
+.cal-lr-trip{font-size:12px;color:var(--ac);}
+.cal-lr-ico{min-width:20px;text-align:right;flex-shrink:0;}
+.cal-lr-x{color:var(--danger);font-size:14px;font-weight:700;}
+.cal-lr-lock{font-size:13px;opacity:.55;}
+</style>"""
+
+    cal_js = """<script>
+function setCalView(v){
+  try{
+    localStorage.setItem('cal_view',v);
+    var w=document.getElementById('cal-wrap');
+    if(w) w.setAttribute('data-cal-view',v);
+    var bm=document.getElementById('cal-tb-month');
+    var bl=document.getElementById('cal-tb-list');
+    if(bm) bm.classList.toggle('primary',v==='month');
+    if(bl) bl.classList.toggle('primary',v==='list');
+  }catch(e){}
+}
+(function(){
+  try{ var v=localStorage.getItem('cal_view'); if(v) setCalView(v); }catch(e){}
+})();
+</script>"""
+
+    body = f"""
+    {flash_html()}
+    {CALENDAR_DAYMENU_ASSETS}
+    {cal_css}
+
+    <div id="cal-wrap" class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:4px;">
+          <a class="btn" href="/calendar?y={prev_y}&m={prev_m}" style="padding:9px 14px;">&#9664;</a>
+          <span style="font-size:16px;font-weight:700;padding:0 6px;white-space:nowrap;">{month_label}{lock_badge}</span>
+          <a class="btn" href="/calendar?y={next_y}&m={next_m}" style="padding:9px 14px;">&#9654;</a>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <a class="btn" href="/calendar?y={today.year}&m={today.month}">Heute</a>
+          <button id="cal-tb-month" class="btn" type="button" onclick="setCalView('month')" style="font-size:13px;padding:8px 10px;">&#8862; Monat</button>
+          <button id="cal-tb-list"  class="btn" type="button" onclick="setCalView('list')"  style="font-size:13px;padding:8px 10px;">&#9776; Liste</button>
+        </div>
+      </div>
+
+      <div class="small" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+        <span><span style="display:inline-block;width:10px;height:10px;background:#999;border-radius:2px;margin-right:4px;vertical-align:middle;"></span>Abwesenheit</span>
+        <span style="font-weight:700;color:var(--danger);">&#9679; Feiertag</span>
+        <span style="color:var(--ok);font-weight:700;">HH:MM</span> erfasst
+        <span style="color:var(--danger);font-weight:700;">&#10005;</span> fehlend
+      </div>
+
+      <div class="cal-grid-wrap">
+        {grid_html}
+      </div>
+
+      <div class="cal-list-wrap">
+        {list_html}
+      </div>
+    </div>
+
+    {cal_js}
+    """
+    return render_template_string(layout("Kalender", body, u, APP_VERSION))
+
 
 
     # map: day -> list of absence badges (keys normalized to YYYY-MM-DD)
