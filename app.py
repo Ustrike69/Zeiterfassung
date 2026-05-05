@@ -1213,110 +1213,7 @@ def _timepicker_datalist(id_name: str = "time_suggestions") -> str:
     return f"<datalist id='{id_name}'>" + "".join(opts) + "</datalist>"
 
 
-FORM_ASSETS_JS = """<style>
-  /* ---- Unified date input ---- */
-  .dt-wrap{
-    position:relative;display:inline-flex;align-items:stretch;width:160px;
-  }
-  .dt-text{
-    width:100%!important;padding-right:34px!important;box-sizing:border-box;
-  }
-  .dt-pick{
-    position:absolute!important;right:0;top:0;bottom:0;
-    width:36px!important;min-width:0!important;padding:0!important;
-    opacity:0;cursor:pointer;z-index:2;
-    border:none!important;background:transparent!important;color:transparent!important;
-    overflow:hidden;
-  }
-  .dt-wrap::after{
-    content:'';position:absolute;right:8px;top:50%;transform:translateY(-50%);
-    width:15px;height:15px;pointer-events:none;z-index:1;
-    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E") no-repeat center;
-    background-size:contain;
-  }
-  @media(prefers-color-scheme:dark){
-    .dt-wrap::after{
-      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E");
-    }
-  }
-  /* ---- Time input ---- */
-  .tm-wrap{display:inline-flex;gap:4px;align-items:center;}
-  .tm-text{width:80px !important;}
-  .tm-pick{width:38px !important;min-width:0 !important;padding:6px 2px !important;cursor:pointer;}
-</style>
-<script>
-  function setBreak(el, mins){
-    try{
-      const form = el.closest('form');
-      const inp = form.querySelector('input[name="break_minutes"]');
-      if(inp){ inp.value = String(mins); }
-    }catch(e){}
-    return false;
-  }
-  function syncTimeMin(tin){
-    try{
-      const form = tin.closest('form');
-      const tout = form.querySelector('input[name="time_out"]');
-      if(tout){
-        tout.min = tin.value || "";
-        if(tout.value && tin.value && tout.value <= tin.value){ tout.value = ""; }
-      }
-    }catch(e){}
-  }
-  document.addEventListener('input', function(ev){
-    if(ev.target && ev.target.classList && ev.target.classList.contains('tin')){
-      syncTimeMin(ev.target);
-    }
-  });
-  /* dual date inputs */
-  function dt_text(inp){
-    try{
-      var m=inp.value.match(/^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})$/);
-      var p=inp.parentElement.querySelector('.dt-pick');
-      var iso='';
-      if(m){iso=m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');if(p)p.value=iso;}
-      else{if(p)p.value='';}
-      var mt=inp.getAttribute('data-min-target');
-      if(mt){var ti=document.querySelector('[name="'+mt+'"]');if(ti){var tp=ti.parentElement.querySelector('.dt-pick');if(tp)tp.min=iso;}}
-    }catch(e){}
-  }
-  function dt_pick(inp){
-    try{
-      var m=inp.value.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
-      var t=inp.parentElement.querySelector('.dt-text');
-      if(!t)return;
-      var iso='';
-      if(m){iso=inp.value;t.value=m[3]+'.'+m[2]+'.'+m[1];}
-      var mt=t.getAttribute('data-min-target');
-      if(mt){var ti=document.querySelector('[name="'+mt+'"]');if(ti){var tp=ti.parentElement.querySelector('.dt-pick');if(tp)tp.min=iso;}}
-    }catch(e){}
-  }
-  /* dual time inputs */
-  function tm_text(inp){
-    try{
-      var p=inp.parentElement.querySelector('.tm-pick');
-      if(!p)return;
-      var m=inp.value.match(/^(\\d{1,2}):(\\d{2})$/);
-      if(m){p.value=m[1].padStart(2,'0')+':'+m[2];}else{p.value='';}
-    }catch(e){}
-  }
-  function tm_pick(inp){
-    try{
-      var t=inp.parentElement.querySelector('.tm-text');
-      if(t&&inp.value)t.value=inp.value;
-    }catch(e){}
-  }
-  /* multi-day toggle */
-  function toggleMultiday(cb){
-    try{
-      var wrap=cb.closest('form').querySelector('.multiday-fields');
-      if(wrap)wrap.style.display=cb.checked?'':'none';
-    }catch(e){}
-  }
-  document.addEventListener('DOMContentLoaded', function(){
-    document.querySelectorAll('.dt-text.dfrom').forEach(function(inp){ dt_text(inp); });
-  });
-</script>"""
+FORM_ASSETS_JS = ""
 
 def _parse_date_input(s: str) -> str | None:
     """Accept TT.MM.JJJJ or YYYY-MM-DD, return YYYY-MM-DD or None."""
@@ -4770,18 +4667,18 @@ def export_home():
           <label>Von</label><br>
           <div class="dt-wrap">
             <input type="text" id="exp-from-txt" class="dt-text" placeholder="TT.MM.JJJJ"
-                   value="{default_from_de}" maxlength="10" oninput="expDtText(this,'exp-from-iso')">
+                   value="{default_from_de}" maxlength="10" oninput="dt_text(this)">
             <input type="date" id="exp-from-iso" class="dt-pick" value="{default_from}"
-                   onchange="expDtPick(this,'exp-from-txt')">
+                   onchange="dt_pick(this)">
           </div>
         </div>
         <div>
           <label>Bis</label><br>
           <div class="dt-wrap">
             <input type="text" id="exp-to-txt" class="dt-text" placeholder="TT.MM.JJJJ"
-                   value="{default_to_de}" maxlength="10" oninput="expDtText(this,'exp-to-iso')">
+                   value="{default_to_de}" maxlength="10" oninput="dt_text(this)">
             <input type="date" id="exp-to-iso" class="dt-pick" value="{default_to}"
-                   onchange="expDtPick(this,'exp-to-txt')">
+                   onchange="dt_pick(this)">
           </div>
         </div>
       </div>
@@ -4810,16 +4707,6 @@ def export_home():
     function pad2(n){{return n<10?'0'+n:''+n;}}
     function lastDay(y,m){{return new Date(y,m,0).getDate();}}
     function isoToDE(s){{var p=s.split('-');return p[2]+'.'+p[1]+'.'+p[0];}}
-    function deToIso(s){{var m=s.match(/^(\\d{{1,2}})\\.(\\d{{1,2}})\\.(\\d{{4}})$/);return m?m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0'):null;}}
-    function expDtText(inp,isoId){{
-      var iso=deToIso(inp.value);
-      var pk=document.getElementById(isoId);
-      if(pk)pk.value=iso||'';
-    }}
-    function expDtPick(inp,txtId){{
-      var txt=document.getElementById(txtId);
-      if(txt&&inp.value)txt.value=isoToDE(inp.value);
-    }}
     function setExpRange(preset){{
       var now=new Date(),y=now.getFullYear(),m=now.getMonth()+1,fy,fm,ty,tm;
       if(preset==='month'){{fy=y;fm=m;ty=y;tm=m;}}
