@@ -20,11 +20,7 @@ app.secret_key = "change-me"  # set via env in production
 
 MOBILE_ASSETS = """
 <style>
-  /* Calendar day cells on small screens */
-  @media (max-width: 520px){
-    td.daycell{ min-width: 110px !important; padding-top: 50px !important; }
-    td.daycell .addbtn{ right:4px; top:26px; }
-  }
+  td.daycell .addbtn{ right:4px; top:26px; }
 </style>
 <script>
   document.addEventListener('DOMContentLoaded', function(){
@@ -2941,9 +2937,10 @@ def calendar_view():
         for txt, col in items[:4]:
             out += (
                 f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;"
-                f"border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:12px;'>"
+                f"border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:12px;"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;box-sizing:border-box;'>"
                 f"<span style='display:inline-block;width:8px;height:8px;background:{col};"
-                f"border-radius:2px;margin-right:5px;vertical-align:middle;'></span>{txt}</div>"
+                f"border-radius:2px;margin-right:5px;vertical-align:middle;flex-shrink:0;'></span>{txt}</div>"
             )
         if len(items) > 4:
             out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
@@ -2958,7 +2955,8 @@ def calendar_view():
         hol = hol_map.get(iso)
         badges = day_badges.get(iso, [])
         hol_txt = (
-            f"<div style='margin-top:4px;font-size:12px;font-weight:700;color:var(--danger);'>{hol['holiday_name']}</div>"
+            f"<div style='margin-top:4px;font-size:12px;font-weight:700;color:var(--danger);"
+            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>{hol['holiday_name']}</div>"
             if hol and hol["is_holiday"] else ""
         )
         net   = net_map.get(iso)
@@ -2968,9 +2966,12 @@ def calendar_view():
             if iso in missing_days else ""
         )
         trip  = trip_map.get(iso)
-        trip_h = f"<div style='margin-top:4px;font-size:12px;color:var(--ac);'>✈ {trip}</div>" if trip else ""
+        trip_h = (
+            f"<div style='margin-top:4px;font-size:12px;color:var(--ac);"
+            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>✈ {trip}</div>"
+        ) if trip else ""
         return (
-            f"<td class='daycell' style='min-width:130px;vertical-align:top;position:relative;padding-top:28px;'"
+            f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;width:14.28%;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'>"
             f"<b style='color:var(--tx);'>{wd} {daynum}</b></div>"
@@ -2989,7 +2990,7 @@ def calendar_view():
         "<tr>" + "".join(_day_cell(d) for d in w) + "</tr>"
         for w in weeks
     )
-    grid_html = f'<table style="margin-top:10px;"><thead>{grid_head}</thead><tbody>{grid_rows}</tbody></table>'
+    grid_html = f'<table style="margin-top:10px;table-layout:fixed;width:100%;"><thead>{grid_head}</thead><tbody>{grid_rows}</tbody></table>'
 
     # ── Mobile list ───────────────────────────────────────────────────────────
     list_rows = []
