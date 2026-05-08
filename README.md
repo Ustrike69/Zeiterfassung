@@ -1,4 +1,4 @@
-# Zeiterfassung v4.0.0
+# Zeiterfassung v4.2.0
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung.
 
@@ -342,4 +342,13 @@ cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 
 ---
 
-*Zeiterfassung v4.0.0 – Flask + SQLite – NRW*
+---
+
+## Versionshistorie
+
+### v4.2.0
+- Einheitlicher Timepicker: alle Zeiteingaben (Zeitblöcke, Dienstreisen) verwenden jetzt ein einzelnes natives `<input type="time">` – kein zweigeteiltes Widget mehr
+- 15-Minuten-Schritte für alle Zeiteingaben: `step="900"` + automatisches Runden auf nächsten 15-Minuten-Wert bei Texteingabe
+- Sollzeiten (tägliche Minutenziele in den Einstellungen) sind von der 15-Minuten-Beschränkung ausgenommen
+
+*Zeiterfassung v4.2.0 – Flask + SQLite – NRW*

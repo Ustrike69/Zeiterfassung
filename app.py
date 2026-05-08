@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.1.0"
+APP_VERSION = "v4.2.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1247,12 +1247,7 @@ def _date_input(name: str, value_iso: str = "", required: bool = False, min_targ
 
 def _time_input(name: str, value: str = "", required: bool = False) -> str:
     req = "required" if required else ""
-    return (
-        f'<div class="tm-wrap"><input type="text" name="{name}" class="tm-text" '
-        f'value="{value}" placeholder="HH:MM" maxlength="5" {req} oninput="tm_text(this)">'
-        f'<input type="time" class="tm-pick" value="{value}" tabindex="-1" '
-        f'onchange="tm_pick(this)"></div>'
-    )
+    return f'<input type="time" name="{name}" step="900" value="{value}" list="time_suggestions" {req}>'
 
 
 def flash_html():
@@ -4508,6 +4503,7 @@ def business_trips_list():
         </div>"""
 
     body = f"""
+    {_timepicker_datalist('time_suggestions')}
     {flash_html()}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">

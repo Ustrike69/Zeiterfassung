@@ -124,7 +124,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
   input[type=text],input[type=password],input[type=date],input[type=email],
   input[type=search],select,textarea{{width:100%;}}
   input[type=number]{{width:90px;}}
-  input[type=time]{{width:auto;min-width:110px;}}
+  input[type=time]{{width:auto;min-width:110px;cursor:pointer;}}
   input[type=checkbox]{{width:auto;font-size:inherit;}}
   textarea{{width:100%;resize:vertical;}}
   label{{font-weight:600;font-size:14px;color:var(--tx);display:block;margin-bottom:4px;}}
@@ -148,10 +148,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
   .dt-pick{{position:absolute!important;right:0;top:0;bottom:0;width:36px!important;min-width:0!important;padding:0!important;opacity:0;cursor:pointer;z-index:2;border:none!important;background:transparent!important;color:transparent!important;overflow:hidden;}}
   .dt-wrap::after{{content:'';position:absolute;right:8px;top:50%;transform:translateY(-50%);width:15px;height:15px;pointer-events:none;z-index:1;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E") no-repeat center;background-size:contain;}}
   @media(prefers-color-scheme:dark){{.dt-wrap::after{{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='18' rx='2'/%3E%3Cline x1='16' y1='2' x2='16' y2='6'/%3E%3Cline x1='8' y1='2' x2='8' y2='6'/%3E%3Cline x1='3' y1='10' x2='21' y2='10'/%3E%3C/svg%3E");}}}}
-  /* ---- Time input ---- */
-  .tm-wrap{{display:inline-flex;gap:4px;align-items:center;}}
-  .tm-text{{width:80px!important;}}
-  .tm-pick{{width:38px!important;min-width:0!important;padding:6px 2px!important;cursor:pointer;}}
+  /* ---- Time input: 15-min snapping via JS ---- */
 </style>
 </head>
 <body>
@@ -202,12 +199,20 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
       if(mt){{var ti=document.querySelector('[name="'+mt+'"]');if(ti){{var tp=ti.parentElement.querySelector('.dt-pick');if(tp)tp.min=iso;}}}}
     }}catch(e){{}}
   }}
-  function tm_text(inp){{
-    try{{var p=inp.parentElement.querySelector('.tm-pick');if(!p)return;var m=inp.value.match(/^(\\d{{1,2}}):(\\d{{2}})$/);if(m){{p.value=m[1].padStart(2,'0')+':'+m[2];}}else{{p.value='';}}}}catch(e){{}}
+  function snapTo15(inp){{
+    try{{
+      if(!inp.value)return;
+      var p=inp.value.split(':');if(p.length<2)return;
+      var h=parseInt(p[0],10),m=parseInt(p[1],10);
+      var r=Math.round(m/15)*15;
+      if(r===60){{r=0;h=(h+1)%24;}}
+      inp.value=String(h).padStart(2,'0')+':'+String(r).padStart(2,'0');
+    }}catch(e){{}}
   }}
-  function tm_pick(inp){{
-    try{{var t=inp.parentElement.querySelector('.tm-text');if(t&&inp.value)t.value=inp.value;}}catch(e){{}}
-  }}
+  document.addEventListener('change',function(ev){{
+    var el=ev.target;
+    if(el&&el.type==='time'&&el.getAttribute('step')==='900')snapTo15(el);
+  }});
   function toggleMultiday(cb){{
     try{{var wrap=cb.closest('form').querySelector('.multiday-fields');if(wrap)wrap.style.display=cb.checked?'':'none';}}catch(e){{}}
   }}
