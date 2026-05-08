@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.2.0"
+APP_VERSION = "v4.2.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2110,7 +2110,7 @@ def balance_view():
         )
         trs += (
             "<tr>"
-            f"<td>{r['day']}</td>"
+            f"<td style='white-space:nowrap;'>{_fmt_date_de(r['day'])}</td>"
             f"<td style='text-align:right;'>"
             f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;'>"
             f"<input type='hidden' name='day' value='{r['day']}'>"
@@ -3763,8 +3763,6 @@ def settings_view():
     today_iso = datetime.date.today().isoformat()
     cur_sched = _get_user_schedule_for_day(u["id"], today_iso)
     cur_id = (cur_sched or {}).get("id")
-    start_balance_minutes = _get_start_balance_minutes(u["id"])
-    start_balance_txt = _fmt_minutes_signed(start_balance_minutes)
     auto_breaks_enabled = _get_pref_auto_breaks(u["id"]) == 1
 
     # Urlaub (Inline in Einstellungen)
@@ -3810,7 +3808,7 @@ def settings_view():
         mode_txt = "Woche" if mode == "weekly" else ("Tag" if mode == "daily" else mode)
 
         sched_rows += f"""<tr>
-            <td style='white-space:nowrap;'><b>{valid_from or "-"}</b></td>
+            <td style='white-space:nowrap;'><b>{_fmt_date_de(valid_from) if valid_from else "-"}</b></td>
             <td>{badge}</td>
             <td>{mode_txt}</td>
             <td style='text-align:right;'>{weekly_hours_txt}</td>
@@ -3914,12 +3912,6 @@ def settings_view():
           <label><b>Gültig ab</b></label><br>
           {_date_input("valid_from", sched.get("valid_from", datetime.date.today().isoformat()), required=True)}
           <div class="small" style="color:#777;">Ab diesem Datum wird dieses Zeitschema angewendet.</div>
-
-<div style="margin-bottom:10px;">
-  <label><b>Startsaldo Gleitzeit</b></label><br>
-  <input type="text" name="start_balance" value="{start_balance_txt}" pattern="^[+-]?\\d{{2}}:\\d{{2}}$" style="width:120px;">
-  <div class="small" style="color:#777;">Ausgangspunkt für das Gleitzeitkonto (z. B. +12:30 oder -01:15).</div>
-</div>
 
 <div style="margin-bottom:10px;">
   <label><b>Automatische Pausen</b></label><br>
@@ -4199,14 +4191,6 @@ def settings_save():
         add_flash("Bitte ein gültiges Datum (TT.MM.JJJJ) angeben.", "error")
         return redirect("/settings")
 
-    # Parse start balance from form (+HH:MM / -HH:MM)
-    start_balance_raw = (request.form.get("start_balance") or "").strip()
-    try:
-        start_balance_minutes = _parse_signed_hhmm_to_minutes(start_balance_raw) if start_balance_raw else _get_start_balance_minutes(u["id"])
-    except Exception:
-        add_flash("Startsaldo: Bitte +HH:MM oder -HH:MM angeben.", "error")
-        return redirect("/settings")
-
     mode = (request.form.get("mode") or "weekly").strip().lower()
     if mode not in ("weekly", "daily"):
         mode = "weekly"
@@ -4288,7 +4272,6 @@ def settings_save():
     db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", values)
     db.commit()
     db.close()
-    _set_start_balance_minutes(u["id"], start_balance_minutes)
 
     add_flash("Zeitschema gespeichert.", "success")
     return redirect("/settings")
