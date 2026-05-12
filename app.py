@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.7"
+APP_VERSION = "v4.4.8"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -38,7 +38,19 @@ MOBILE_ASSETS = """
 
 def layout(title, body, user, version):
     """Wrapper around templates.layout that injects mobile assets globally."""
-    return base_layout(title, MOBILE_ASSETS + body, user, version)
+    banner = ""
+    if session.get("impersonator_id") and user:
+        username = _html.escape(user.get("display_name") or user.get("username") or "?")
+        banner = (
+            '<div style="background:#f59e0b;color:#1c1917;padding:10px 16px;text-align:center;'
+            'font-weight:600;display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;">'
+            f'<span>⚠️ Du agierst als <strong>{username}</strong></span>'
+            '<form method="post" action="/admin/impersonate/stop" style="display:inline;">'
+            '<button type="submit" style="background:#1c1917;color:#fef3c7;border:none;border-radius:6px;'
+            'padding:4px 12px;cursor:pointer;font-weight:600;font-size:14px;">Zurück zu Admin</button>'
+            '</form></div>'
+        )
+    return base_layout(title, MOBILE_ASSETS + body, user, version, impersonation_banner=banner)
 
 
 def bootstrap():
@@ -5868,11 +5880,17 @@ def admin_users():
                 f'onsubmit="return confirm(\'Nutzer {safe_name} und alle zugehörigen Daten unwiderruflich löschen?\')">'
                 f'<button class="btn danger" type="submit" style="padding:4px 10px;font-size:13px;">Löschen</button></form>'
             )
+        impersonate_btn = ""
+        if not r["is_admin"] and r["is_active"] and r["id"] != u["id"]:
+            impersonate_btn = (
+                f'<form method="post" action="/admin/impersonate/{r["id"]}" style="display:inline;margin-left:8px;">'
+                f'<button class="btn" type="submit" style="padding:4px 10px;font-size:13px;" title="Identität annehmen">👤 Identität</button></form>'
+            )
         trs += (
             f'<tr>'
             f'<td>{display}{sub_html}{fl}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
-            f'<td style="white-space:nowrap;"><a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>{delete_btn}</td>'
+            f'<td style="white-space:nowrap;"><a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>{impersonate_btn}{delete_btn}</td>'
             f'</tr>'
         )
 
@@ -6103,6 +6121,39 @@ def admin_users_delete(user_id: int):
     db.commit()
     db.close()
     add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
+    return redirect(url_for("admin_users"))
+
+
+@app.post("/admin/impersonate/<int:user_id>")
+@admin_required
+def admin_impersonate(user_id: int):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    target = db.execute(
+        "SELECT id, username, is_admin, is_active FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+    if target["is_admin"]:
+        add_flash("Admin-Identität kann nicht angenommen werden.", "error")
+        return redirect(url_for("admin_users"))
+    if not target["is_active"]:
+        add_flash("Inaktive Benutzer können nicht angenommen werden.", "error")
+        return redirect(url_for("admin_users"))
+    session["impersonator_id"] = u["id"]
+    session["user_id"] = user_id
+    return redirect("/")
+
+
+@app.post("/admin/impersonate/stop")
+def admin_impersonate_stop():
+    impersonator_id = session.get("impersonator_id")
+    if not impersonator_id:
+        return redirect("/")
+    session["user_id"] = impersonator_id
+    session.pop("impersonator_id", None)
     return redirect(url_for("admin_users"))
 
 

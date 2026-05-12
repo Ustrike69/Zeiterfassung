@@ -1,4 +1,4 @@
-def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> str:
+def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "") -> str:
     nav_html = ""
     if user:
         items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export")]
@@ -159,6 +159,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11") -> s
   </div>
   {nav_html}
 </header>
+{impersonation_banner}
 <div class="main">
 {body}
 </div>
