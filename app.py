@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.1"
+APP_VERSION = "v4.4.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -158,6 +158,14 @@ def _fmt_minutes_signed(mins: int) -> str:
     sign = "-" if mins < 0 else "+"
     mins = abs(int(mins or 0))
     return f"{sign}{mins//60:02d}:{mins%60:02d}"
+
+
+def _balance_color(mins: int) -> str:
+    if mins > 0:
+        return "var(--ok)"
+    if mins < 0:
+        return "var(--danger)"
+    return "inherit"
 
 
 def _parse_signed_hhmm_to_minutes(val: str) -> int:
@@ -2595,6 +2603,8 @@ def balance_view():
             f"Flextag −{_fmt_minutes(r['flextag_min'])}</span>"
             if r.get("flextag_min") else ""
         )
+        delta_clr   = _balance_color(r["delta"])
+        running_clr = _balance_color(r["running"])
         trs += (
             "<tr>"
             f"<td style='white-space:nowrap;'>{_fmt_date_de(r['day'])}</td>"
@@ -2609,14 +2619,16 @@ def balance_view():
             f"{flextag_badge}"
             f"</td>"
             f"<td style='text-align:right;'>{_fmt_minutes(r['actual'])}</td>"
-            f"<td style='text-align:right;'><b>{_fmt_minutes_signed(r['delta'])}</b></td>"
-            f"<td style='text-align:right;'>{_fmt_minutes_signed(r['running'])}</td>"
+            f"<td style='text-align:right;'><b style='color:{delta_clr};'>{_fmt_minutes_signed(r['delta'])}</b></td>"
+            f"<td style='text-align:right;'><b style='color:{running_clr};'>{_fmt_minutes_signed(r['running'])}</b></td>"
             "</tr>"
         )
 
     start_hhmm        = _fmt_minutes_signed(start_minutes)
     period_start_hhmm = _fmt_minutes_signed(period_start_balance)
     period_end_hhmm   = _fmt_minutes_signed(period_end_balance)
+    period_start_clr  = _balance_color(period_start_balance)
+    period_end_clr    = _balance_color(period_end_balance)
 
     body = f"""
     {flash_html()}
@@ -2638,11 +2650,11 @@ def balance_view():
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;">
         <div style="flex:1;min-width:160px;">
           <div class="small">Saldo zu Periodenbeginn</div>
-          <div style="font-size:22px;"><b>{period_start_hhmm}</b></div>
+          <div style="font-size:22px;color:{period_start_clr};"><b>{period_start_hhmm}</b></div>
         </div>
         <div style="flex:1;min-width:160px;">
           <div class="small">Saldo zum Periodenende</div>
-          <div style="font-size:22px;"><b>{period_end_hhmm}</b></div>
+          <div style="font-size:22px;color:{period_end_clr};"><b>{period_end_hhmm}</b></div>
         </div>
       </div>
 
