@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.2"
+APP_VERSION = "v4.3.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3201,6 +3201,12 @@ def calendar_view():
             out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
         return out
 
+    def _week_num(week_days):
+        for d in week_days:
+            if d != 0:
+                return datetime.date(year, month, d).isocalendar()[1]
+        return ""
+
     def _day_cell(daynum):
         if daynum == 0:
             return "<td></td>"
@@ -3233,10 +3239,10 @@ def calendar_view():
         )
         km_txt = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
         return (
-            f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;width:14.28%;'"
+            f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'>"
-            f"<b style='color:var(--tx);'>{wd} {daynum}</b></div>"
+            f"<b style='color:var(--tx);'>{daynum}</b></div>"
             f"{hol_txt}{trip_h}{_badge_html(badges)}{net_h}{miss}{ck_h}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
@@ -3248,9 +3254,15 @@ def calendar_view():
 
     cal_obj  = calendar.Calendar(firstweekday=0)
     weeks    = cal_obj.monthdayscalendar(year, month)
-    grid_head = "<tr>" + "".join(f"<th>{d}</th>" for d in _wd) + "</tr>"
+    grid_head = (
+        "<tr><th class='kw-head'>KW</th>"
+        + "".join(f"<th>{d}</th>" for d in _wd)
+        + "</tr>"
+    )
     grid_rows = "".join(
-        "<tr>" + "".join(_day_cell(d) for d in w) + "</tr>"
+        f"<tr><td class='kw-cell'>{_week_num(w)}</td>"
+        + "".join(_day_cell(d) for d in w)
+        + "</tr>"
         for w in weeks
     )
     grid_html = f'<table style="margin-top:10px;table-layout:fixed;width:100%;"><thead>{grid_head}</thead><tbody>{grid_rows}</tbody></table>'
@@ -3338,6 +3350,8 @@ def calendar_view():
 .cal-lr-x{color:var(--danger);font-size:14px;font-weight:700;}
 .cal-lr-lock{font-size:13px;opacity:.55;}
 .cal-lr-ok{color:var(--ok);font-size:14px;font-weight:700;}
+th.kw-head{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;padding:4px 2px;}
+td.kw-cell{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;vertical-align:middle;padding:2px;white-space:nowrap;}
 </style>"""
 
     cal_js = """<script>
