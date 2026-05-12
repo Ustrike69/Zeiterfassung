@@ -3270,7 +3270,7 @@ def calendar_view():
                 clr = "#b45309" if is_kontiert else "var(--mu)"
                 txt = f"· {net}" if is_kontiert else net
                 nh_h = (
-                    f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;"
+                    f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;z-index:2;"
                     f"color:{clr};font-size:11px;font-weight:600;'"
                     f" data-net='{net}' data-has-net='1'>{txt}</div>"
                 )
@@ -3278,7 +3278,7 @@ def calendar_view():
             else:
                 nh_h = f"<div id='nh_{iso}' style='display:none;' data-net='' data-has-net='0'></div>"
                 ck_style = (
-                    "position:absolute;right:6px;bottom:6px;color:#b45309;"
+                    "position:absolute;right:6px;bottom:6px;z-index:2;color:#b45309;"
                     "font-size:11px;font-weight:700;line-height:1;"
                 ) if is_kontiert else "display:none;"
                 ck_h = f"<span id='ck_{iso}' style='{ck_style}' title='Kontiert'>·</span>"
@@ -3402,6 +3402,7 @@ def calendar_view():
 .cal-lr-ok{color:var(--ok);font-size:14px;font-weight:700;}
 th.kw-head{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;padding:4px 2px;}
 td.kw-cell{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;vertical-align:middle;padding:2px;white-space:nowrap;}
+td.daycell{min-height:62px;}
 </style>"""
 
     cal_js = """<script>
@@ -3444,7 +3445,7 @@ function toggleKontiert(iso,ev){{
     }}else{{
       _kontiert.add(iso);
       if(hasNet){{nh.style.color='#b45309';nh.textContent='· '+netVal;}}
-      else{{if(ck){{ck.style.cssText='position:absolute;right:6px;bottom:6px;color:#b45309;font-size:11px;font-weight:700;line-height:1;';ck.textContent='·';}}}}
+      else{{if(ck){{ck.style.cssText='position:absolute;right:6px;bottom:6px;z-index:2;color:#b45309;font-size:11px;font-weight:700;line-height:1;';ck.textContent='·';}}}}
       if(km)km.textContent='✕ Kontierung aufheben';
     }}
   }}).catch(function(){{}});
