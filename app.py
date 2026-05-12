@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.8"
+APP_VERSION = "v4.3.9"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -934,6 +934,7 @@ def _absence_summary_for_period(user_id: int, start_iso: str, end_iso: str) -> d
 # ─── Periodenabschluss (Monats- / Jahresabschluss) ───────────────────────────
 
 LOCK_MSG = "Zeitraum ist abgeschlossen und kann nicht mehr bearbeitet werden."
+START_DATE_MSG = "Datum liegt vor dem Arbeitsbeginn ({})."
 
 
 def _is_day_locked(user_id: int, iso_day: str) -> bool:
@@ -1815,6 +1816,29 @@ def _get_weekend_exceptions_month(user_id: int, first_iso: str, last_iso: str) -
         }
     finally:
         db.close()
+
+
+def _get_tracking_start(user_id: int) -> "str | None":
+    """Return user's tracking_start_date (ISO) or None."""
+    db = connect()
+    try:
+        r = db.execute("SELECT tracking_start_date FROM users WHERE id=?", (user_id,)).fetchone()
+        val = r["tracking_start_date"] if r else None
+        return str(val)[:10] if val else None
+    finally:
+        db.close()
+
+
+def _before_start_date(user_id: int, iso_day: str) -> "str | None":
+    """Return error message if iso_day is before user's tracking_start_date, else None."""
+    start = _get_tracking_start(user_id)
+    if start and iso_day < start:
+        return START_DATE_MSG.format(_fmt_date_de(start))
+    return None
+
+
+def _range_before_start_date(user_id: int, date_from: str, date_to: str) -> "str | None":
+    return _before_start_date(user_id, date_from)
 
 
 def _get_max_contoured_day(user_id: int) -> "str | None":
@@ -2928,6 +2952,11 @@ def absences_new_post():
     if date_from and date_to and _is_range_locked(u["id"], date_from, date_to):
         add_flash(LOCK_MSG, "error")
         return redirect(url_for("absences_new"))
+    if date_from:
+        sd_err = _range_before_start_date(u["id"], date_from, date_to or date_from)
+        if sd_err:
+            add_flash(sd_err, "error")
+            return redirect(url_for("absences_new"))
 
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
@@ -3057,6 +3086,12 @@ def absences_edit_post(absence_id: int):
         db.close()
         add_flash(LOCK_MSG, "error")
         return redirect(f"/absences/{absence_id}/edit")
+    if date_from:
+        sd_err = _range_before_start_date(u["id"], date_from, date_to or date_from)
+        if sd_err:
+            db.close()
+            add_flash(sd_err, "error")
+            return redirect(f"/absences/{absence_id}/edit")
 
     if _has_overlap(db, u["id"], date_from, date_to, exclude_id=absence_id):
         db.close()
@@ -3159,6 +3194,7 @@ CALENDAR_DAYMENU_ASSETS = (
   }
   .dc-abs{ overflow:visible; }
   .dc-exc{ font-size:9px; color:#f59e0b; vertical-align:middle; margin-left:2px; }
+  td.daycell-before{ background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(0,0,0,.03) 4px,rgba(0,0,0,.03) 8px); cursor:not-allowed; pointer-events:none; }
   .dc-hol{
     font-size:11px;
     font-weight:700;
@@ -3300,6 +3336,7 @@ def calendar_view():
 
     contoured_month = _get_contoured_days(u["id"], first_iso, last_iso)
     exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
+    user_start_date = _get_tracking_start(u["id"])
 
     day_badges = {}
     for a in abs_rows:
@@ -3365,6 +3402,12 @@ def calendar_view():
         d   = datetime.date(year, month, daynum)
         iso = d.isoformat()
         wd  = _wd[d.weekday()]
+        if user_start_date and iso < user_start_date:
+            return (
+                f"<td class='daycell daycell-before' title='Vor Arbeitsbeginn – kein Eintrag möglich'>"
+                f"<div class='dc-head'><b class='dc-num' style='opacity:.4;'>{daynum}</b></div>"
+                f"</td>"
+            )
         hol = hol_map.get(iso)
         badges = day_badges.get(iso, [])
         net   = net_map.get(iso)
@@ -3949,6 +3992,10 @@ def day_business_trip_save(day: str):
     if not start_date:
         add_flash("Ungültiges Startdatum.", "error")
         return redirect(f"/day/{day}")
+    sd_err = _before_start_date(u["id"], start_date)
+    if sd_err:
+        add_flash(sd_err, "error")
+        return redirect(f"/day/{day}")
     end_date_raw = (request.form.get("end_date") or "").strip()
     end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
     if end_date and end_date < start_date:
@@ -4027,6 +4074,10 @@ def day_block_add(day: str):
         return redirect("/calendar")
     if _is_day_locked(u["id"], day):
         add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
+    sd_err = _before_start_date(u["id"], day)
+    if sd_err:
+        add_flash(sd_err, "error")
         return redirect(f"/day/{day}")
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays',1)) == 1:
@@ -4165,6 +4216,10 @@ def day_block_edit_post(day: str, block_id: int):
     if _is_day_locked(u["id"], day):
         add_flash(LOCK_MSG, "error")
         return redirect(f"/day/{day}")
+    sd_err = _before_start_date(u["id"], day)
+    if sd_err:
+        add_flash(sd_err, "error")
+        return redirect(f"/day/{day}/block/{block_id}/edit")
 
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays', 1)) == 1:
@@ -4257,6 +4312,10 @@ def day_absence_add(day: str):
     u = current_user()
     if _is_day_locked(u["id"], day):
         add_flash(LOCK_MSG, "error")
+        return redirect(f"/day/{day}")
+    sd_err = _before_start_date(u["id"], day)
+    if sd_err:
+        add_flash(sd_err, "error")
         return redirect(f"/day/{day}")
     type_id = int(request.form.get("type_id") or 0)
     is_half_day = 1 if (request.form.get("is_half_day") == "1") else 0
@@ -4398,6 +4457,11 @@ def settings_view():
         </div>
         <div><button class="btn" type="submit">Speichern</button></div>
       </form>
+      <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--bd);">
+        <div class="small" style="color:#777;">Arbeitsbeginn</div>
+        <div style="font-size:14px;font-weight:600;">{_fmt_date_de(u.get("tracking_start_date")) or "–"}</div>
+        <div class="small" style="color:#777;margin-top:2px;">Kein Eintrag vor diesem Datum möglich. Änderung nur durch Admin.</div>
+      </div>
     </div>
 
     <div class="card">
@@ -4973,6 +5037,10 @@ def business_trips_add():
     if _is_range_locked(u["id"], start_date, end_date or start_date):
         add_flash(LOCK_MSG, "error")
         return redirect(f"/business_trips?y={year}&new=1")
+    sd_err = _before_start_date(u["id"], start_date)
+    if sd_err:
+        add_flash(sd_err, "error")
+        return redirect(f"/business_trips?y={year}&new=1")
     departure_time     = (request.form.get("departure_time") or "").strip() or None
     departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
     return_time        = (request.form.get("return_time") or "").strip() or None
@@ -5178,6 +5246,12 @@ def periods_lock():
             add_flash("Nur vergangene Jahre können als ganzes abgeschlossen werden.", "error")
             return redirect(f"/periods?y={year}")
 
+    user_start = _get_tracking_start(u["id"])
+    if user_start and month:
+        period_last_day = f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
+        if period_last_day < user_start:
+            add_flash(f"Abschluss nicht möglich – Monat liegt vor Arbeitsbeginn ({_fmt_date_de(user_start)}).", "error")
+            return redirect(f"/periods?y={year}")
     _lock_period(u["id"], year, month, locked_by=u["id"])
     label = f"{MONTH_NAMES_DE[month]} {year}" if month else f"Jahr {year}"
     add_flash(f"{label} abgeschlossen.", "success")
@@ -5294,8 +5368,8 @@ def export_home():
     return render_template_string(layout("Export", body, u, APP_VERSION))
 
 
-def _export_date_range():
-    """Return (date_from_iso, date_to_iso) from request args, defaulting to current year."""
+def _export_date_range(user_id: int = 0):
+    """Return (date_from_iso, date_to_iso) clamped to user's tracking_start_date."""
     today = datetime.date.today()
     df = request.args.get("from") or f"{today.year}-01-01"
     dt = request.args.get("to")   or f"{today.year}-12-31"
@@ -5303,6 +5377,10 @@ def _export_date_range():
         df = f"{today.year}-01-01"
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', dt):
         dt = f"{today.year}-12-31"
+    if user_id:
+        start = _get_tracking_start(user_id)
+        if start:
+            df = max(df, start)
     return df, dt
 
 
@@ -5315,7 +5393,7 @@ def _export_filename(prefix: str, date_from: str, date_to: str) -> str:
 def export_absences_csv():
     bootstrap()
     u = current_user()
-    date_from, date_to = _export_date_range()
+    date_from, date_to = _export_date_range(u["id"])
     db = connect()
     rows = db.execute(
         """
@@ -5344,7 +5422,7 @@ def export_absences_csv():
 def export_time_blocks_csv():
     bootstrap()
     u = current_user()
-    date_from, date_to = _export_date_range()
+    date_from, date_to = _export_date_range(u["id"])
     db = connect()
     rows = db.execute(
         """
@@ -5470,7 +5548,7 @@ def export_presence_csv():
 def export_times_csv():
     bootstrap()
     u = current_user()
-    date_from, date_to = _export_date_range()
+    date_from, date_to = _export_date_range(u["id"])
     db = connect()
     rows = db.execute(
         """
@@ -5495,7 +5573,7 @@ def export_times_csv():
 def export_trips_csv():
     bootstrap()
     u = current_user()
-    date_from, date_to = _export_date_range()
+    date_from, date_to = _export_date_range(u["id"])
     db = connect()
     rows = db.execute(
         """
@@ -5528,7 +5606,7 @@ def export_trips_csv():
 def export_balance_csv():
     bootstrap()
     u = current_user()
-    date_from, date_to = _export_date_range()
+    date_from, date_to = _export_date_range(u["id"])
     today_iso = datetime.date.today().isoformat()
     date_to = min(date_to, today_iso)
 
@@ -5714,21 +5792,28 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date FROM users WHERE id=?", (user_id,)).fetchone()
     db.close()
     if not r:
         abort(404)
 
     admin_checked = "checked" if r["is_admin"] else ""
     active_checked = "checked" if r["is_active"] else ""
+    tsd_val = str(r["tracking_start_date"] or "")[:10]
 
     body = f'''
     {flash_html()}
+    {FORM_ASSETS_JS}
     <div class="card">
       <h3>Benutzer bearbeiten: {r["username"]}</h3>
       <form method="post" action="/admin/users/{user_id}/edit">
         <label><input type="checkbox" name="is_admin" value="1" {admin_checked}> Admin</label><br>
         <label><input type="checkbox" name="is_active" value="1" {active_checked}> aktiv</label><br><br>
+
+        <div><label>Arbeitsbeginn (start_date)</label><br>
+          {_date_input("tracking_start_date", tsd_val)}
+          <div class="small" style="color:#777;margin-top:3px;">Kein Eintrag vor diesem Datum möglich.</div>
+        </div><br>
 
         <div><label>Neues Passwort (optional)</label><br>
           <input type="password" name="new_password" placeholder="leer lassen = unverändert">
@@ -5749,6 +5834,13 @@ def admin_users_edit_post(user_id: int):
     is_admin = (request.form.get("is_admin") or "0") == "1"
     is_active = (request.form.get("is_active") or "0") == "1"
     set_flags(user_id, is_admin=is_admin, is_active=is_active)
+
+    tsd = _parse_date_input(request.form.get("tracking_start_date") or "")
+    if tsd:
+        db = connect()
+        db.execute("UPDATE users SET tracking_start_date=?, updated_at=datetime('now') WHERE id=?", (tsd, user_id))
+        db.commit()
+        db.close()
 
     new_pw = (request.form.get("new_password") or "").strip()
     if new_pw:
