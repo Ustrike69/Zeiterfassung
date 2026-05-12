@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.3"
+APP_VERSION = "v4.3.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1819,13 +1819,23 @@ def api_contour():
         return jsonify({"ok": False, "error": "Ungültiges Datum"}), 400
     db = connect()
     try:
-        if action == "unmark":
-            db.execute("DELETE FROM contoured_days WHERE user_id=? AND day=?", (u["id"], day))
-        else:
+        if action == "mark":
+            # Nur kontieren wenn Zeiteintrag oder Abwesenheit vorhanden
+            has_block = db.execute(
+                "SELECT 1 FROM time_blocks WHERE user_id=? AND day=? LIMIT 1", (u["id"], day)
+            ).fetchone()
+            has_absence = db.execute(
+                "SELECT 1 FROM absences WHERE user_id=? AND date_from<=? AND date_to>=? LIMIT 1",
+                (u["id"], day, day)
+            ).fetchone()
+            if not has_block and not has_absence:
+                return jsonify({"ok": False, "error": "Kein Eintrag für diesen Tag"}), 400
             db.execute(
                 "INSERT OR IGNORE INTO contoured_days(user_id, day) VALUES(?,?)",
                 (u["id"], day),
             )
+        else:
+            db.execute("DELETE FROM contoured_days WHERE user_id=? AND day=?", (u["id"], day))
         db.commit()
     finally:
         db.close()
@@ -3221,34 +3231,54 @@ def calendar_view():
             if hol and hol["is_holiday"] else ""
         )
         net   = net_map.get(iso)
-        net_h = f"<div style='position:absolute;right:6px;bottom:6px;color:var(--mu);font-size:11px;font-weight:600;'>{net}</div>" if net else ""
-        miss  = (
-            "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>"
-            if iso in missing_days else ""
-        )
         trip  = trip_map.get(iso)
         trip_h = (
             f"<div style='margin-top:4px;font-size:12px;color:var(--ac);"
             f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>✈ {trip}</div>"
         ) if trip else ""
-        is_kontiert = iso in contoured_month
-        ck_h = (
-            f"<span id='ck_{iso}' style='position:absolute;left:5px;top:5px;color:var(--ok);"
-            f"font-size:11px;font-weight:700;line-height:1;{'' if is_kontiert else 'display:none;'}'"
-            f" title='Kontiert'>✓</span>"
+
+        has_entry   = bool(net or badges)
+        is_kontiert = (iso in contoured_month) and has_entry
+        is_missing  = iso in missing_days
+
+        # Zeit-Anzeige (bottom-right, immer gerendert für JS-Toggle)
+        nh_disp = "none" if (is_kontiert or is_missing or not net) else ""
+        nh_h = (
+            f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;"
+            f"color:var(--mu);font-size:11px;font-weight:600;display:{nh_disp};'>{net or ''}</div>"
         )
-        km_txt = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
+
+        # Status-Indikator bottom-right: ✕ fehlend | ● kontiert | (Zeit via nh_h)
+        if is_missing:
+            status_h = (
+                "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);"
+                "font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>"
+                f"<span id='ck_{iso}' style='display:none;position:absolute;right:6px;"
+                f"bottom:6px;color:#f59e0b;font-size:15px;line-height:1;' title='Kontiert'>●</span>"
+            )
+        else:
+            ck_disp = "" if is_kontiert else "display:none;"
+            status_h = (
+                f"<span id='ck_{iso}' style='position:absolute;right:6px;bottom:6px;"
+                f"color:#f59e0b;font-size:15px;line-height:1;{ck_disp}' title='Kontiert'>●</span>"
+            )
+
+        km_txt  = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
+        km_item = (
+            f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{km_txt}</a>"
+            if has_entry else
+            f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
+        )
         return (
             f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
-            f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'>"
-            f"<b style='color:var(--tx);'>{daynum}</b></div>"
-            f"{hol_txt}{trip_h}{_badge_html(badges)}{net_h}{miss}{ck_h}"
+            f"<b style='position:absolute;left:5px;top:5px;font-size:13px;color:var(--tx);font-weight:700;'>{daynum}</b>"
+            f"{hol_txt}{trip_h}{_badge_html(badges)}{nh_h}{status_h}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
             f"  <a href='/absences/new'>\U0001f3d6 Abwesenheit anlegen</a>"
-            f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{km_txt}</a>"
+            f"{km_item}"
             f"</div></td>"
         )
 
@@ -3383,8 +3413,19 @@ function toggleKontiert(iso,ev){{
     if(!d.ok)return;
     var ck=document.getElementById('ck_'+iso);
     var km=document.getElementById('km_'+iso);
-    if(isK){{_kontiert.delete(iso);if(ck)ck.style.display='none';if(km)km.textContent='✓ Als kontiert markieren';}}
-    else{{_kontiert.add(iso);if(ck)ck.style.display='inline';if(km)km.textContent='✕ Kontierung aufheben';}}
+    if(isK){{
+      _kontiert.delete(iso);
+      if(ck)ck.style.display='none';
+      var nh=document.getElementById('nh_'+iso);
+      if(nh)nh.style.display='';
+      if(km)km.textContent='✓ Als kontiert markieren';
+    }}else{{
+      _kontiert.add(iso);
+      if(ck)ck.style.display='inline';
+      var nh=document.getElementById('nh_'+iso);
+      if(nh)nh.style.display='none';
+      if(km)km.textContent='✕ Kontierung aufheben';
+    }}
   }}).catch(function(){{}});
   return false;
 }}
@@ -3415,7 +3456,7 @@ function toggleKontiert(iso,ev){{
         <span style="font-weight:700;color:var(--danger);">&#9679; Feiertag</span>
         <span style="color:var(--ok);font-weight:700;">HH:MM</span> erfasst
         <span style="color:var(--danger);font-weight:700;">&#10005;</span> fehlend
-        <span style="color:var(--ok);font-weight:700;">✓</span> kontiert
+        <span style="color:#f59e0b;font-weight:700;">●</span> kontiert
       </div>
 
       <div class="cal-grid-wrap">
