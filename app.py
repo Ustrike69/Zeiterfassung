@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.6"
+APP_VERSION = "v4.4.7"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2805,37 +2805,19 @@ def _month_start_end(year: int, month: int):
 
 
 def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
-    """Saldo bis zu einem Datum (inkl.) – zählt nur Tage mit Einträgen, plus den heutigen Tag wenn Soll > 0.
-
-    Regeln:
-    - Vergangene Tage: nur wenn ein Eintrag vorhanden (verhindert riesige Negative für neue User).
-    - Heute ohne Eintrag: wird einbezogen wenn Soll > 0, damit die laufende Pflicht korrekt abgezogen wird.
-    - Heute mit Eintrag, aber Soll = 0 (Wochenende, Feiertag, oder falsches Schema): wird übersprungen,
-      um Saldo-Inflation durch unkonfigurierte Tage zu verhindern.
-    """
+    """Saldo bis zu einem Datum (inkl.) – identische Logik wie balance_view (_iter_days)."""
     d = datetime.date.fromisoformat(end_iso)
-    start_iso = datetime.date(d.year, 1, 1).isoformat()
+    year_start = datetime.date(d.year, 1, 1).isoformat()
+    tracking_start = _get_tracking_start(user_id)
+    if tracking_start:
+        year_start = max(year_start, tracking_start)
 
     start_minutes = _get_start_balance_minutes(user_id)
     running = int(start_minutes)
     today_iso = datetime.date.today().isoformat()
     flextag_ranges = _fetch_flextag_ranges(user_id)
 
-    days_set = _days_with_any_entry(user_id, start_iso, end_iso)
-
-    if start_iso <= today_iso <= end_iso:
-        today_expected = int(_expected_minutes_for_day(user_id, today_iso) or 0)
-        if today_expected > 0:
-            # Always include today if there's actual scheduled work, even without an entry yet.
-            days_set.add(today_iso)
-        elif today_iso in days_set:
-            # Today has an entry but Soll = 0 (holiday, weekend, or misconfigured schema).
-            # Remove it to prevent actual hours inflating the saldo.
-            days_set.discard(today_iso)
-
-    days = sorted(days_set)
-
-    for iso in days:
+    for iso in _iter_days(year_start, end_iso):
         expected = int(_expected_minutes_for_day(user_id, iso) or 0)
         actual = int(_actual_minutes_for_day(user_id, iso) or 0)
         flextag_min = 0
