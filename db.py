@@ -226,6 +226,18 @@ def init_db():
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_contoured_days_user ON contoured_days(user_id, day)")
 
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS weekend_exceptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        day TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(user_id, day),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_weekend_exceptions_user_day ON weekend_exceptions(user_id, day)")
+
     # User profile / onboarding columns
     if not _col_exists(db, "users", "tracking_start_date"):
         db.execute("ALTER TABLE users ADD COLUMN tracking_start_date TEXT")

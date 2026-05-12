@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.7"
+APP_VERSION = "v4.3.8"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1766,6 +1766,57 @@ def _get_contoured_days(user_id: int, start_iso: str, end_iso: str) -> set:
         db.close()
 
 
+def _has_weekend_exception(user_id: int, day: str) -> bool:
+    db = connect()
+    try:
+        return bool(db.execute(
+            "SELECT 1 FROM weekend_exceptions WHERE user_id=? AND day=?", (user_id, day)
+        ).fetchone())
+    finally:
+        db.close()
+
+
+def _get_weekend_exception(user_id: int, day: str):
+    db = connect()
+    try:
+        return db.execute(
+            "SELECT note FROM weekend_exceptions WHERE user_id=? AND day=?", (user_id, day)
+        ).fetchone()
+    finally:
+        db.close()
+
+
+def _set_weekend_exception(user_id: int, day: str, note: str = "") -> None:
+    db = connect()
+    db.execute(
+        "INSERT OR REPLACE INTO weekend_exceptions(user_id, day, note, created_at) VALUES(?,?,?,datetime('now'))",
+        (user_id, day, note),
+    )
+    db.commit()
+    db.close()
+
+
+def _remove_weekend_exception(user_id: int, day: str) -> None:
+    db = connect()
+    db.execute("DELETE FROM weekend_exceptions WHERE user_id=? AND day=?", (user_id, day))
+    db.commit()
+    db.close()
+
+
+def _get_weekend_exceptions_month(user_id: int, first_iso: str, last_iso: str) -> set:
+    db = connect()
+    try:
+        return {
+            str(r["day"])[:10]
+            for r in db.execute(
+                "SELECT day FROM weekend_exceptions WHERE user_id=? AND day BETWEEN ? AND ?",
+                (user_id, first_iso, last_iso),
+            ).fetchall()
+        }
+    finally:
+        db.close()
+
+
 def _get_max_contoured_day(user_id: int) -> "str | None":
     db = connect()
     try:
@@ -1905,6 +1956,35 @@ def api_contoured_days_route():
     days = sorted(_get_contoured_days(u["id"], start_iso, end_iso))
     max_day = _get_max_contoured_day(u["id"])
     return jsonify({"days": days, "max_day": max_day})
+
+
+@app.post("/api/set-exception")
+@login_required
+def api_set_exception():
+    bootstrap()
+    u = current_user()
+    day = (request.form.get("day") or "").strip()[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        add_flash("Ungültiges Datum.", "error")
+        return redirect("/calendar")
+    note = (request.form.get("note") or "").strip()[:200]
+    _set_weekend_exception(u["id"], day, note)
+    add_flash(f"Ausnahme für {day} gesetzt – Zeitblöcke können jetzt eingetragen werden.", "success")
+    return redirect(f"/day/{day}")
+
+
+@app.post("/api/remove-exception")
+@login_required
+def api_remove_exception():
+    bootstrap()
+    u = current_user()
+    day = (request.form.get("day") or "").strip()[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        add_flash("Ungültiges Datum.", "error")
+        return redirect("/calendar")
+    _remove_weekend_exception(u["id"], day)
+    add_flash(f"Ausnahme für {day} entfernt.", "success")
+    return redirect(f"/day/{day}")
 
 
 @app.get("/")
@@ -3078,6 +3158,7 @@ CALENDAR_DAYMENU_ASSETS = (
     box-sizing:border-box;
   }
   .dc-abs{ overflow:visible; }
+  .dc-exc{ font-size:9px; color:#f59e0b; vertical-align:middle; margin-left:2px; }
   .dc-hol{
     font-size:11px;
     font-weight:700;
@@ -3218,6 +3299,7 @@ def calendar_view():
     db.close()
 
     contoured_month = _get_contoured_days(u["id"], first_iso, last_iso)
+    exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
 
     day_badges = {}
     for a in abs_rows:
@@ -3325,10 +3407,11 @@ def calendar_view():
             if has_entry else
             f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
         )
+        exc_badge = "<span class='dc-exc' title='Ausnahme aktiv'>⚡</span>" if iso in exc_days_month else ""
         return (
             f"<td class='daycell' title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<div class='dc-head'>"
-            f"<b class='dc-num'>{daynum}</b>"
+            f"<b class='dc-num'>{daynum}{exc_badge}</b>"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"</div>"
             f"{nh_h}"
@@ -3558,6 +3641,41 @@ def _validate_block(time_in: str, time_out: str, break_minutes: int) -> tuple[bo
     return True, ""
 
 
+def _exception_banner(day: str, is_blocked_day: bool, exc_row, locked: bool) -> str:
+    if not is_blocked_day:
+        return ""
+    if exc_row is not None:
+        note = exc_row["note"] or ""
+        note_html = f" &ndash; <i>{note}</i>" if note else ""
+        remove_btn = "" if locked else (
+            f"<form method='post' action='/api/remove-exception' style='margin:0;'>"
+            f"<input type='hidden' name='day' value='{day}'>"
+            f"<button class='btn danger' type='submit' style='padding:6px 12px;font-size:13px;'>Ausnahme entfernen</button>"
+            f"</form>"
+        )
+        return (
+            f"<div class='card' style='margin-top:10px;border-color:#16a34a;background:rgba(22,163,74,.07);'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;'>"
+            f"<div><b style='color:#16a34a;'>⚡ Ausnahme aktiv</b>{note_html}"
+            f"<div class='small' style='margin-top:2px;'>Zeitblöcke an diesem Wochenende/Feiertag sind erlaubt.</div></div>"
+            f"{remove_btn}</div></div>"
+        )
+    set_form = "" if locked else (
+        f"<form method='post' action='/api/set-exception' style='display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;'>"
+        f"<input type='hidden' name='day' value='{day}'>"
+        f"<div><label style='font-size:13px;'>Grund <span style='color:var(--mu);'>(optional)</span></label><br>"
+        f"<input name='note' placeholder='z.B. Notfalleinsatz' style='max-width:260px;'></div>"
+        f"<button class='btn primary' type='submit'>Ausnahme setzen</button>"
+        f"</form>"
+    )
+    return (
+        f"<div class='card' style='margin-top:10px;border-color:#f59e0b;background:rgba(245,158,11,.07);'>"
+        f"<b style='color:#b45309;'>⚠ Wochenende / Feiertag – Speichern blockiert</b>"
+        f"<p class='small' style='margin:6px 0 0;'>Zeitblöcke für diesen Tag können erst eingetragen werden, nachdem eine Ausnahme gesetzt wurde.</p>"
+        f"{set_form}</div>"
+    )
+
+
 @app.get("/day/<day>")
 @login_required
 def day_detail(day: str):
@@ -3599,6 +3717,14 @@ def day_detail(day: str):
     total = 0
     for b in blocks:
         total += (_minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0))
+
+    # exception banner data
+    sched_day = _get_user_schedule(u["id"])
+    is_blocked_day = (
+        int(sched_day.get("block_weekends_holidays", 1)) == 1
+        and (_is_weekend(day) or _is_holiday(day))
+    )
+    exc_row = _get_weekend_exception(u["id"], day) if is_blocked_day else None
 
     # prev/next navigation
     try:
@@ -3683,6 +3809,8 @@ def day_detail(day: str):
       </div>
       <p class="small">Mehrere Zeitblöcke pro Tag möglich. Netto-Summe: <b>{_fmt_minutes(total)}</b></p>
     </div>
+
+    {_exception_banner(day, is_blocked_day, exc_row, day_locked)}
 
     {"" if day_locked else f'''
     <div class="card" style="margin-top:10px;">
@@ -3902,9 +4030,14 @@ def day_block_add(day: str):
         return redirect(f"/day/{day}")
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays',1)) == 1:
-        if (_is_weekend(day) or _is_holiday(day)) and not request.form.get('override_nonwork'):
-            add_flash('Arbeiten an Wochenende/Feiertag ist blockiert (Regel). Setze „Ausnahme“ um trotzdem zu speichern.', 'error')
-            return redirect(f"/day/{day}")
+        if _is_weekend(day) or _is_holiday(day):
+            if not _has_weekend_exception(u['id'], day):
+                if request.form.get('override_nonwork'):
+                    if request.form.get('save_exception'):
+                        _set_weekend_exception(u['id'], day, (request.form.get('exception_note') or '').strip()[:200])
+                else:
+                    add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
+                    return redirect(f"/day/{day}")
     time_in = (request.form.get("time_in") or "").strip()
     time_out = (request.form.get("time_out") or "").strip()
     break_minutes = int(request.form.get("break_minutes") or 0)
@@ -4035,9 +4168,14 @@ def day_block_edit_post(day: str, block_id: int):
 
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays', 1)) == 1:
-        if (_is_weekend(day) or _is_holiday(day)) and not request.form.get('override_nonwork'):
-            add_flash('Arbeiten an Wochenende/Feiertag ist blockiert (Regel).', 'error')
-            return redirect(f"/day/{day}/block/{block_id}/edit")
+        if _is_weekend(day) or _is_holiday(day):
+            if not _has_weekend_exception(u['id'], day):
+                if request.form.get('override_nonwork'):
+                    if request.form.get('save_exception'):
+                        _set_weekend_exception(u['id'], day, (request.form.get('exception_note') or '').strip()[:200])
+                else:
+                    add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
+                    return redirect(f"/day/{day}/block/{block_id}/edit")
 
     time_in = (request.form.get("time_in") or "").strip()
     time_out = (request.form.get("time_out") or "").strip()
