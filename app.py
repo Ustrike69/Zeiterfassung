@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.1"
+APP_VERSION = "v4.3.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3227,8 +3227,9 @@ def calendar_view():
         ) if trip else ""
         is_kontiert = iso in contoured_month
         ck_h = (
-            f"<span id='ck_{iso}' style='position:absolute;left:6px;bottom:6px;color:var(--ok);"
-            f"font-size:14px;font-weight:700;{'' if is_kontiert else 'display:none;'}' title='Kontiert'>✓</span>"
+            f"<span id='ck_{iso}' style='position:absolute;left:5px;top:5px;color:var(--ok);"
+            f"font-size:11px;font-weight:700;line-height:1;{'' if is_kontiert else 'display:none;'}'"
+            f" title='Kontiert'>✓</span>"
         )
         km_txt = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
         return (
@@ -3369,7 +3370,7 @@ function toggleKontiert(iso,ev){{
     var ck=document.getElementById('ck_'+iso);
     var km=document.getElementById('km_'+iso);
     if(isK){{_kontiert.delete(iso);if(ck)ck.style.display='none';if(km)km.textContent='✓ Als kontiert markieren';}}
-    else{{_kontiert.add(iso);if(ck)ck.style.display='';if(km)km.textContent='✕ Kontierung aufheben';}}
+    else{{_kontiert.add(iso);if(ck)ck.style.display='inline';if(km)km.textContent='✕ Kontierung aufheben';}}
   }}).catch(function(){{}});
   return false;
 }}
