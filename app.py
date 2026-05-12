@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.5"
+APP_VERSION = "v4.3.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3186,7 +3186,9 @@ def calendar_view():
                 txt += f": {a['comment']}"
             if a["is_half_day"] and a["date_from"] == a["date_to"]:
                 txt += " (1/2)"
-            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
+            vis_first = (cur == d0) or (cur.weekday() == 0)
+            vis_last  = (cur == d1) or (cur.weekday() == 6)
+            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999", vis_first, vis_last))
             cur += datetime.timedelta(days=1)
 
     month_isos  = set(_iter_days(first_iso, last_iso))
@@ -3199,13 +3201,26 @@ def calendar_view():
     # ── Desktop grid ──────────────────────────────────────────────────────────
     def _badge_html(items):
         out = ""
-        for txt, col in items[:4]:
+        for item in items[:4]:
+            txt, col, vis_first, vis_last = item
+            bg = col + "22"
+            if vis_first and vis_last:
+                radius = "6px"
+                w_extra = "width:100%;box-sizing:border-box;"
+            elif vis_first:
+                radius = "6px 0 0 6px"
+                w_extra = "width:calc(100% + 8px);margin-right:-8px;box-sizing:border-box;"
+            elif vis_last:
+                radius = "0 6px 6px 0"
+                w_extra = "width:calc(100% + 8px);margin-left:-8px;box-sizing:border-box;"
+            else:
+                radius = "0"
+                w_extra = "width:calc(100% + 16px);margin-left:-8px;margin-right:-8px;box-sizing:border-box;"
             out += (
-                f"<div style='margin-top:4px;padding:2px 6px;border-radius:8px;"
-                f"border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:12px;"
-                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;box-sizing:border-box;'>"
-                f"<span style='display:inline-block;width:8px;height:8px;background:{col};"
-                f"border-radius:2px;margin-right:5px;vertical-align:middle;flex-shrink:0;'></span>{txt}</div>"
+                f"<div style='margin-top:4px;padding:2px 6px;border-radius:{radius};"
+                f"background:{bg};color:var(--tx);font-size:12px;position:relative;z-index:1;"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;{w_extra}'>"
+                f"{txt}</div>"
             )
         if len(items) > 4:
             out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
@@ -3278,7 +3293,7 @@ def calendar_view():
             f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<b style='position:absolute;left:5px;top:5px;font-size:13px;color:var(--tx);font-weight:700;'>{daynum}</b>"
-            f"{hol_txt}{trip_h}{_badge_html(badges)}{miss_h}{nh_h}{ck_h}"
+            f"{_badge_html(badges)}{trip_h}{hol_txt}{miss_h}{nh_h}{ck_h}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
@@ -3324,7 +3339,7 @@ def calendar_view():
         cp = ""
         if net:
             cp += f"<span class='cal-lr-h'>{net}</span>"
-        for txt, col in badges:
+        for txt, col, *_ in badges:
             cp += f"<span class='cal-lr-b' style='border-left:3px solid {col};padding-left:5px;'>{txt}</span>"
         if is_hol:
             cp += f"<span class='cal-lr-hol'>{hol['holiday_name']}</span>"
