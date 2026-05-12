@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.6"
+APP_VERSION = "v4.3.7"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -19,9 +19,6 @@ app.secret_key = "change-me"  # set via env in production
 # -------------------------
 
 MOBILE_ASSETS = """
-<style>
-  td.daycell .addbtn{ right:4px; top:26px; }
-</style>
 <script>
   document.addEventListener('DOMContentLoaded', function(){
     try{
@@ -3034,22 +3031,70 @@ def _month_range(year: int, month: int):
 CALENDAR_DAYMENU_ASSETS = (
 """
 <style>
+  td.daycell{
+    position:relative;
+    vertical-align:top;
+    padding:0;
+  }
+  .dc-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    height:26px;
+    padding:3px 4px 0 5px;
+    box-sizing:border-box;
+  }
+  .dc-num{
+    font-size:13px;
+    font-weight:700;
+    color:var(--tx);
+    line-height:1;
+  }
   td.daycell .addbtn{
-    opacity:1;
-    position:absolute;
-    right:6px;
-    top:6px;
-    font-size:14px;
+    font-size:13px;
     font-weight:700;
     color:var(--mu);
-    padding:2px 6px;
-    border-radius:8px;
+    padding:1px 5px;
+    border-radius:6px;
     background:var(--sf);
     border:1px solid var(--bd);
-    z-index:60;
     text-decoration:none;
+    line-height:1.4;
+    opacity:0;
+    flex-shrink:0;
+    transition:opacity .15s;
   }
-
+  td.daycell:hover .addbtn{ opacity:1; }
+  .dc-time{
+    height:20px;
+    display:flex;
+    align-items:center;
+    padding:0 5px;
+    font-size:11px;
+    font-weight:600;
+    color:var(--mu);
+    overflow:hidden;
+    white-space:nowrap;
+    box-sizing:border-box;
+  }
+  .dc-abs{ overflow:visible; }
+  .dc-hol{
+    font-size:11px;
+    font-weight:700;
+    color:var(--danger);
+    padding:2px 5px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .dc-trip{
+    font-size:11px;
+    color:var(--ac);
+    padding:2px 5px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
   td.daycell .daymenu{
     display:none;
     position:fixed;
@@ -3217,13 +3262,13 @@ def calendar_view():
                 radius = "0"
                 w_extra = "width:calc(100% + 16px);margin-left:-8px;margin-right:-8px;box-sizing:border-box;"
             out += (
-                f"<div style='margin-top:4px;padding:2px 6px;border-radius:{radius};"
-                f"background:{bg};color:var(--tx);font-size:12px;position:relative;z-index:1;"
+                f"<div style='height:22px;line-height:22px;padding:0 6px;border-radius:{radius};"
+                f"background:{bg};color:var(--tx);font-size:11px;position:relative;z-index:1;"
                 f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;{w_extra}'>"
                 f"{txt}</div>"
             )
         if len(items) > 4:
-            out += f"<div style='margin-top:4px;color:var(--mu);font-size:11px;'>+{len(items)-4} mehr…</div>"
+            out += f"<div style='padding:1px 5px;color:var(--mu);font-size:10px;'>+{len(items)-4} mehr…</div>"
         return out
 
     def _week_num(week_days):
@@ -3240,48 +3285,39 @@ def calendar_view():
         wd  = _wd[d.weekday()]
         hol = hol_map.get(iso)
         badges = day_badges.get(iso, [])
-        hol_txt = (
-            f"<div style='margin-top:4px;font-size:12px;font-weight:700;color:var(--danger);"
-            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>{hol['holiday_name']}</div>"
-            if hol and hol["is_holiday"] else ""
-        )
         net   = net_map.get(iso)
         trip  = trip_map.get(iso)
-        trip_h = (
-            f"<div style='margin-top:4px;font-size:12px;color:var(--ac);"
-            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>✈ {trip}</div>"
-        ) if trip else ""
 
         has_entry   = bool(net or badges)
         is_kontiert = (iso in contoured_month) and has_entry
         is_missing  = iso in missing_days
 
-        # Bottom-right: ✕ fehlend  |  · HH:MM kontiert  |  HH:MM normal  |  · (nur Abwesenheit kontiert)
+        # Fixed-height time row (26px header + 20px time = abs section always at offset 46px)
         if is_missing:
-            miss_h = (
-                "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);"
-                "font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>"
+            nh_h = (
+                f"<div id='nh_{iso}' class='dc-time' data-net='' data-has-net='0'"
+                f" style='color:var(--danger);font-size:13px;font-weight:700;'"
+                f" title='Fehlender Eintrag'>✕</div>"
             )
-            nh_h = f"<div id='nh_{iso}' style='display:none;' data-net='' data-has-net='0'></div>"
-            ck_h = f"<span id='ck_{iso}' style='display:none;'></span>"
+        elif net:
+            clr = "#b45309" if is_kontiert else "var(--mu)"
+            txt = f"· {net}" if is_kontiert else net
+            nh_h = (
+                f"<div id='nh_{iso}' class='dc-time' data-net='{net}' data-has-net='1'"
+                f" style='color:{clr};'>{txt}</div>"
+            )
         else:
-            miss_h = ""
-            if net:
-                clr = "#b45309" if is_kontiert else "var(--mu)"
-                txt = f"· {net}" if is_kontiert else net
-                nh_h = (
-                    f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;z-index:2;"
-                    f"color:{clr};font-size:11px;font-weight:600;'"
-                    f" data-net='{net}' data-has-net='1'>{txt}</div>"
-                )
-                ck_h = f"<span id='ck_{iso}' style='display:none;'></span>"
-            else:
-                nh_h = f"<div id='nh_{iso}' style='display:none;' data-net='' data-has-net='0'></div>"
-                ck_style = (
-                    "position:absolute;right:6px;bottom:6px;z-index:2;color:#b45309;"
-                    "font-size:11px;font-weight:700;line-height:1;"
-                ) if is_kontiert else "display:none;"
-                ck_h = f"<span id='ck_{iso}' style='{ck_style}' title='Kontiert'>·</span>"
+            dot = "·" if is_kontiert else ""
+            clr_style = " style='color:#b45309;'" if is_kontiert else ""
+            nh_h = (
+                f"<div id='nh_{iso}' class='dc-time' data-net='' data-has-net='0'{clr_style}>{dot}</div>"
+            )
+
+        hol_html = (
+            f"<div class='dc-hol'>{hol['holiday_name']}</div>"
+            if hol and hol["is_holiday"] else ""
+        )
+        trip_h = f"<div class='dc-trip'>✈ {trip}</div>" if trip else ""
 
         km_txt  = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
         km_item = (
@@ -3290,16 +3326,20 @@ def calendar_view():
             f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
         )
         return (
-            f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;'"
-            f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
-            f"<b style='position:absolute;left:5px;top:5px;font-size:13px;color:var(--tx);font-weight:700;'>{daynum}</b>"
-            f"{_badge_html(badges)}{trip_h}{hol_txt}{miss_h}{nh_h}{ck_h}"
+            f"<td class='daycell' title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
+            f"<div class='dc-head'>"
+            f"<b class='dc-num'>{daynum}</b>"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
-            f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
+            f"</div>"
+            f"{nh_h}"
+            f"<div class='dc-abs'>{_badge_html(badges)}</div>"
+            f"{trip_h}{hol_html}"
+            f"<div id='m_{iso}' class='daymenu' onclick='event.stopPropagation();'>"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
             f"  <a href='/absences/new'>\U0001f3d6 Abwesenheit anlegen</a>"
             f"{km_item}"
-            f"</div></td>"
+            f"</div>"
+            f"</td>"
         )
 
     cal_obj  = calendar.Calendar(firstweekday=0)
@@ -3402,7 +3442,6 @@ def calendar_view():
 .cal-lr-ok{color:var(--ok);font-size:14px;font-weight:700;}
 th.kw-head{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;padding:4px 2px;}
 td.kw-cell{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:center;vertical-align:middle;padding:2px;white-space:nowrap;}
-td.daycell{min-height:62px;}
 </style>"""
 
     cal_js = """<script>
@@ -3433,19 +3472,22 @@ function toggleKontiert(iso,ev){{
   }}).then(function(r){{return r.json();}}).then(function(d){{
     if(!d.ok)return;
     var nh=document.getElementById('nh_'+iso);
-    var ck=document.getElementById('ck_'+iso);
     var km=document.getElementById('km_'+iso);
     var hasNet=nh&&nh.dataset.hasNet==='1';
     var netVal=nh?(nh.dataset.net||''):'';
     if(isK){{
       _kontiert.delete(iso);
-      if(hasNet){{nh.style.color='var(--mu)';nh.textContent=netVal;}}
-      else{{if(ck)ck.style.display='none';}}
+      if(nh){{
+        if(hasNet){{nh.style.color='var(--mu)';nh.textContent=netVal;}}
+        else{{nh.textContent='';nh.style.color='';}}
+      }}
       if(km)km.textContent='✓ Als kontiert markieren';
     }}else{{
       _kontiert.add(iso);
-      if(hasNet){{nh.style.color='#b45309';nh.textContent='· '+netVal;}}
-      else{{if(ck){{ck.style.cssText='position:absolute;right:6px;bottom:6px;z-index:2;color:#b45309;font-size:11px;font-weight:700;line-height:1;';ck.textContent='·';}}}}
+      if(nh){{
+        if(hasNet){{nh.style.color='#b45309';nh.textContent='· '+netVal;}}
+        else{{nh.textContent='·';nh.style.color='#b45309';}}
+      }}
       if(km)km.textContent='✕ Kontierung aufheben';
     }}
   }}).catch(function(){{}});
