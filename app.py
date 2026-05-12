@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.0"
+APP_VERSION = "v4.3.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1858,6 +1858,18 @@ def api_contour_until():
     if until < year_start:
         return jsonify({"ok": True, "marked": 0})
 
+    # Validate: until must not be before the user's first time_block entry
+    db_check = connect()
+    try:
+        fb = db_check.execute(
+            "SELECT MIN(day) AS d FROM time_blocks WHERE user_id=?", (u["id"],)
+        ).fetchone()
+        first_entry = str(fb["d"])[:10] if fb and fb["d"] else None
+    finally:
+        db_check.close()
+    if first_entry and until < first_entry:
+        return jsonify({"ok": False, "error": "Datum liegt vor dem ersten Eintrag"}), 400
+
     days_with = _days_with_any_entry(u["id"], year_start, until)
     db = connect()
     try:
@@ -1918,6 +1930,17 @@ def index():
     uc_color = "var(--danger)" if uncontoured_count > 0 else "var(--ok)"
     max_contoured = _get_max_contoured_day(u["id"])
     max_contoured_str = _fmt_date_de(max_contoured) if max_contoured else "–"
+    yesterday_iso = (today - datetime.timedelta(days=1)).isoformat()
+    yesterday_de = _fmt_date_de(yesterday_iso)
+    _db_tmp = connect()
+    try:
+        _fb = _db_tmp.execute(
+            "SELECT MIN(day) AS d FROM time_blocks WHERE user_id=?", (u["id"],)
+        ).fetchone()
+        first_entry_iso = str(_fb["d"])[:10] if _fb and _fb["d"] else yesterday_iso
+    finally:
+        _db_tmp.close()
+    kontier_has_range = first_entry_iso <= yesterday_iso
 
     # Abwesenheiten Jahresübersicht
     ab_sum = _absence_summary_for_period(u["id"], f"{year}-01-01", f"{year}-12-31")
@@ -1992,19 +2015,64 @@ def index():
         <div style="font-size:14px;color:var(--mu);">Kontiert bis: <b style="color:var(--tx);">{max_contoured_str}</b></div>
       </div>
       <div class="small" style="margin-top:6px;">noch zu kontierende Arbeitstage · <a href="/calendar">Kalender</a></div>
-      <button class="btn" style="margin-top:10px;" onclick="kontierUntilToday(this)">Alle bis heute kontieren</button>
+      <div style="margin-top:10px;">
+        <label style="font-size:13px;color:var(--mu);display:block;margin-bottom:5px;">Kontiert bis:</label>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="dt-wrap">
+            <input type="text" id="kontier-dt-text" class="dt-text"
+                   value="{yesterday_de}" placeholder="TT.MM.JJJJ" maxlength="10"
+                   oninput="kontierDtText(this)">
+            <input type="date" id="kontier-dt-pick" class="dt-pick"
+                   value="{yesterday_iso}" min="{first_entry_iso}" max="{yesterday_iso}"
+                   onchange="kontierDtPick(this)">
+          </div>
+          <button id="kontier-btn" class="btn primary" onclick="doKontieren()"
+                  {"" if kontier_has_range else "disabled"}>Kontieren</button>
+        </div>
+        <div id="kontier-toast" style="display:none;margin-top:8px;padding:8px 12px;
+             background:var(--ok);color:#fff;border-radius:8px;font-size:13px;font-weight:600;"></div>
+      </div>
     </div>
     <script>
-    function kontierUntilToday(btn){{
+    function kontierDtText(inp){{
+      var m=inp.value.match(/^(\\d{{1,2}})\\.(\\d{{1,2}})\\.(\\d{{4}})$/);
+      var pick=document.getElementById('kontier-dt-pick');
+      if(m){{pick.value=m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');}}
+      else{{pick.value='';}}
+      _validateKontier();
+    }}
+    function kontierDtPick(inp){{
+      var dt=document.getElementById('kontier-dt-text');
+      if(inp.value&&inp.value.length===10){{dt.value=inp.value.slice(8)+'.'+inp.value.slice(5,7)+'.'+inp.value.slice(0,4);}}
+      _validateKontier();
+    }}
+    function _validateKontier(){{
+      var v=document.getElementById('kontier-dt-pick').value;
+      var ok=v&&v>='{first_entry_iso}'&&v<='{yesterday_iso}';
+      var btn=document.getElementById('kontier-btn');
+      if(btn)btn.disabled=!ok;
+    }}
+    function doKontieren(){{
+      var pick=document.getElementById('kontier-dt-pick');
+      var until=pick.value;
+      if(!until)return;
+      var btn=document.getElementById('kontier-btn');
       btn.disabled=true;btn.textContent='Wird kontiert…';
       fetch('/api/contour-until',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{until:'{today.isoformat()}'}})
+        body:JSON.stringify({{until:until}})
       }}).then(function(r){{return r.json();}})
       .then(function(d){{
-        if(d.ok){{location.reload();}}
-        else{{btn.disabled=false;btn.textContent='Alle bis heute kontieren';}}
-      }}).catch(function(){{btn.disabled=false;btn.textContent='Alle bis heute kontieren';}});
+        btn.textContent='Kontieren';
+        if(d.ok){{
+          var dtxt=document.getElementById('kontier-dt-text').value;
+          var toast=document.getElementById('kontier-toast');
+          toast.textContent=(d.marked?d.marked+' Tage bis '+dtxt+' kontiert':'Alle Tage bereits kontiert');
+          toast.style.display='block';
+          setTimeout(function(){{location.reload();}},2200);
+        }}else{{btn.disabled=false;}}
+      }}).catch(function(){{btn.disabled=false;btn.textContent='Kontieren';}});
     }}
+    _validateKontier();
     </script>
     <div class="card" style="margin-bottom:12px;">
       <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
@@ -2974,16 +3042,14 @@ CALENDAR_DAYMENU_ASSETS = (
 
   td.daycell .daymenu{
     display:none;
-    position:absolute;
-    right:6px;
-    top:32px;
-    min-width:170px;
+    position:fixed;
+    min-width:190px;
     background:var(--sf);
     border:1px solid var(--bd);
     border-radius:10px;
-    box-shadow:0 6px 18px rgba(0,0,0,.18);
+    box-shadow:0 6px 24px rgba(0,0,0,.22);
     padding:6px;
-    z-index:70;
+    z-index:1500;
   }
   td.daycell .daymenu a{
     display:block;
@@ -3001,7 +3067,10 @@ CALENDAR_DAYMENU_ASSETS = (
 <script>
   function _closeAllDayMenus(){
     try{
-      document.querySelectorAll('.daymenu').forEach(function(m){ m.style.display = 'none'; });
+      document.querySelectorAll('.daymenu').forEach(function(m){
+        m.style.display='none';
+        m.removeAttribute('data-open');
+      });
     }catch(e){}
   }
 
@@ -3010,9 +3079,20 @@ CALENDAR_DAYMENU_ASSETS = (
       if(ev){ ev.preventDefault(); ev.stopPropagation(); }
       var m = document.getElementById(menuId);
       if(!m) return false;
-      var isOpen = (m.style.display === 'block');
+      var isOpen = (m.getAttribute('data-open')==='1');
       _closeAllDayMenus();
-      m.style.display = isOpen ? 'none' : 'block';
+      if(!isOpen){
+        var btn = ev.currentTarget || ev.target;
+        var r = btn.getBoundingClientRect();
+        var menuW = 195;
+        var left = Math.max(4, Math.min(r.right - menuW, window.innerWidth - menuW - 4));
+        var top = r.bottom + 6;
+        if(top + 140 > window.innerHeight){ top = Math.max(4, r.top - 144); }
+        m.style.left = left + 'px';
+        m.style.top  = top  + 'px';
+        m.style.display = 'block';
+        m.setAttribute('data-open','1');
+      }
     }catch(e){}
     return false;
   }
@@ -3021,6 +3101,7 @@ CALENDAR_DAYMENU_ASSETS = (
   document.addEventListener('keydown', function(e){
     if(e && e.key === 'Escape'){ _closeAllDayMenus(); }
   });
+  document.addEventListener('scroll', function(){ _closeAllDayMenus(); }, true);
 </script>
 """
 )
