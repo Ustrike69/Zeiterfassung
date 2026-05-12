@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.3"
+APP_VERSION = "v4.4.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2595,7 +2595,32 @@ def balance_view():
     for mi in range(1, 13):
         month_opts += f'<option value="{mi}" {"selected" if mi == sel_month else ""}>{MONTH_NAMES_DE[mi]}</option>'
 
+    # ── Status-Badges (Abwesenheiten + Feiertage) für den Anzeigebereich ────
+    _day_status: dict[str, list[tuple[str, str]]] = {}
+    _db2 = connect()
+    for _ab in _db2.execute(
+        """SELECT a.date_from, a.date_to, t.name AS type_name, t.color AS type_color
+           FROM absences a JOIN absence_types t ON t.id=a.type_id
+           WHERE a.user_id=? AND NOT (a.date_to < ? OR a.date_from > ?)""",
+        (u["id"], display_start, display_end),
+    ).fetchall():
+        _d0 = datetime.date.fromisoformat(_ab["date_from"])
+        _d1 = datetime.date.fromisoformat(_ab["date_to"])
+        _cur = _d0
+        while _cur <= _d1:
+            _iso = _cur.isoformat()
+            if display_start <= _iso <= display_end:
+                _day_status.setdefault(_iso, []).append((_ab["type_name"], _ab["type_color"] or "#6c757d"))
+            _cur += datetime.timedelta(days=1)
+    for _hol in _db2.execute(
+        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND day BETWEEN ? AND ?",
+        (display_start, display_end),
+    ).fetchall():
+        _day_status.setdefault(str(_hol["day"])[:10], []).append((_hol["holiday_name"], "var(--danger)"))
+    _db2.close()
+
     # ── Tabellenzeilen ───────────────────────────────────────────────────
+    _wd_names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     trs = ""
     for r in display_rows:
         flextag_badge = (
@@ -2605,17 +2630,34 @@ def balance_view():
         )
         delta_clr   = _balance_color(r["delta"])
         running_clr = _balance_color(r["running"])
-        _wd_names = ["Mo","Di","Mi","Do","Fr","Sa","So"]
         _d_obj = datetime.date.fromisoformat(r["day"])
         _wd_lbl = _wd_names[_d_obj.weekday()]
+
+        # Status badges
+        _statuses = _day_status.get(r["day"], [])
+        _status_html = ""
+        for _label, _color in _statuses[:2]:
+            _bg = (_color + "22") if _color.startswith("#") else "rgba(0,0,0,.07)"
+            _txt_clr = _color if _color != "var(--danger)" else "var(--danger)"
+            _status_html += (
+                f"<span style='font-size:10px;padding:1px 5px;border-radius:4px;"
+                f"background:{_bg};color:{_txt_clr};white-space:nowrap;font-weight:600;'>"
+                f"{_label}</span> "
+            )
+
+        # Dim rows with no expected time, no actual work, and no status
+        _no_soll = r["expected"] == 0 and r["actual"] == 0 and not _statuses
+        _row_style = " style='opacity:.38;'" if _no_soll else ""
+
         trs += (
-            "<tr>"
+            f"<tr{_row_style}>"
             f"<td style='white-space:nowrap;'>"
-            f"<a href='/day/{r['day']}' title='Zur Zeiterfassung' style='text-decoration:none;color:inherit;display:flex;gap:6px;align-items:center;'>"
-            f"<span style='font-size:11px;color:var(--mu);min-width:20px;'>{_wd_lbl}</span>"
+            f"<a href='/day/{r['day']}' title='Zur Zeiterfassung' style='text-decoration:none;color:inherit;display:flex;gap:5px;align-items:center;'>"
+            f"<span style='min-width:22px;'>{_wd_lbl}</span>"
             f"{_fmt_date_de(r['day'])}"
-            f"<span style='font-size:13px;opacity:.45;'>&#8599;</span>"
+            f"<span style='font-size:12px;opacity:.4;'>&#8599;</span>"
             f"</a></td>"
+            f"<td>{_status_html}</td>"
             f"<td style='text-align:right;'>"
             f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;'>"
             f"<input type='hidden' name='day' value='{r['day']}'>"
@@ -2686,6 +2728,7 @@ def balance_view():
         <thead>
           <tr>
             <th>Tag</th>
+            <th></th>
             <th style="text-align:right;">Soll</th>
             <th style="text-align:right;">Ist</th>
             <th style="text-align:right;">Delta</th>
