@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.5"
+APP_VERSION = "v4.4.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2805,13 +2805,13 @@ def _month_start_end(year: int, month: int):
 
 
 def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
-    """Saldo bis zu einem Datum (inkl.) – zählt nur Tage mit Einträgen, plus immer den heutigen Tag.
+    """Saldo bis zu einem Datum (inkl.) – zählt nur Tage mit Einträgen, plus den heutigen Tag wenn Soll > 0.
 
-    Hintergrund: Wenn man für alle Arbeitstage Soll abzieht, obwohl noch keine Tage gepflegt sind,
-    entstehen riesige negative Salden. Daher rechnen wir hier nur über Tage, die irgendeinen Eintrag
-    haben (Zeitblöcke, Presence oder Abwesenheit).
-    Der heutige Tag wird immer einbezogen, damit die laufende Sollzeit korrekt abgezogen wird,
-    auch wenn noch kein Eintrag für heute vorhanden ist.
+    Regeln:
+    - Vergangene Tage: nur wenn ein Eintrag vorhanden (verhindert riesige Negative für neue User).
+    - Heute ohne Eintrag: wird einbezogen wenn Soll > 0, damit die laufende Pflicht korrekt abgezogen wird.
+    - Heute mit Eintrag, aber Soll = 0 (Wochenende, Feiertag, oder falsches Schema): wird übersprungen,
+      um Saldo-Inflation durch unkonfigurierte Tage zu verhindern.
     """
     d = datetime.date.fromisoformat(end_iso)
     start_iso = datetime.date(d.year, 1, 1).isoformat()
@@ -2822,10 +2822,17 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
     flextag_ranges = _fetch_flextag_ranges(user_id)
 
     days_set = _days_with_any_entry(user_id, start_iso, end_iso)
-    # Always count today so its Soll is subtracted even without a time entry yet.
-    # If today is a holiday/weekend/absence, _expected_minutes_for_day returns 0 → no effect.
+
     if start_iso <= today_iso <= end_iso:
-        days_set.add(today_iso)
+        today_expected = int(_expected_minutes_for_day(user_id, today_iso) or 0)
+        if today_expected > 0:
+            # Always include today if there's actual scheduled work, even without an entry yet.
+            days_set.add(today_iso)
+        elif today_iso in days_set:
+            # Today has an entry but Soll = 0 (holiday, weekend, or misconfigured schema).
+            # Remove it to prevent actual hours inflating the saldo.
+            days_set.discard(today_iso)
+
     days = sorted(days_set)
 
     for iso in days:
