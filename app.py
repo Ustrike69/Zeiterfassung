@@ -6018,7 +6018,7 @@ def admin_users():
                 f'<button class="btn" type="submit" style="padding:4px 10px;font-size:13px;" title="Identität annehmen">👤 Identität</button></form>'
             )
         carryover_exc_badge = ""
-        if r.get("vacation_carryover_exception"):
+        if r["vacation_carryover_exception"]:
             carryover_exc_badge = " <span class='small' style='color:#d97706;'>Übertrag⚡</span>"
         trs += (
             f'<tr>'
