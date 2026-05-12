@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.4"
+APP_VERSION = "v4.3.5"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3241,27 +3241,32 @@ def calendar_view():
         is_kontiert = (iso in contoured_month) and has_entry
         is_missing  = iso in missing_days
 
-        # Zeit-Anzeige (bottom-right, immer gerendert für JS-Toggle)
-        nh_disp = "none" if (is_kontiert or is_missing or not net) else ""
-        nh_h = (
-            f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;"
-            f"color:var(--mu);font-size:11px;font-weight:600;display:{nh_disp};'>{net or ''}</div>"
-        )
-
-        # Status-Indikator bottom-right: ✕ fehlend | ● kontiert | (Zeit via nh_h)
+        # Bottom-right: ✕ fehlend  |  · HH:MM kontiert  |  HH:MM normal  |  · (nur Abwesenheit kontiert)
         if is_missing:
-            status_h = (
+            miss_h = (
                 "<span style='position:absolute;right:6px;bottom:6px;color:var(--danger);"
                 "font-size:13px;font-weight:700;' title='Fehlender Eintrag'>✕</span>"
-                f"<span id='ck_{iso}' style='display:none;position:absolute;right:6px;"
-                f"bottom:6px;color:#f59e0b;font-size:15px;line-height:1;' title='Kontiert'>●</span>"
             )
+            nh_h = f"<div id='nh_{iso}' style='display:none;' data-net='' data-has-net='0'></div>"
+            ck_h = f"<span id='ck_{iso}' style='display:none;'></span>"
         else:
-            ck_disp = "" if is_kontiert else "display:none;"
-            status_h = (
-                f"<span id='ck_{iso}' style='position:absolute;right:6px;bottom:6px;"
-                f"color:#f59e0b;font-size:15px;line-height:1;{ck_disp}' title='Kontiert'>●</span>"
-            )
+            miss_h = ""
+            if net:
+                clr = "#b45309" if is_kontiert else "var(--mu)"
+                txt = f"· {net}" if is_kontiert else net
+                nh_h = (
+                    f"<div id='nh_{iso}' style='position:absolute;right:6px;bottom:6px;"
+                    f"color:{clr};font-size:11px;font-weight:600;'"
+                    f" data-net='{net}' data-has-net='1'>{txt}</div>"
+                )
+                ck_h = f"<span id='ck_{iso}' style='display:none;'></span>"
+            else:
+                nh_h = f"<div id='nh_{iso}' style='display:none;' data-net='' data-has-net='0'></div>"
+                ck_style = (
+                    "position:absolute;right:6px;bottom:6px;color:#b45309;"
+                    "font-size:11px;font-weight:700;line-height:1;"
+                ) if is_kontiert else "display:none;"
+                ck_h = f"<span id='ck_{iso}' style='{ck_style}' title='Kontiert'>·</span>"
 
         km_txt  = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
         km_item = (
@@ -3273,7 +3278,7 @@ def calendar_view():
             f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<b style='position:absolute;left:5px;top:5px;font-size:13px;color:var(--tx);font-weight:700;'>{daynum}</b>"
-            f"{hol_txt}{trip_h}{_badge_html(badges)}{nh_h}{status_h}"
+            f"{hol_txt}{trip_h}{_badge_html(badges)}{miss_h}{nh_h}{ck_h}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
@@ -3411,19 +3416,20 @@ function toggleKontiert(iso,ev){{
     body:JSON.stringify({{day:iso,action:isK?'unmark':'mark'}})
   }}).then(function(r){{return r.json();}}).then(function(d){{
     if(!d.ok)return;
+    var nh=document.getElementById('nh_'+iso);
     var ck=document.getElementById('ck_'+iso);
     var km=document.getElementById('km_'+iso);
+    var hasNet=nh&&nh.dataset.hasNet==='1';
+    var netVal=nh?(nh.dataset.net||''):'';
     if(isK){{
       _kontiert.delete(iso);
-      if(ck)ck.style.display='none';
-      var nh=document.getElementById('nh_'+iso);
-      if(nh)nh.style.display='';
+      if(hasNet){{nh.style.color='var(--mu)';nh.textContent=netVal;}}
+      else{{if(ck)ck.style.display='none';}}
       if(km)km.textContent='✓ Als kontiert markieren';
     }}else{{
       _kontiert.add(iso);
-      if(ck)ck.style.display='inline';
-      var nh=document.getElementById('nh_'+iso);
-      if(nh)nh.style.display='none';
+      if(hasNet){{nh.style.color='#b45309';nh.textContent='· '+netVal;}}
+      else{{if(ck){{ck.style.cssText='position:absolute;right:6px;bottom:6px;color:#b45309;font-size:11px;font-weight:700;line-height:1;';ck.textContent='·';}}}}
       if(km)km.textContent='✕ Kontierung aufheben';
     }}
   }}).catch(function(){{}});
@@ -3456,7 +3462,7 @@ function toggleKontiert(iso,ev){{
         <span style="font-weight:700;color:var(--danger);">&#9679; Feiertag</span>
         <span style="color:var(--ok);font-weight:700;">HH:MM</span> erfasst
         <span style="color:var(--danger);font-weight:700;">&#10005;</span> fehlend
-        <span style="color:#f59e0b;font-weight:700;">●</span> kontiert
+        <span style="color:#b45309;font-weight:700;">·</span> kontiert (Zeitangabe in Bernstein)
       </div>
 
       <div class="cal-grid-wrap">
