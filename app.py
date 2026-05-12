@@ -3,13 +3,14 @@ import datetime
 import calendar
 import sqlite3
 import re
+import html as _html
 from db import init_db, seed_defaults, db_path, connect
 from calendar_seed import seed_calendar_2026_nrw
 from auth import has_users, create_user, authenticate, current_user, login_required, admin_required, set_password, set_flags
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.0"
+APP_VERSION = "v4.4.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1169,6 +1170,136 @@ def _default_workdays_mask() -> int:
     return sum(_workday_bit(i) for i in range(5))
 
 
+def _parse_sched_form(form) -> dict:
+    """Parse schedule form fields into a normalized dict."""
+    valid_from = _parse_date_input(form.get("valid_from") or "") or ""
+    mode = (form.get("mode") or "weekly").strip().lower()
+    if mode not in ("weekly", "daily"):
+        mode = "weekly"
+    weekly_hours_raw = (form.get("weekly_hours") or "0").strip().replace(",", ".")
+    try:
+        weekly_minutes = int(round(float(weekly_hours_raw) * 60))
+    except Exception:
+        weekly_minutes = 0
+    mask = 0
+    for i, key in enumerate(["wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun"]):
+        if (form.get(key) or "") == "1":
+            mask |= _workday_bit(i)
+    block = 1 if (form.get("block_weekends_holidays") or "") == "1" else 0
+
+    def dm(name):
+        raw = (form.get(name) or "").strip()
+        return _coerce_minutes(raw) if raw else 0
+
+    return {
+        "valid_from": valid_from,
+        "mode": mode,
+        "weekly_minutes": weekly_minutes,
+        "workdays_mask": mask,
+        "block_weekends_holidays": block,
+        "mon_minutes": dm("mon"),
+        "tue_minutes": dm("tue"),
+        "wed_minutes": dm("wed"),
+        "thu_minutes": dm("thu"),
+        "fri_minutes": dm("fri"),
+        "sat_minutes": dm("sat"),
+        "sun_minutes": dm("sun"),
+    }
+
+
+def _sched_save_to_db(user_id: int, sched_dict: dict) -> None:
+    """Upsert a schedule row for user_id. sched_dict must contain valid_from."""
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    row = {"user_id": int(user_id), "updated_at": now, **sched_dict}
+    db = connect()
+    cols = [r["name"] for r in db.execute("PRAGMA table_info(user_schedules)").fetchall()]
+    row = {k: v for k, v in row.items() if k in cols}
+    if "created_at" in cols and "created_at" not in row:
+        row["created_at"] = now
+    db.execute("DELETE FROM user_schedules WHERE user_id=? AND valid_from=?", (row["user_id"], row["valid_from"]))
+    col_list = ", ".join(row.keys())
+    ph_list = ", ".join(["?"] * len(row))
+    db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+    db.commit()
+    db.close()
+
+
+def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bool = False,
+                     auto_breaks_enabled: bool = False) -> str:
+    """Return the complete <form> HTML for creating/editing a schedule."""
+    def chk(bit):
+        return "checked" if (int(sched.get("workdays_mask", 0)) & bit) else ""
+
+    def hm(mins):
+        return _fmt_minutes(int(mins or 0))
+
+    vf = sched.get("valid_from") or datetime.date.today().isoformat()
+    mode = (sched.get("mode") or "weekly").lower()
+    wh = f"{(int(sched.get('weekly_minutes', 0)) / 60):g}"
+    block_chk = "checked" if int(sched.get("block_weekends_holidays", 1)) else ""
+
+    auto_breaks_html = ""
+    if show_auto_breaks:
+        auto_breaks_html = f"""
+<div style="margin-bottom:10px;">
+  <label><b>Automatische Pausen</b></label><br>
+  <label><input type="checkbox" name="auto_breaks" value="1" {"checked" if auto_breaks_enabled else ""}> Mindestpausen automatisch setzen (ab 6:00 → 30 min, ab 9:30 → 45 min)</label>
+</div>"""
+
+    return f"""
+      <form method="post" action="{_html.escape(action_url)}">
+        <div style="margin-bottom:10px;">
+          <label><b>Gültig ab</b></label><br>
+          {_date_input("valid_from", vf, required=True)}
+          <div class="small" style="color:#777;">Ab diesem Datum wird dieses Zeitschema angewendet.</div>
+        </div>
+        {auto_breaks_html}
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+          <div>
+            <label><b>Modus</b></label><br>
+            <label><input type="radio" name="mode" value="weekly" {"checked" if mode=="weekly" else ""}> Wochenarbeitszeit verteilen</label><br>
+            <label><input type="radio" name="mode" value="daily" {"checked" if mode=="daily" else ""}> Sollstunden je Wochentag</label>
+          </div>
+          <div>
+            <label><b>Wochenarbeitszeit (Stunden)</b></label><br>
+            <input type="number" name="weekly_hours" min="0" step="0.25" value="{wh}">
+            <div class="small" style="color:#777;">Nur relevant im Modus "Wochenarbeitszeit verteilen".</div>
+          </div>
+        </div>
+        <hr style="margin:12px 0;">
+        <div style="margin-bottom:10px;">
+          <label><b>Arbeitstage</b></label><br>
+          <label><input type="checkbox" name="wd_mon" value="1" {chk(1)}> Mo</label>
+          <label><input type="checkbox" name="wd_tue" value="1" {chk(2)}> Di</label>
+          <label><input type="checkbox" name="wd_wed" value="1" {chk(4)}> Mi</label>
+          <label><input type="checkbox" name="wd_thu" value="1" {chk(8)}> Do</label>
+          <label><input type="checkbox" name="wd_fri" value="1" {chk(16)}> Fr</label>
+          <label><input type="checkbox" name="wd_sat" value="1" {chk(32)}> Sa</label>
+          <label><input type="checkbox" name="wd_sun" value="1" {chk(64)}> So</label>
+        </div>
+        <div style="margin-bottom:10px;">
+          <label><input type="checkbox" name="block_weekends_holidays" value="1" {block_chk}> Arbeiten an Wochenende/Feiertag blockieren (Standard)</label>
+        </div>
+        <hr style="margin:12px 0;">
+        <div class="card" style="background:#fafafa;">
+          <h4 style="margin-top:0;">Sollstunden je Wochentag (nur Modus "Sollstunden je Wochentag")</h4>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <div>Mo<br><input type="text" name="mon" value="{hm(sched.get('mon_minutes'))}" style="width:90px;"></div>
+            <div>Di<br><input type="text" name="tue" value="{hm(sched.get('tue_minutes'))}" style="width:90px;"></div>
+            <div>Mi<br><input type="text" name="wed" value="{hm(sched.get('wed_minutes'))}" style="width:90px;"></div>
+            <div>Do<br><input type="text" name="thu" value="{hm(sched.get('thu_minutes'))}" style="width:90px;"></div>
+            <div>Fr<br><input type="text" name="fri" value="{hm(sched.get('fri_minutes'))}" style="width:90px;"></div>
+            <div>Sa<br><input type="text" name="sat" value="{hm(sched.get('sat_minutes'))}" style="width:90px;"></div>
+            <div>So<br><input type="text" name="sun" value="{hm(sched.get('sun_minutes'))}" style="width:90px;"></div>
+          </div>
+          <div class="small" style="color:#777;margin-top:6px;">Format: HH:MM (z. B. 07:30). Leer oder 00:00 = kein Soll.</div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;">
+          <button class="btn primary" type="submit">Speichern</button>
+          <a class="btn" href="{_html.escape(back_url)}">Abbrechen</a>
+        </div>
+      </form>"""
+
 
 def _is_holiday(iso_day: str) -> bool:
     try:
@@ -1475,7 +1606,7 @@ def onboarding():
               <label><input type="checkbox" name="wd_sun" value="1" {chk3(64)}> So</label>
             </div>
             <div class="card" style="margin-bottom:10px;">
-              <b>Sollstunden je Wochentag</b> <span class="small">(nur Modus „je Wochentag")</span><br>
+              <b>Sollstunden je Wochentag</b> <span class="small">(nur Modus "je Wochentag")</span><br>
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
                 <div>Mo<br><input type="text" name="mon" value="{hm3(sched['mon_minutes'])}" style="width:90px;"></div>
                 <div>Di<br><input type="text" name="tue" value="{hm3(sched['tue_minutes'])}" style="width:90px;"></div>
@@ -3827,7 +3958,7 @@ def day_detail(day: str):
         <div class="card" style="margin-top:10px;">
           <b>Abwesenheit:</b> <span style="display:inline-block;width:10px;height:10px;background:{abs_row['type_color'] or '#999'};border-radius:2px;margin-right:6px;"></span>{abs_row['type_name']}{" (1/2)" if abs_row['is_half_day'] else ""}
           {f"<div class='small'>{abs_row['comment']}</div>" if abs_row['comment'] else ""}
-          <div class="small" style="margin-top:6px;color:#777;">Abwesenheiten bearbeitest du im Modul „Abwesenheiten“.</div>
+          <div class="small" style="margin-top:6px;color:#777;">Abwesenheiten bearbeitest du im Modul "Abwesenheiten".</div>
         </div>
         """
 
@@ -4434,21 +4565,32 @@ def settings_view():
 
         mode_txt = "Woche" if mode == "weekly" else ("Tag" if mode == "daily" else mode)
 
+        if mode == "daily":
+            day_parts = []
+            for day_key, label in [("mon_minutes","Mo"),("tue_minutes","Di"),("wed_minutes","Mi"),
+                                    ("thu_minutes","Do"),("fri_minutes","Fr"),("sat_minutes","Sa"),("sun_minutes","So")]:
+                v = int(s.get(day_key) or 0)
+                if v:
+                    day_parts.append(f"{label}:{_fmt_minutes(v)}")
+            soll_txt = " ".join(day_parts) if day_parts else "–"
+        else:
+            soll_txt = f"{weekly_hours_txt} h/Woche" if weekly_hours_txt else "–"
+
+        del_btn = ""
+        if sid:
+            del_btn = (f"<form method='post' action='/settings/schedule/{sid}/delete' style='display:inline;'"
+                       f" onsubmit=\"return confirm('Zeitschema ab {_fmt_date_de(valid_from) if valid_from else valid_from} löschen?');\">"
+                       f"<button class='btn danger' style='padding:3px 8px;font-size:12px;'>Löschen</button></form>")
+
         sched_rows += f"""<tr>
             <td style='white-space:nowrap;'><b>{_fmt_date_de(valid_from) if valid_from else "-"}</b></td>
             <td>{badge}</td>
             <td>{mode_txt}</td>
-            <td style='text-align:right;'>{weekly_hours_txt}</td>
+            <td class='small'>{soll_txt}</td>
             <td>{workdays_txt}</td>
+            <td>{del_btn}</td>
         </tr>"""
 
-
-    def chk(bit):
-        return "checked" if (int(sched["workdays_mask"]) & bit) else ""
-
-    # minutes -> HH:MM
-    def hm(mins):
-        return _fmt_minutes(int(mins or 0))
 
     profile_dn = u.get("display_name") or ""
     profile_em = u.get("email") or ""
@@ -4529,76 +4671,20 @@ def settings_view():
               <th>Gültig ab</th>
               <th>Status</th>
               <th>Modus</th>
-              <th style="text-align:right;">Wochenstunden</th>
+              <th>Soll</th>
               <th>Arbeitstage</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
-            {sched_rows if sched_rows else "<tr><td colspan='5' style='color:#666;'>Noch kein Zeitschema gespeichert.</td></tr>"}
+            {sched_rows if sched_rows else "<tr><td colspan='6' style='color:#666;'>Noch kein Zeitschema gespeichert.</td></tr>"}
           </tbody>
         </table>
       </div>
 
-      <form method="post" action="/settings/save">
-        <div style="margin-bottom:10px;">
-          <label><b>Gültig ab</b></label><br>
-          {_date_input("valid_from", sched.get("valid_from", datetime.date.today().isoformat()), required=True)}
-          <div class="small" style="color:#777;">Ab diesem Datum wird dieses Zeitschema angewendet.</div>
-
-<div style="margin-bottom:10px;">
-  <label><b>Automatische Pausen</b></label><br>
-  <label><input type="checkbox" name="auto_breaks" value="1" {"checked" if auto_breaks_enabled else ""}> Mindestpausen automatisch setzen (ab 6:00 → 30 min, ab 9:30 → 45 min)</label>
-</div>
-
-        </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-          <div>
-            <label><b>Modus</b></label><br>
-            <label><input type="radio" name="mode" value="weekly" {"checked" if sched["mode"]=="weekly" else ""}> Wochenarbeitszeit verteilen</label><br>
-            <label><input type="radio" name="mode" value="daily" {"checked" if sched["mode"]=="daily" else ""}> Sollstunden je Wochentag</label>
-          </div>
-          <div>
-            <label><b>Wochenarbeitszeit (Stunden)</b></label><br>
-            <input type="number" name="weekly_hours" min="0" step="0.25" value="{(int(sched.get('weekly_minutes', 0))/60):g}">
-            <div class="small" style="color:#777;">Nur relevant im Modus „Wochenarbeitszeit verteilen“.</div>
-          </div>
-        </div>
-
-        <hr style="margin:12px 0;">
-
-        <div>
-          <label><b>Arbeitstage</b></label><br>
-          <label><input type="checkbox" name="wd_mon" value="1" {chk(1)}> Mo</label>
-          <label><input type="checkbox" name="wd_tue" value="1" {chk(2)}> Di</label>
-          <label><input type="checkbox" name="wd_wed" value="1" {chk(4)}> Mi</label>
-          <label><input type="checkbox" name="wd_thu" value="1" {chk(8)}> Do</label>
-          <label><input type="checkbox" name="wd_fri" value="1" {chk(16)}> Fr</label>
-          <label><input type="checkbox" name="wd_sat" value="1" {chk(32)}> Sa</label>
-          <label><input type="checkbox" name="wd_sun" value="1" {chk(64)}> So</label>
-        </div>
-
-        <div style="margin-top:10px;">
-          <label><input type="checkbox" name="block_weekends_holidays" value="1" {"checked" if int(sched.get("block_weekends_holidays",1))==1 else ""}> Arbeiten an Wochenende/Feiertag blockieren (Standard)</label>
-        </div>
-
-        <hr style="margin:12px 0;">
-
-        <div class="card" style="background:#fafafa;">
-          <h4 style="margin-top:0;">Sollstunden je Wochentag (nur Modus „Sollstunden je Wochentag“)</h4>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <div>Mo<br><input type="text" name="mon" value="{hm(sched['mon_minutes'])}" style="width:90px;"></div>
-            <div>Di<br><input type="text" name="tue" value="{hm(sched['tue_minutes'])}" style="width:90px;"></div>
-            <div>Mi<br><input type="text" name="wed" value="{hm(sched['wed_minutes'])}" style="width:90px;"></div>
-            <div>Do<br><input type="text" name="thu" value="{hm(sched['thu_minutes'])}" style="width:90px;"></div>
-            <div>Fr<br><input type="text" name="fri" value="{hm(sched['fri_minutes'])}" style="width:90px;"></div>
-            <div>Sa<br><input type="text" name="sat" value="{hm(sched['sat_minutes'])}" style="width:90px;"></div>
-            <div>So<br><input type="text" name="sun" value="{hm(sched['sun_minutes'])}" style="width:90px;"></div>
-          </div>
-          <div class="small" style="color:#777;margin-top:6px;">Format: HH:MM (z. B. 07:30). Leer oder 00:00 = kein Soll.</div>
-        </div>
-
-        <button class="btn" type="submit" style="margin-top:12px;">Speichern</button>
-      </form>
+      <h4 style="margin:14px 0 6px 0;">Neues Zeitschema anlegen</h4>
+      {_sched_form_html(sched, "/settings/save", "/settings",
+                        show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
     </div>
     """
     return render_template_string(layout("Einstellungen", body, u, APP_VERSION))
@@ -4816,96 +4902,77 @@ def settings_save():
     bootstrap()
     u = current_user()
 
-    _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "")=="1" else 0)
+    _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "") == "1" else 0)
 
-    valid_from = _parse_date_input(request.form.get("valid_from") or "") or ""
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_from):
+    sched = _parse_sched_form(request.form)
+    if not sched["valid_from"]:
         add_flash("Bitte ein gültiges Datum (TT.MM.JJJJ) angeben.", "error")
         return redirect("/settings")
 
-    mode = (request.form.get("mode") or "weekly").strip().lower()
-    if mode not in ("weekly", "daily"):
-        mode = "weekly"
+    # Overlap check: warn if a newer schema exists that would override this one
+    if request.form.get("confirm_overlap") != "1":
+        db = connect()
+        overlap_rows = db.execute(
+            "SELECT id, valid_from FROM user_schedules WHERE user_id=? AND valid_from > ? ORDER BY valid_from",
+            (u["id"], sched["valid_from"]),
+        ).fetchall()
+        db.close()
+        if overlap_rows:
+            dates_str = ", ".join(_fmt_date_de(r["valid_from"]) for r in overlap_rows)
+            # Render confirmation page with all form data as hidden fields
+            hidden = "\n".join(
+                f'<input type="hidden" name="{_html.escape(k)}" value="{_html.escape(v)}">'
+                for k, v in request.form.items()
+                if k != "confirm_overlap"
+            )
+            warn_body = f"""
+            {flash_html()}
+            <div class="card" style="border-left:4px solid #f59e0b;">
+              <h3 style="margin-top:0;">⚠ Überschneidung mit vorhandenem Zeitschema</h3>
+              <p>Es existiert/existieren bereits neuere Zeitschemata (<b>{dates_str}</b>),
+                 die für Daten ab diesem Datum weiterhin gelten und das neue Schema überschreiben.</p>
+              <p>Das neue Schema ab <b>{_fmt_date_de(sched["valid_from"])}</b> wird ab dem nächsten neueren Schema
+                 (<b>{dates_str}</b>) durch dieses ersetzt.</p>
+              <p class="small">Zum vollständigen Ersetzen: zuerst das neuere Schema löschen (Einstellungen → Zeitschemata → Löschen),
+                 dann erneut speichern.</p>
+              <form method="post" action="/settings/save">
+                {hidden}
+                <input type="hidden" name="confirm_overlap" value="1">
+                <button class="btn primary" type="submit">Trotzdem anlegen</button>
+                <a class="btn" href="/settings">Abbrechen</a>
+              </form>
+            </div>
+            """
+            return render_template_string(layout("Zeitschema – Überschneidung", warn_body, u, APP_VERSION))
 
-    # weekly hours -> minutes (supports comma)
-    weekly_hours_raw = (request.form.get("weekly_hours") or "0").strip().replace(",", ".")
-    try:
-        weekly_minutes = int(round(float(weekly_hours_raw) * 60))
-    except Exception:
-        weekly_minutes = 0
+    _sched_save_to_db(u["id"], sched)
+    add_flash("Zeitschema gespeichert.", "success")
+    return redirect("/settings")
 
-    # workdays mask from checkboxes (mon..sun)
-    mask = 0
-    for i, key in enumerate(["wd_mon","wd_tue","wd_wed","wd_thu","wd_fri","wd_sat","wd_sun"]):
-        if (request.form.get(key) or "") == "1":
-            mask |= _workday_bit(i)
 
-    block_weekends_holidays = 1 if (request.form.get("block_weekends_holidays") or "") == "1" else 0
-
-    def _day_minutes_from_hhmm(name: str) -> int:
-        raw = (request.form.get(name) or "").strip()
-        if not raw:
-            return 0
-        return _coerce_minutes(raw)
-
-    day_vals = {
-        "mon_minutes": _day_minutes_from_hhmm("mon"),
-        "tue_minutes": _day_minutes_from_hhmm("tue"),
-        "wed_minutes": _day_minutes_from_hhmm("wed"),
-        "thu_minutes": _day_minutes_from_hhmm("thu"),
-        "fri_minutes": _day_minutes_from_hhmm("fri"),
-        "sat_minutes": _day_minutes_from_hhmm("sat"),
-        "sun_minutes": _day_minutes_from_hhmm("sun"),
-    }
-
-    # Build row dict. We'll only write columns that exist in the current DB schema.
-    row = {
-        "user_id": int(u["id"]),
-        "valid_from": valid_from,
-        "mode": mode,
-        "weekly_minutes": int(weekly_minutes),
-        "workdays_mask": int(mask),
-        "block_weekends_holidays": int(block_weekends_holidays),
-        **day_vals,
-        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-    }
-
+@app.post("/settings/schedule/<int:schedule_id>/delete")
+@login_required
+def settings_schedule_delete(schedule_id: int):
+    bootstrap()
+    u = current_user()
     db = connect()
-    cols = [r["name"] for r in db.execute("PRAGMA table_info(user_schedules)").fetchall()]
-    if not cols:
+    row = db.execute(
+        "SELECT id, valid_from FROM user_schedules WHERE id=? AND user_id=?",
+        (schedule_id, u["id"]),
+    ).fetchone()
+    if not row:
         db.close()
-        add_flash("DB-Schemafehler: Tabelle user_schedules fehlt.", "error")
+        add_flash("Zeitschema nicht gefunden.", "error")
         return redirect("/settings")
-
-    # Remove keys that do not exist
-    row = {k: v for k, v in row.items() if k in cols}
-
-    # If table has created_at but we didn't set it, set it (insert time)
-    if "created_at" in cols and "created_at" not in row:
-        row["created_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-
-    # Ensure required keys exist
-    if "user_id" not in row or "valid_from" not in row:
+    count = db.execute("SELECT COUNT(*) FROM user_schedules WHERE user_id=?", (u["id"],)).fetchone()[0]
+    if count <= 1:
         db.close()
-        add_flash("DB-Schemafehler: user_id/valid_from fehlen in user_schedules.", "error")
+        add_flash("Das letzte Zeitschema kann nicht gelöscht werden.", "error")
         return redirect("/settings")
-
-    # Upsert strategy: delete existing row for same (user_id, valid_from) if possible, then insert.
-    try:
-        db.execute("DELETE FROM user_schedules WHERE user_id=? AND valid_from=?", (row["user_id"], row["valid_from"]))
-    except Exception:
-        # if valid_from column name differs, we still try insert
-        pass
-
-    col_list = ", ".join(row.keys())
-    ph_list = ", ".join(["?"] * len(row))
-    values = list(row.values())
-
-    db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", values)
+    db.execute("DELETE FROM user_schedules WHERE id=?", (schedule_id,))
     db.commit()
     db.close()
-
-    add_flash("Zeitschema gespeichert.", "success")
+    add_flash(f"Zeitschema ab {_fmt_date_de(row['valid_from'])} gelöscht.", "success")
     return redirect("/settings")
 
 
@@ -5843,6 +5910,48 @@ def admin_users_edit(user_id: int):
     active_checked = "checked" if r["is_active"] else ""
     tsd_val = str(r["tracking_start_date"] or "")[:10]
 
+    # Schedule list for this user
+    all_scheds = _get_user_schedules_all(user_id)
+    today_iso = datetime.date.today().isoformat()
+    cur_sched = _get_user_schedule_for_day(user_id, today_iso)
+    cur_id = (cur_sched or {}).get("id")
+    sched_rows = ""
+    for s in all_scheds:
+        sid = s.get("id")
+        vf = s.get("valid_from") or ""
+        mode = (s.get("mode") or "weekly").lower()
+        if mode == "daily":
+            dp = []
+            for dk, lbl in [("mon_minutes","Mo"),("tue_minutes","Di"),("wed_minutes","Mi"),
+                             ("thu_minutes","Do"),("fri_minutes","Fr"),("sat_minutes","Sa"),("sun_minutes","So")]:
+                v = int(s.get(dk) or 0)
+                if v:
+                    dp.append(f"{lbl}:{_fmt_minutes(v)}")
+            soll = " ".join(dp) if dp else "–"
+        else:
+            wm = int(s.get("weekly_minutes") or 0)
+            soll = f"{wm/60:g} h/Woche" if wm else "–"
+        try:
+            if sid and cur_id and int(sid) == int(cur_id):
+                badge = "<span class='badge' style='background:#0a7;color:#fff;'>Aktuell</span>"
+            elif vf and vf > today_iso:
+                badge = "<span class='badge' style='background:#888;color:#fff;'>Zukünftig</span>"
+            else:
+                badge = "<span class='badge' style='background:#ddd;'>Historie</span>"
+        except Exception:
+            badge = ""
+        del_form = (f"<form method='post' action='/admin/schedule/{user_id}/delete/{sid}' style='display:inline;'"
+                    f" onsubmit=\"return confirm('Zeitschema ab {_fmt_date_de(vf)} löschen?');\">"
+                    f"<button class='btn danger' style='padding:3px 8px;font-size:12px;'>Löschen</button></form>") if sid else ""
+        edit_link = f"<a href='/admin/schedule/{user_id}/edit/{sid}' style='font-size:12px;'>Bearb.</a>" if sid else ""
+        sched_rows += (
+            f"<tr><td style='white-space:nowrap;'><b>{_fmt_date_de(vf) if vf else '–'}</b></td>"
+            f"<td>{badge}</td><td class='small'>{soll}</td>"
+            f"<td style='white-space:nowrap;'>{edit_link} {del_form}</td></tr>"
+        )
+    if not sched_rows:
+        sched_rows = "<tr><td colspan='4' class='small' style='color:#666;'>Noch kein Zeitschema vorhanden.</td></tr>"
+
     body = f'''
     {flash_html()}
     {FORM_ASSETS_JS}
@@ -5864,6 +5973,17 @@ def admin_users_edit(user_id: int):
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/admin/users">Zurück</a>
       </form>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        <h3 style="margin:0;">Zeitschemata</h3>
+        <a class="btn" href="/admin/schedule/{user_id}/edit/new">+ Neues Schema</a>
+      </div>
+      <table>
+        <thead><tr><th>Gültig ab</th><th>Status</th><th>Soll</th><th></th></tr></thead>
+        <tbody>{sched_rows}</tbody>
+      </table>
     </div>
     '''
     return render_template_string(layout("Admin: Benutzer bearbeiten", body, u, APP_VERSION))
@@ -5924,6 +6044,101 @@ def admin_users_delete(user_id: int):
     db.close()
     add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
     return redirect(url_for("admin_users"))
+
+
+# ─── Admin: Zeitschema bearbeiten / löschen ──────────────────────────────────
+
+@app.get("/admin/schedule/<int:user_id>/edit/<schedule_id>")
+@admin_required
+def admin_schedule_edit(user_id: int, schedule_id: str):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    target = db.execute("SELECT id, username FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+
+    if schedule_id == "new":
+        sched = _normalize_schedule({})
+        is_new = True
+    else:
+        try:
+            sid = int(schedule_id)
+        except ValueError:
+            abort(404)
+        db = connect()
+        row = db.execute("SELECT * FROM user_schedules WHERE id=? AND user_id=?", (sid, user_id)).fetchone()
+        db.close()
+        if not row:
+            abort(404)
+        sched = _normalize_schedule(dict(row))
+        is_new = False
+
+    title = (f"Neues Zeitschema – {target['username']}" if is_new
+             else f"Zeitschema bearbeiten – {target['username']} (ab {sched.get('valid_from','')})")
+    action = f"/admin/schedule/{user_id}/edit/{schedule_id}"
+    back = f"/admin/users/{user_id}/edit"
+
+    body = f"""
+    {flash_html()}
+    {FORM_ASSETS_JS}
+    <div class="card">
+      <h3 style="margin-top:0;">{title}</h3>
+      {_sched_form_html(sched, action, back)}
+    </div>
+    """
+    return render_template_string(layout(title, body, u, APP_VERSION))
+
+
+@app.post("/admin/schedule/<int:user_id>/edit/<schedule_id>")
+@admin_required
+def admin_schedule_edit_post(user_id: int, schedule_id: str):
+    bootstrap()
+    db = connect()
+    target = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+
+    sched = _parse_sched_form(request.form)
+    if not sched["valid_from"]:
+        add_flash("Bitte ein gültiges Datum angeben.", "error")
+        return redirect(f"/admin/schedule/{user_id}/edit/{schedule_id}")
+
+    # When editing an existing entry, delete the old row first (handles valid_from changes)
+    if schedule_id != "new":
+        try:
+            sid = int(schedule_id)
+            db = connect()
+            db.execute("DELETE FROM user_schedules WHERE id=? AND user_id=?", (sid, user_id))
+            db.commit()
+            db.close()
+        except (ValueError, Exception):
+            pass
+
+    _sched_save_to_db(user_id, sched)
+    add_flash(f"Zeitschema ab {_fmt_date_de(sched['valid_from'])} gespeichert.", "success")
+    return redirect(f"/admin/users/{user_id}/edit")
+
+
+@app.post("/admin/schedule/<int:user_id>/delete/<int:schedule_id>")
+@admin_required
+def admin_schedule_delete(user_id: int, schedule_id: int):
+    bootstrap()
+    db = connect()
+    row = db.execute(
+        "SELECT id, valid_from FROM user_schedules WHERE id=? AND user_id=?",
+        (schedule_id, user_id),
+    ).fetchone()
+    if row:
+        db.execute("DELETE FROM user_schedules WHERE id=?", (schedule_id,))
+        db.commit()
+        add_flash(f"Zeitschema ab {_fmt_date_de(row['valid_from'])} gelöscht.", "success")
+    else:
+        add_flash("Zeitschema nicht gefunden.", "error")
+    db.close()
+    return redirect(f"/admin/users/{user_id}/edit")
 
 
 @app.get("/admin/periods")
