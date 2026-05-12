@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.2"
+APP_VERSION = "v4.4.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2605,9 +2605,17 @@ def balance_view():
         )
         delta_clr   = _balance_color(r["delta"])
         running_clr = _balance_color(r["running"])
+        _wd_names = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+        _d_obj = datetime.date.fromisoformat(r["day"])
+        _wd_lbl = _wd_names[_d_obj.weekday()]
         trs += (
             "<tr>"
-            f"<td style='white-space:nowrap;'>{_fmt_date_de(r['day'])}</td>"
+            f"<td style='white-space:nowrap;'>"
+            f"<a href='/day/{r['day']}' title='Zur Zeiterfassung' style='text-decoration:none;color:inherit;display:flex;gap:6px;align-items:center;'>"
+            f"<span style='font-size:11px;color:var(--mu);min-width:20px;'>{_wd_lbl}</span>"
+            f"{_fmt_date_de(r['day'])}"
+            f"<span style='font-size:13px;opacity:.45;'>&#8599;</span>"
+            f"</a></td>"
             f"<td style='text-align:right;'>"
             f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;'>"
             f"<input type='hidden' name='day' value='{r['day']}'>"
