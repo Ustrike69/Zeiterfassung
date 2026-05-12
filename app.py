@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.3.9"
+APP_VERSION = "v4.4.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2813,6 +2813,7 @@ def absences_list():
 
     q_from = (request.args.get("from") or "").strip()
     q_to = (request.args.get("to") or "").strip()
+    user_start = _get_tracking_start(u["id"])
 
     db = connect()
     rows_sql = """
@@ -2823,9 +2824,10 @@ def absences_list():
       WHERE a.user_id = ?
     """
     params = [u["id"]]
-    if q_from:
+    effective_from = q_from or user_start or ""
+    if effective_from:
         rows_sql += " AND a.date_to >= ?"
-        params.append(q_from)
+        params.append(effective_from)
     if q_to:
         rows_sql += " AND a.date_from <= ?"
         params.append(q_to)
@@ -3288,8 +3290,14 @@ def calendar_view():
     u = current_user()
 
     today = datetime.date.today()
-    year  = int(request.args.get("y") or today.year)
-    month = int(request.args.get("m") or today.month)
+    user_start_date = _get_tracking_start(u["id"])
+    _def_y, _def_m = today.year, today.month
+    if user_start_date:
+        _sd = datetime.date.fromisoformat(user_start_date)
+        if today < _sd:
+            _def_y, _def_m = _sd.year, _sd.month
+    year  = int(request.args.get("y") or _def_y)
+    month = int(request.args.get("m") or _def_m)
 
     first_iso, last_iso = _month_range(year, month)
 
@@ -3336,7 +3344,6 @@ def calendar_view():
 
     contoured_month = _get_contoured_days(u["id"], first_iso, last_iso)
     exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
-    user_start_date = _get_tracking_start(u["id"])
 
     day_badges = {}
     for a in abs_rows:
@@ -3489,6 +3496,9 @@ def calendar_view():
     d_end = datetime.date(year, month, calendar.monthrange(year, month)[1])
     while d_it <= d_end:
         iso      = d_it.isoformat()
+        if user_start_date and iso < user_start_date:
+            d_it += datetime.timedelta(days=1)
+            continue
         wd       = _wd[d_it.weekday()]
         date_str = f"{d_it.day:02d}.{month:02d}."
         hol      = hol_map.get(iso)
@@ -3535,6 +3545,15 @@ def calendar_view():
     prev_m, prev_y = (month - 1, year) if month > 1 else (12, year - 1)
     next_m, next_y = (month + 1, year) if month < 12 else (1, year + 1)
     month_label = f"{MONTH_NAMES_DE[month]} {year}"
+    _prev_blocked = bool(
+        user_start_date and
+        datetime.date(prev_y, prev_m, 1) < datetime.date.fromisoformat(user_start_date).replace(day=1)
+    )
+    prev_nav_btn = (
+        f"<span class='btn' style='padding:9px 14px;opacity:.35;cursor:not-allowed;'>&#9664;</span>"
+        if _prev_blocked else
+        f"<a class='btn' href='/calendar?y={prev_y}&m={prev_m}' style='padding:9px 14px;'>&#9664;</a>"
+    )
 
     # ── Styles (plain strings – no f-string brace escaping needed) ────────────
     cal_css = """<style>
@@ -3630,7 +3649,7 @@ function toggleKontiert(iso,ev){{
     <div id="cal-wrap" class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:4px;">
-          <a class="btn" href="/calendar?y={prev_y}&m={prev_m}" style="padding:9px 14px;">&#9664;</a>
+          {prev_nav_btn}
           <span style="font-size:16px;font-weight:700;padding:0 6px;white-space:nowrap;">{month_label}{lock_badge}</span>
           <a class="btn" href="/calendar?y={next_y}&m={next_m}" style="padding:9px 14px;">&#9654;</a>
         </div>
@@ -4898,16 +4917,21 @@ def business_trips_list():
     today = datetime.date.today()
     year = int(request.args.get("y") or today.year)
     show_form = request.args.get("new") == "1"
+    user_start = _get_tracking_start(u["id"])
+    _trip_from = f"{year}-01-01"
+    if user_start:
+        _trip_from = max(_trip_from, user_start)
 
     db = connect()
     trips = db.execute(
         "SELECT * FROM business_trips WHERE user_id=? AND start_date BETWEEN ? AND ? ORDER BY start_date DESC",
-        (u["id"], f"{year}-01-01", f"{year}-12-31"),
+        (u["id"], _trip_from, f"{year}-12-31"),
     ).fetchall()
     db.close()
 
     prev_year = year - 1
     next_year = year + 1
+    _prev_year_blocked = bool(user_start and f"{prev_year}-12-31" < user_start)
 
     def fmt_time(v):
         return v if v else "–"
@@ -4993,7 +5017,7 @@ def business_trips_list():
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <h3 style="margin:0;">✈ Dienstreisen – {year}</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <a class="btn" href="/business_trips?y={prev_year}">◀︎ {prev_year}</a>
+          {"<span class='btn' style='opacity:.35;cursor:not-allowed;'>◀︎ " + str(prev_year) + "</span>" if _prev_year_blocked else f"<a class='btn' href='/business_trips?y={prev_year}'>◀︎ {prev_year}</a>"}
           <a class="btn" href="/business_trips?y={today.year}">Heute</a>
           <a class="btn" href="/business_trips?y={next_year}">{next_year} ▶︎</a>
           <a class="btn primary" href="/business_trips?y={year}&new=1">+ Neue Dienstreise</a>
@@ -5110,6 +5134,7 @@ def periods_view():
 
     locks = _get_period_lock_status(u["id"], sel_year)
     year_locked = "year" in locks
+    user_start = _get_tracking_start(u["id"])
 
     # username cache for "locked_by"
     db = connect()
@@ -5127,6 +5152,15 @@ def periods_view():
     trs = ""
     for m in range(1, 13):
         key = f"{sel_year}-{m:02d}"
+        month_last_day = f"{sel_year}-{m:02d}-{calendar.monthrange(sel_year, m)[1]:02d}"
+        if user_start and month_last_day < user_start:
+            trs += (
+                f"<tr><td style='color:var(--mu);'>{MONTH_NAMES_DE[m]} {sel_year}</td>"
+                f"<td><span class='small' style='color:var(--mu);'>Vor Arbeitsbeginn</span></td>"
+                f"<td></td></tr>"
+            )
+            continue
+
         month_locked = year_locked or (key in locks)
         lock_row = locks.get(key) or locks.get("year") if month_locked else None
 
@@ -5168,7 +5202,11 @@ def periods_view():
 
     # Year-level lock row
     year_is_past = sel_year < today.year
-    if year_locked:
+    year_before_start = bool(user_start and f"{sel_year}-12-31" < user_start)
+    if year_before_start:
+        yr_status = "<span class='small' style='color:var(--mu);'>Vor Arbeitsbeginn</span>"
+        yr_action = ""
+    elif year_locked:
         yr_status = f"<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
         lr = locks.get("year")
         if lr:
@@ -5192,6 +5230,10 @@ def periods_view():
         yr_action = ""
 
     available_years = list(range(max(today.year - 5, 2020), today.year + 1))
+    if user_start:
+        _sy = int(user_start[:4])
+        if _sy not in available_years:
+            available_years = sorted(set(available_years) | {_sy})
     year_opts = "".join(
         f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
         for y in reversed(available_years)
