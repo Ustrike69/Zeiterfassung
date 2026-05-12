@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.8"
+APP_VERSION = "v4.4.9"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -61,6 +61,7 @@ def bootstrap():
     _ensure_user_prefs_schema()
     _ensure_expected_override_schema()
     _ensure_vacation_schema()
+    _ensure_vacation_carryover_schema()
     _ensure_business_trips_schema()
     _ensure_contoured_days_schema()
     seed_calendar_2026_nrw()
@@ -352,6 +353,23 @@ def _ensure_vacation_schema() -> None:
     db.close()
 
 
+def _ensure_vacation_carryover_schema() -> None:
+    db = connect()
+    db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        year INTEGER NOT NULL,
+        carryover_days REAL NOT NULL DEFAULT 0,
+        valid_until TEXT,
+        comment TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(user_id, year),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+    db.commit()
+    db.close()
+
+
 def _ensure_business_trips_schema() -> None:
     db = connect()
     # Migrate old Dienstreise absences if any
@@ -430,6 +448,90 @@ def _set_vacation_year(user_id: int, year: int, entitlement_days: float, carryov
               updated_at=datetime('now')
             """,
             (int(user_id), int(year), float(entitlement_days), float(carryover_days)),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _get_vacation_carryover_exception(user_id: int) -> int:
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT vacation_carryover_exception FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        return int(r["vacation_carryover_exception"] or 0) if r else 0
+    except Exception:
+        return 0
+    finally:
+        db.close()
+
+
+def _set_vacation_carryover_exception(user_id: int, value: int) -> None:
+    db = connect()
+    try:
+        db.execute(
+            "UPDATE users SET vacation_carryover_exception=?, updated_at=datetime('now') WHERE id=?",
+            (1 if value else 0, user_id),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _get_vacation_carryover_override(user_id: int, year: int):
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT id, carryover_days, valid_until, comment FROM vacation_carryover_overrides "
+            "WHERE user_id=? AND year=?",
+            (user_id, year),
+        ).fetchone()
+        return dict(r) if r else None
+    finally:
+        db.close()
+
+
+def _get_all_vacation_carryover_overrides(user_id: int) -> list:
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT year, carryover_days, valid_until, comment FROM vacation_carryover_overrides "
+            "WHERE user_id=? ORDER BY year DESC",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+def _upsert_vacation_carryover_override(
+    user_id: int, year: int, carryover_days: float, valid_until: str, comment: str
+) -> None:
+    db = connect()
+    try:
+        db.execute(
+            """
+            INSERT INTO vacation_carryover_overrides(user_id, year, carryover_days, valid_until, comment)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(user_id, year) DO UPDATE SET
+              carryover_days=excluded.carryover_days,
+              valid_until=excluded.valid_until,
+              comment=excluded.comment
+            """,
+            (user_id, year, float(carryover_days), valid_until or None, comment or None),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _delete_vacation_carryover_override(user_id: int, year: int) -> None:
+    db = connect()
+    try:
+        db.execute(
+            "DELETE FROM vacation_carryover_overrides WHERE user_id=? AND year=?",
+            (user_id, year),
         )
         db.commit()
     finally:
@@ -556,14 +658,22 @@ def _vacation_calc(user_id: int, year: int) -> dict:
 
     used_total = float(_vacation_used_days(user_id, year) or 0.0)
 
-    # Carryover is only "effective" to the extent vacations were started by the deadline.
-    # After the deadline, unstarted carryover is forfeited.
-    carryover_started = float(_vacation_used_days_started_by(user_id, year, deadline_iso) or 0.0)
-    if deadline_passed:
-        effective_carryover = min(carryover, carryover_started)
+    carryover_exception = _get_vacation_carryover_exception(user_id)
+
+    if carryover_exception:
+        # Exception: override amount from table, no forfeiture at 31.03.
+        override = _get_vacation_carryover_override(user_id, year)
+        effective_carryover = float(override["carryover_days"]) if override else carryover
+        carryover_forfeited = 0.0
+        carryover_started = 0.0
     else:
-        effective_carryover = carryover
-    carryover_forfeited = max(0.0, carryover - effective_carryover)
+        # Standard: carryover forfeits at deadline if not started by then.
+        carryover_started = float(_vacation_used_days_started_by(user_id, year, deadline_iso) or 0.0)
+        if deadline_passed:
+            effective_carryover = min(carryover, carryover_started)
+        else:
+            effective_carryover = carryover
+        carryover_forfeited = max(0.0, carryover - effective_carryover)
 
     carryover_remaining = max(0.0, effective_carryover - used_total)
     entitlement_remaining = max(0.0, entitlement - max(0.0, used_total - effective_carryover))
@@ -581,6 +691,8 @@ def _vacation_calc(user_id: int, year: int) -> dict:
         "remaining_total": remaining_total,
         "deadline": deadline_iso,
         "deadline_passed": deadline_passed,
+        "carryover_exception": bool(carryover_exception),
+        "carryover_exception_days": effective_carryover if carryover_exception else 0.0,
     }
 
 
@@ -2178,7 +2290,10 @@ def index():
     year = today.year
     vc = _vacation_calc(u["id"], year)
     vac_hint = ""
-    if not vc["deadline_passed"] and vc["carryover"] > 0:
+    if vc.get("carryover_exception"):
+        if vc["effective_carryover"] > 0:
+            vac_hint = f" · <span style='color:#d97706;'>{vc['effective_carryover']:.1f} Tage Übertrag (gilt weiterhin)</span>"
+    elif not vc["deadline_passed"] and vc["carryover"] > 0:
         vac_hint = f" · <span style='color:var(--danger);'>Übertrag verfällt am {vc['deadline']}</span>"
     elif vc["deadline_passed"] and vc["carryover_forfeited"] > 0:
         vac_hint = f" · <span style='color:var(--mu);'>{vc['carryover_forfeited']:.1f} Tage Übertrag verfallen</span>"
@@ -4607,6 +4722,8 @@ def settings_view():
     vac_remaining_total = vc["remaining_total"]
     vac_carryover_forfeited = vc["carryover_forfeited"]
     vac_deadline_passed = vc["deadline_passed"]
+    vac_carryover_exception = vc.get("carryover_exception", False)
+    vac_effective_carryover = vc.get("effective_carryover", 0.0)
 
     # Build schedule list with validity dates
     sched_rows = ""
@@ -4699,9 +4816,10 @@ def settings_view():
 
     <div class="card">
       <h3 style="margin-top:0;">Urlaub – {vac_year}</h3>
+      {"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;color:#92400e;'><b>Urlaubsübertrag: Ausnahme gilt</b> – " + f"{vac_effective_carryover:.1f} Tage übertragen (verfallen nicht am 31.03.)</div>" if vac_carryover_exception else ""}
       <p class="small">
         Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
-        {"<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + ".")}
+        {"Übertrag-Frist: " + vac_deadline + " <b style='color:#d97706;'>(Ausnahme gilt – kein Verfall)</b>." if vac_carryover_exception else ("<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + "."))}
       </p>
 
       <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
@@ -4723,7 +4841,7 @@ def settings_view():
         <div><div class="small">Genommen (gesamt)</div><div style="font-size:22px;"><b>{vac_used_total:.1f}</b></div></div>
         <div><div class="small">Rest gesamt</div><div style="font-size:22px;"><b>{vac_remaining_total:.1f}</b></div></div>
         <div style="opacity:.6;">|</div>
-        <div><div class="small">Übertrag offen</div><div style="font-size:22px;"><b>{vac_carryover_remaining:.1f}</b></div></div>
+        <div><div class="small">{"Übertrag (Ausnahme)" if vac_carryover_exception else "Übertrag offen"}</div><div style="font-size:22px;{'color:#d97706;' if vac_carryover_exception else ''}"><b>{vac_carryover_remaining:.1f}</b></div></div>
         <div><div class="small">Anspruch {vac_year} offen</div><div style="font-size:22px;"><b>{vac_entitlement_remaining:.1f}</b></div></div>
         {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;color:var(--danger);'><b>" + f"{vac_carryover_forfeited:.1f}" + "</b></div></div>" if vac_carryover_forfeited > 0 else ""}
       </div>
@@ -4862,13 +4980,25 @@ def settings_vacation():
     remaining_total = vc["remaining_total"]
     carryover_forfeited = vc["carryover_forfeited"]
     effective_carryover = vc["effective_carryover"]
+    carryover_exception = vc.get("carryover_exception", False)
 
-    if not deadline_passed and carryover > 0:
+    if carryover_exception:
+        deadline_notice = f"Übertrag-Frist: {deadline}. <b style='color:#d97706;'>Ausnahme gilt – Übertrag verfällt nicht am 31.03.</b>"
+    elif not deadline_passed and carryover > 0:
         deadline_notice = f"<b style='color:var(--danger);'>Übertrag verfällt am {deadline} – Urlaubsbeginn muss ≤ {deadline} liegen.</b>"
     elif deadline_passed and carryover_forfeited > 0:
         deadline_notice = f"Übertrag-Frist war {deadline}. <b style='color:var(--danger);'>{carryover_forfeited:.1f} Tage Übertrag verfallen.</b>"
     else:
         deadline_notice = f"Übertrag-Frist: {deadline}."
+
+    exception_banner = ""
+    if carryover_exception:
+        exception_banner = (
+            f"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;"
+            f"padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;'>"
+            f"<b>Urlaubsübertrag: Ausnahme gilt</b> – {effective_carryover:.1f} Tage "
+            f"übertragen (verfallen nicht am 31.03.)</div>"
+        )
 
     body = f"""
     {flash_html()}
@@ -4883,6 +5013,7 @@ def settings_vacation():
         </div>
       </div>
 
+      {exception_banner}
       <p class="small">{deadline_notice}</p>
 
       <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
@@ -4906,14 +5037,14 @@ def settings_vacation():
         <div><div class="small">Genommen (gesamt)</div><div style="font-size:22px;"><b>{used_total:.1f}</b></div></div>
         <div><div class="small">Rest gesamt</div><div style="font-size:22px;"><b>{remaining_total:.1f}</b></div></div>
         <div style="opacity:.6;">|</div>
-        <div><div class="small">Übertrag offen</div><div style="font-size:22px;"><b>{carryover_remaining:.1f}</b></div></div>
+        <div><div class="small">{"Übertrag (Ausnahme)" if carryover_exception else "Übertrag offen"}</div><div style="font-size:22px;{'color:#d97706;' if carryover_exception else ''}"><b>{carryover_remaining:.1f}</b></div></div>
         <div><div class="small">Anspruch {year} offen</div><div style="font-size:22px;"><b>{entitlement_remaining:.1f}</b></div></div>
         {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;color:var(--danger);'><b>" + f"{carryover_forfeited:.1f}" + "</b></div></div>" if carryover_forfeited > 0 else ""}
       </div>
 
       <p class="small" style="margin-top:10px;">
         Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
-        Effektiver Übertrag: <b>{effective_carryover:.1f}</b> Tage (konfiguriert: {carryover:.1f}, davon bis {deadline} angetreten: {vc['carryover_started']:.1f}).
+        {"Effektiver Übertrag: <b>" + f"{effective_carryover:.1f}" + " Tage</b> (Ausnahme, konfiguriert: " + f"{carryover:.1f}" + ")." if carryover_exception else "Effektiver Übertrag: <b>" + f"{effective_carryover:.1f}" + "</b> Tage (konfiguriert: " + f"{carryover:.1f}" + ", davon bis " + deadline + " angetreten: " + f"{vc['carryover_started']:.1f}" + ")."}
       </p>
     </div>
     """
@@ -5857,7 +5988,7 @@ def admin_users():
     u = current_user()
     db = connect()
     users = db.execute(
-        "SELECT id, username, display_name, is_admin, is_active, created_at FROM users ORDER BY username"
+        "SELECT id, username, display_name, is_admin, is_active, vacation_carryover_exception, created_at FROM users ORDER BY username"
     ).fetchall()
     db.close()
 
@@ -5886,11 +6017,17 @@ def admin_users():
                 f'<form method="post" action="/admin/impersonate/{r["id"]}" style="display:inline;margin-left:8px;">'
                 f'<button class="btn" type="submit" style="padding:4px 10px;font-size:13px;" title="Identität annehmen">👤 Identität</button></form>'
             )
+        carryover_exc_badge = ""
+        if r.get("vacation_carryover_exception"):
+            carryover_exc_badge = " <span class='small' style='color:#d97706;'>Übertrag⚡</span>"
         trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{fl}</td>'
+            f'<td>{display}{sub_html}{fl}{carryover_exc_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
-            f'<td style="white-space:nowrap;"><a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>{impersonate_btn}{delete_btn}</td>'
+            f'<td style="white-space:nowrap;">'
+            f'<a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>'
+            f'<a href="/admin/users/{r["id"]}/vacation-carryover" style="margin-left:8px;">Urlaubsübertrag</a>'
+            f'{impersonate_btn}{delete_btn}</td>'
             f'</tr>'
         )
 
@@ -6122,6 +6259,138 @@ def admin_users_delete(user_id: int):
     db.close()
     add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
     return redirect(url_for("admin_users"))
+
+
+@app.get("/admin/users/<int:user_id>/vacation-carryover")
+@admin_required
+def admin_vacation_carryover(user_id: int):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    target = db.execute(
+        "SELECT id, username, display_name, vacation_carryover_exception FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+
+    display = target["display_name"] or target["username"]
+    exception_on = int(target["vacation_carryover_exception"] or 0)
+    overrides = _get_all_vacation_carryover_overrides(user_id)
+    cur_year = datetime.date.today().year
+    vc = _vacation_calc(user_id, cur_year)
+    prefill_days = vc["carryover"]
+
+    override_rows = ""
+    for ov in overrides:
+        ov_year = ov["year"]
+        override_rows += (
+            f"<tr>"
+            f"<td>{ov_year}</td>"
+            f"<td>{ov['carryover_days']:.1f}</td>"
+            f"<td>{ov['valid_until'] or '–'}</td>"
+            f"<td class='small'>{_html.escape(ov['comment'] or '')}</td>"
+            f"<td>"
+            f"<form method='post' action='/admin/users/{user_id}/vacation-carryover/delete/{ov_year}' style='display:inline;'>"
+            f"<button class='btn danger' type='submit' style='padding:3px 8px;font-size:12px;'>Löschen</button></form>"
+            f"</td>"
+            f"</tr>"
+        )
+    override_table = (
+        f"<table><thead><tr><th>Jahr</th><th>Tage</th><th>Gültig bis</th><th>Kommentar</th><th></th></tr></thead>"
+        f"<tbody>{override_rows}</tbody></table>"
+    ) if overrides else "<p class='small'>Noch keine Übertrag-Ausnahmen konfiguriert.</p>"
+
+    checked = "checked" if exception_on else ""
+    body = f"""
+    {flash_html()}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+        <h3 style="margin:0;">Urlaubsübertrag-Ausnahme · {_html.escape(display)}</h3>
+        <a class="btn" href="/admin/users">← Zurück</a>
+      </div>
+
+      <p class="small">
+        Standardregel: Übertrag verfällt am 31.03. des Folgejahres.<br>
+        Ausnahme: Übertrag bleibt unbegrenzt gültig – Betrag aus der Tabelle unten wird verwendet.
+      </p>
+
+      <h3 style="margin-top:14px;">Bestehende Ausnahmen</h3>
+      {override_table}
+
+      <hr style="margin:18px 0;">
+      <h3 style="margin-top:0;">Einstellung & Eintrag speichern</h3>
+      <form method="post" action="/admin/users/{user_id}/vacation-carryover">
+        <div style="margin-bottom:12px;">
+          <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+            <input type="checkbox" name="exception" value="1" {checked} id="exc-cb"
+              onchange="document.getElementById('exc-fields').style.display=this.checked?'block':'none';">
+            Ausnahme gilt (kein Verfall am 31.03.)
+          </label>
+        </div>
+        <div id="exc-fields" style="display:{'block' if exception_on else 'none'};border-left:3px solid #f59e0b;padding-left:14px;margin-bottom:14px;">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
+            <div>
+              <label>Jahr</label><br>
+              <input name="year" type="number" min="2020" max="2099" value="{cur_year}" style="width:90px;" required>
+            </div>
+            <div>
+              <label>Übertragstage (Ausnahme)</label><br>
+              <input name="carryover_days" type="number" step="0.5" min="0" value="{prefill_days}" style="width:100px;">
+            </div>
+            <div>
+              <label>Gültig bis <span class="small">(optional)</span></label><br>
+              {_date_input("valid_until", "")}
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <label>Kommentar <span class="small">(optional)</span></label><br>
+            <input name="comment" style="width:100%;max-width:400px;">
+          </div>
+        </div>
+        <button class="btn primary" type="submit">Speichern</button>
+      </form>
+    </div>
+    """
+    return render_template_string(layout("Urlaubsübertrag-Ausnahme", body, u, APP_VERSION))
+
+
+@app.post("/admin/users/<int:user_id>/vacation-carryover")
+@admin_required
+def admin_vacation_carryover_post(user_id: int):
+    bootstrap()
+    db = connect()
+    target = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+
+    exception_on = 1 if request.form.get("exception") == "1" else 0
+    _set_vacation_carryover_exception(user_id, exception_on)
+
+    if exception_on and request.form.get("carryover_days") is not None:
+        try:
+            year = int(request.form.get("year") or datetime.date.today().year)
+            carryover_days = float(request.form.get("carryover_days") or 0)
+            valid_until = (request.form.get("valid_until") or "").strip() or None
+            comment = (request.form.get("comment") or "").strip()
+            _upsert_vacation_carryover_override(user_id, year, carryover_days, valid_until, comment)
+        except (ValueError, TypeError):
+            add_flash("Ungültige Eingabe bei Übertragstagen.", "error")
+            return redirect(url_for("admin_vacation_carryover", user_id=user_id))
+
+    add_flash("Urlaubsübertrag-Ausnahme gespeichert.", "success")
+    return redirect(url_for("admin_vacation_carryover", user_id=user_id))
+
+
+@app.post("/admin/users/<int:user_id>/vacation-carryover/delete/<int:year>")
+@admin_required
+def admin_vacation_carryover_delete(user_id: int, year: int):
+    bootstrap()
+    _delete_vacation_carryover_override(user_id, year)
+    add_flash(f"Übertrag-Ausnahme für {year} gelöscht.", "success")
+    return redirect(url_for("admin_vacation_carryover", user_id=user_id))
 
 
 @app.post("/admin/impersonate/<int:user_id>")

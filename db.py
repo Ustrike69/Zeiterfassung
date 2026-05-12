@@ -262,6 +262,23 @@ def init_db():
     if not _col_exists(db, "users", "email"):
         db.execute("ALTER TABLE users ADD COLUMN email TEXT")
 
+    if not _col_exists(db, "users", "vacation_carryover_exception"):
+        db.execute(
+            "ALTER TABLE users ADD COLUMN vacation_carryover_exception INTEGER NOT NULL DEFAULT 0"
+        )
+
+    db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        year INTEGER NOT NULL,
+        carryover_days REAL NOT NULL DEFAULT 0,
+        valid_until TEXT,
+        comment TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(user_id, year),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+
 
 
 
