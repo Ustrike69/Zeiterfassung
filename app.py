@@ -9,7 +9,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.2.1"
+APP_VERSION = "v4.3.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -52,6 +52,7 @@ def bootstrap():
     _ensure_expected_override_schema()
     _ensure_vacation_schema()
     _ensure_business_trips_schema()
+    _ensure_contoured_days_schema()
     seed_calendar_2026_nrw()
 
 
@@ -362,6 +363,22 @@ def _ensure_business_trips_schema() -> None:
     if "end_date" not in cols:
         db.execute("ALTER TABLE business_trips ADD COLUMN end_date TEXT")
         db.execute("UPDATE business_trips SET end_date=start_date WHERE end_date IS NULL")
+    db.commit()
+    db.close()
+
+
+def _ensure_contoured_days_schema() -> None:
+    db = connect()
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS contoured_days (
+        user_id INTEGER NOT NULL,
+        day TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id, day),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_contoured_days_user ON contoured_days(user_id, day)")
     db.commit()
     db.close()
 
@@ -1738,6 +1755,139 @@ def _get_missing_entry_days(user_id: int, year: int) -> set:
     return missing
 
 
+def _get_contoured_days(user_id: int, start_iso: str, end_iso: str) -> set:
+    db = connect()
+    try:
+        return {
+            str(r["day"])
+            for r in db.execute(
+                "SELECT day FROM contoured_days WHERE user_id=? AND day BETWEEN ? AND ?",
+                (user_id, start_iso, end_iso),
+            ).fetchall()
+        }
+    finally:
+        db.close()
+
+
+def _get_max_contoured_day(user_id: int) -> "str | None":
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT MAX(day) AS m FROM contoured_days WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return str(r["m"]) if r and r["m"] else None
+    finally:
+        db.close()
+
+
+def _get_uncontoured_days(user_id: int, year: int) -> set:
+    """Past days-with-entries in year that have not been contoured."""
+    today = datetime.date.today()
+    year_start = datetime.date(year, 1, 1).isoformat()
+    yesterday = (today - datetime.timedelta(days=1)).isoformat()
+
+    db = connect()
+    try:
+        r = db.execute("SELECT tracking_start_date FROM users WHERE id=?", (user_id,)).fetchone()
+        tracking_start = r["tracking_start_date"] if r else None
+    finally:
+        db.close()
+    if tracking_start:
+        year_start = max(year_start, tracking_start)
+
+    if yesterday < year_start:
+        return set()
+
+    days_with = _days_with_any_entry(user_id, year_start, yesterday)
+    contoured = _get_contoured_days(user_id, year_start, yesterday)
+    return {iso for iso in days_with if year_start <= iso <= yesterday and iso not in contoured}
+
+
+# -------------------------
+# Kontierung API
+# -------------------------
+
+@app.post("/api/contour")
+@login_required
+def api_contour():
+    from flask import jsonify
+    u = current_user()
+    data = request.get_json(force=True) or {}
+    day = str(data.get("day") or "").strip()[:10]
+    action = str(data.get("action") or "mark")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        return jsonify({"ok": False, "error": "Ungültiges Datum"}), 400
+    db = connect()
+    try:
+        if action == "unmark":
+            db.execute("DELETE FROM contoured_days WHERE user_id=? AND day=?", (u["id"], day))
+        else:
+            db.execute(
+                "INSERT OR IGNORE INTO contoured_days(user_id, day) VALUES(?,?)",
+                (u["id"], day),
+            )
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/contour-until")
+@login_required
+def api_contour_until():
+    from flask import jsonify
+    u = current_user()
+    data = request.get_json(force=True) or {}
+    until = str(data.get("until") or "").strip()[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", until):
+        return jsonify({"ok": False, "error": "Ungültiges Datum"}), 400
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    until = min(until, yesterday)
+
+    db = connect()
+    try:
+        r = db.execute("SELECT tracking_start_date FROM users WHERE id=?", (u["id"],)).fetchone()
+        tracking_start = r["tracking_start_date"] if r else None
+    finally:
+        db.close()
+
+    year_start = f"{datetime.date.today().year}-01-01"
+    if tracking_start:
+        year_start = max(year_start, tracking_start)
+
+    if until < year_start:
+        return jsonify({"ok": True, "marked": 0})
+
+    days_with = _days_with_any_entry(u["id"], year_start, until)
+    db = connect()
+    try:
+        count = 0
+        for iso in days_with:
+            if year_start <= iso <= until:
+                db.execute(
+                    "INSERT OR IGNORE INTO contoured_days(user_id, day) VALUES(?,?)",
+                    (u["id"], iso),
+                )
+                count += 1
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True, "marked": count})
+
+
+@app.get("/api/contoured-days")
+@login_required
+def api_contoured_days_route():
+    from flask import jsonify
+    u = current_user()
+    year = int(request.args.get("year") or datetime.date.today().year)
+    start_iso = f"{year}-01-01"
+    end_iso = f"{year}-12-31"
+    days = sorted(_get_contoured_days(u["id"], start_iso, end_iso))
+    max_day = _get_max_contoured_day(u["id"])
+    return jsonify({"days": days, "max_day": max_day})
+
+
 @app.get("/")
 @login_required
 def index():
@@ -1762,6 +1912,12 @@ def index():
     # Fehlende Einträge
     missing_count = len(_get_missing_entry_days(u["id"], year))
     missing_color = "var(--danger)" if missing_count > 0 else "var(--ok)"
+
+    # Kontierung
+    uncontoured_count = len(_get_uncontoured_days(u["id"], year))
+    uc_color = "var(--danger)" if uncontoured_count > 0 else "var(--ok)"
+    max_contoured = _get_max_contoured_day(u["id"])
+    max_contoured_str = _fmt_date_de(max_contoured) if max_contoured else "–"
 
     # Abwesenheiten Jahresübersicht
     ab_sum = _absence_summary_for_period(u["id"], f"{year}-01-01", f"{year}-12-31")
@@ -1829,6 +1985,27 @@ def index():
       <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1;">{missing_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
       <div class="small" style="margin-top:6px;">vergangene Arbeitstage ohne Zeiteintrag · <a href="/calendar">Kalender</a></div>
     </div>
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung {year}</div>
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+        <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1;">{uncontoured_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
+        <div style="font-size:14px;color:var(--mu);">Kontiert bis: <b style="color:var(--tx);">{max_contoured_str}</b></div>
+      </div>
+      <div class="small" style="margin-top:6px;">noch zu kontierende Arbeitstage · <a href="/calendar">Kalender</a></div>
+      <button class="btn" style="margin-top:10px;" onclick="kontierUntilToday(this)">Alle bis heute kontieren</button>
+    </div>
+    <script>
+    function kontierUntilToday(btn){{
+      btn.disabled=true;btn.textContent='Wird kontiert…';
+      fetch('/api/contour-until',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{until:'{today.isoformat()}'}})
+      }}).then(function(r){{return r.json();}})
+      .then(function(d){{
+        if(d.ok){{location.reload();}}
+        else{{btn.disabled=false;btn.textContent='Alle bis heute kontieren';}}
+      }}).catch(function(){{btn.disabled=false;btn.textContent='Alle bis heute kontieren';}});
+    }}
+    </script>
     <div class="card" style="margin-bottom:12px;">
       <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;">{ab_cells}</div>
@@ -2904,6 +3081,8 @@ def calendar_view():
 
     db.close()
 
+    contoured_month = _get_contoured_days(u["id"], first_iso, last_iso)
+
     day_badges = {}
     for a in abs_rows:
         d0 = datetime.date.fromisoformat(a["date_from"])
@@ -2965,16 +3144,23 @@ def calendar_view():
             f"<div style='margin-top:4px;font-size:12px;color:var(--ac);"
             f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>✈ {trip}</div>"
         ) if trip else ""
+        is_kontiert = iso in contoured_month
+        ck_h = (
+            f"<span id='ck_{iso}' style='position:absolute;left:6px;bottom:6px;color:var(--ok);"
+            f"font-size:14px;font-weight:700;{'' if is_kontiert else 'display:none;'}' title='Kontiert'>✓</span>"
+        )
+        km_txt = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
         return (
             f"<td class='daycell' style='vertical-align:top;position:relative;padding-top:28px;width:14.28%;'"
             f" title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
             f"<div style='display:flex;justify-content:space-between;gap:6px;align-items:center;'>"
             f"<b style='color:var(--tx);'>{wd} {daynum}</b></div>"
-            f"{hol_txt}{trip_h}{_badge_html(badges)}{net_h}{miss}"
+            f"{hol_txt}{trip_h}{_badge_html(badges)}{net_h}{miss}{ck_h}"
             f"<a href='#' class='addbtn' title='Aktionen' onclick=\"return toggleDayMenu('m_{iso}', event);\">&#8943;</a>"
             f"<div id='m_{iso}' class='daymenu' onclick=\"event.stopPropagation();\">"
             f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
             f"  <a href='/absences/new'>\U0001f3d6 Abwesenheit anlegen</a>"
+            f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{km_txt}</a>"
             f"</div></td>"
         )
 
@@ -3019,6 +3205,8 @@ def calendar_view():
         ic = ""
         if is_miss:
             ic = "<span class='cal-lr-x' title='Fehlender Eintrag'>✕</span>"
+        elif iso in contoured_month:
+            ic = "<span class='cal-lr-ok' title='Kontiert'>✓</span>"
         elif cal_locked:
             ic = "<span class='cal-lr-lock'>\U0001f512</span>"
 
@@ -3067,6 +3255,7 @@ def calendar_view():
 .cal-lr-ico{min-width:20px;text-align:right;flex-shrink:0;}
 .cal-lr-x{color:var(--danger);font-size:14px;font-weight:700;}
 .cal-lr-lock{font-size:13px;opacity:.55;}
+.cal-lr-ok{color:var(--ok);font-size:14px;font-weight:700;}
 </style>"""
 
     cal_js = """<script>
@@ -3086,10 +3275,30 @@ function setCalView(v){
 })();
 </script>"""
 
+    js_kontiert_arr = "[" + ",".join(f'"{d}"' for d in sorted(contoured_month)) + "]"
+    contour_js = f"""<script>
+var _kontiert=new Set({js_kontiert_arr});
+function toggleKontiert(iso,ev){{
+  if(ev){{ev.preventDefault();ev.stopPropagation();}}
+  var isK=_kontiert.has(iso);
+  fetch('/api/contour',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{day:iso,action:isK?'unmark':'mark'}})
+  }}).then(function(r){{return r.json();}}).then(function(d){{
+    if(!d.ok)return;
+    var ck=document.getElementById('ck_'+iso);
+    var km=document.getElementById('km_'+iso);
+    if(isK){{_kontiert.delete(iso);if(ck)ck.style.display='none';if(km)km.textContent='✓ Als kontiert markieren';}}
+    else{{_kontiert.add(iso);if(ck)ck.style.display='';if(km)km.textContent='✕ Kontierung aufheben';}}
+  }}).catch(function(){{}});
+  return false;
+}}
+</script>"""
+
     body = f"""
     {flash_html()}
     {CALENDAR_DAYMENU_ASSETS}
     {cal_css}
+    {contour_js}
 
     <div id="cal-wrap" class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -3110,6 +3319,7 @@ function setCalView(v){
         <span style="font-weight:700;color:var(--danger);">&#9679; Feiertag</span>
         <span style="color:var(--ok);font-weight:700;">HH:MM</span> erfasst
         <span style="color:var(--danger);font-weight:700;">&#10005;</span> fehlend
+        <span style="color:var(--ok);font-weight:700;">✓</span> kontiert
       </div>
 
       <div class="cal-grid-wrap">
