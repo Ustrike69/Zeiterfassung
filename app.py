@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.1"
+APP_VERSION = "v4.6.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2456,7 +2456,7 @@ def index():
                    value="{yesterday_iso}" min="{first_entry_iso}" max="{yesterday_iso}"
                    onchange="kontierDtPick(this)">
           </div>
-          <button id="kontier-btn" class="btn primary btn-sm" onclick="doKontieren()"
+          <button id="kontier-btn" class="btn btn-sm" onclick="doKontieren()"
                   {"" if kontier_has_range else "disabled"}>Kontieren</button>
         </div>
         <div id="kontier-toast" style="display:none;margin-top:8px;padding:6px 10px;
@@ -2849,11 +2849,14 @@ def balance_view():
             if display_start <= _iso <= display_end:
                 _day_status.setdefault(_iso, []).append((_ab["type_name"], _ab["type_color"] or "#6c757d"))
             _cur += datetime.timedelta(days=1)
+    _holiday_days: set = set()
     for _hol in _db2.execute(
         "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND day BETWEEN ? AND ?",
         (display_start, display_end),
     ).fetchall():
-        _day_status.setdefault(str(_hol["day"])[:10], []).append((_hol["holiday_name"], "var(--danger)"))
+        _iso_hol = str(_hol["day"])[:10]
+        _holiday_days.add(_iso_hol)
+        _day_status.setdefault(_iso_hol, []).append((_hol["holiday_name"], "var(--danger)"))
     _db2.close()
 
     # ── Zeitblöcke (Beginn/Ende/Pause) für Mobile – alle Blöcke pro Tag ─
@@ -2876,8 +2879,8 @@ def balance_view():
     # ── Mobile Navigation ────────────────────────────────────────────────
     def _mob_nav_btn(url, lbl):
         if url:
-            return f"<a href='{url}' class='btn' style='padding:5px 9px;font-size:13px;line-height:1;'>{lbl}</a>"
-        return f"<span class='btn' style='padding:5px 9px;font-size:13px;line-height:1;opacity:.28;cursor:not-allowed;'>{lbl}</span>"
+            return f"<a href='{url}' class='btn btn-sm'>{lbl}</a>"
+        return f"<span class='btn btn-sm' style='opacity:.28;cursor:not-allowed;'>{lbl}</span>"
 
     mob_prev_year_url = f"/balance?y={sel_year - 1}&m={sel_month}" if sel_year > min_year else None
     mob_next_year_url = f"/balance?y={sel_year + 1}&m={sel_month}" if sel_year < today.year else None
@@ -2913,13 +2916,15 @@ def balance_view():
         _blocks_d = _all_blocks_map.get(r["day"], [])
         _statuses = _day_status.get(r["day"], [])
         _is_today_d   = r["day"] == today_iso
-        _is_off_d     = r["expected"] == 0 and r["actual"] == 0 and not _statuses
+        _is_holiday_d = r["day"] in _holiday_days
+        _is_off_d     = (r["expected"] == 0 and r["actual"] == 0 and not _statuses) or _is_holiday_d
         _is_missing_d = r["expected"] > 0 and r["actual"] == 0 and not _statuses and r["day"] < today_iso
         delta_clr   = _balance_color(r["delta"])
         running_clr = _balance_color(r["running"])
         _delta_str_d   = _fmt_minutes_signed(r["delta"]) if (r["delta"] != 0 or r["actual"] > 0) else ""
         _running_str_d = _fmt_minutes_signed(r["running"])
         _date_str_d    = _fmt_date_de(r["day"])
+        _soll_str_d    = _fmt_minutes(r["expected"]) if r["expected"] else ""
 
         # Build status badge HTML (absence + flextag)
         _status_html = ""
@@ -2960,7 +2965,9 @@ def balance_view():
                 f"<a href='/day/{r['day']}' style='text-decoration:none;color:inherit;'>{_date_str_d}"
                 f"<span style='font-size:11px;opacity:.35;margin-left:3px;'>&#8599;</span></a></td>"
                 f"<td {_td}>{_status_html}</td>"
-                f"<td {_td}></td><td {_td}></td><td {_td_r}></td>"
+                f"<td {_td}></td><td {_td}></td>"
+                f"<td {_td_r}></td>"
+                f"<td {_td_r} style='padding:8px 6px;text-align:right;color:var(--mu);'>{_soll_str_d}</td>"
                 f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
                 f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
                 f"</tr>"
@@ -2984,12 +2991,14 @@ def balance_view():
                     f"<span style='font-size:11px;opacity:.35;margin-left:3px;'>&#8599;</span></a></td>"
                 )
                 _stat_cell  = f"<td {_td}>{_status_html}</td>"
+                _soll_cell  = f"<td {_td_r} style='padding:8px 6px;text-align:right;color:var(--mu);'>{_soll_str_d}</td>"
                 _delta_cell = f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
                 _run_cell   = f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
             else:
                 _wd_cell    = f"<td {_td}></td>"
                 _date_cell  = f"<td {_td}></td>"
                 _stat_cell  = f"<td {_td}></td>"
+                _soll_cell  = f"<td {_td_r}></td>"
                 _delta_cell = f"<td {_td}></td>"
                 _run_cell   = f"<td {_td}></td>"
 
@@ -3000,7 +3009,7 @@ def balance_view():
                 f"<td {_td}>{_t_in}</td>"
                 f"<td {_td}>{_t_out}</td>"
                 f"<td {_td_r}>{str(_brk) if _brk else ''}</td>"
-                f"{_delta_cell}{_run_cell}"
+                f"{_soll_cell}{_delta_cell}{_run_cell}"
                 f"</tr>"
             )
 
@@ -3011,11 +3020,13 @@ def balance_view():
         _blocks_m     = _all_blocks_map.get(r["day"], [])
         _stat_m       = _day_status.get(r["day"], [])
         _is_today_m   = r["day"] == today_iso
-        _is_off_m     = r["expected"] == 0 and r["actual"] == 0 and not _stat_m
+        _is_holiday_m = r["day"] in _holiday_days
+        _is_off_m     = (r["expected"] == 0 and r["actual"] == 0 and not _stat_m) or _is_holiday_m
         _is_missing_m = r["expected"] > 0 and r["actual"] == 0 and not _stat_m and r["day"] < today_iso
         _delta_clr_m  = _balance_color(r["delta"])
         _delta_str_m  = _fmt_minutes_signed(r["delta"]) if (r["delta"] != 0 or r["actual"] > 0) else ""
         _date_str_m   = f"{_d_obj_m.day:02d}.{_d_obj_m.month:02d}."
+        _soll_str_m   = _fmt_minutes(r["expected"]) if r["expected"] else ""
 
         # Base style for all rows of this day
         if _is_missing_m:
@@ -3037,10 +3048,11 @@ def balance_view():
                 f" onclick=\"location.href='/day/{r['day']}'\">"
                 f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
-                f"<td colspan='3' style='padding:4px 2px;'>"
+                f"<td colspan='2' style='padding:4px 2px;'>"
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:3px;"
                 f"background:{_abs_bg};color:{_abs_color};font-weight:600;white-space:nowrap;'>{_abs_label}</span>"
                 f"</td>"
+                f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'></td>"
                 f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
                 f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
                 f"</tr>"
@@ -3056,7 +3068,7 @@ def balance_view():
                 f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
                 f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;'></td>"
-                f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_soll_str_m}</td>"
                 f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
                 f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
                 f"</tr>"
@@ -3075,14 +3087,16 @@ def balance_view():
             if _is_first:
                 _wd_cell    = f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 _date_cell  = f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
+                _soll_cell_m = f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_soll_str_m}</td>"
                 _delta_cell = (
                     f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
                     f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
                 )
             else:
-                _wd_cell    = "<td style='padding:4px 4px;'></td>"
-                _date_cell  = "<td style='padding:4px 2px;'></td>"
-                _delta_cell = "<td style='padding:4px 4px;'></td>"
+                _wd_cell     = "<td style='padding:4px 4px;'></td>"
+                _date_cell   = "<td style='padding:4px 2px;'></td>"
+                _soll_cell_m = "<td style='padding:4px 2px;'></td>"
+                _delta_cell  = "<td style='padding:4px 4px;'></td>"
             mob_trs += (
                 f"<tr style='cursor:pointer;{_base_style}{_border}'"
                 f" onclick=\"location.href='/day/{r['day']}'\">"
@@ -3090,7 +3104,7 @@ def balance_view():
                 f"{_date_cell}"
                 f"<td style='padding:4px 2px;'>{_t_in}</td>"
                 f"<td style='padding:4px 2px;'>{_t_out}</td>"
-                f"<td style='padding:4px 2px;text-align:right;'>{str(_brk) if _brk else ''}</td>"
+                f"{_soll_cell_m}"
                 f"{_delta_cell}"
                 f"</tr>"
             )
@@ -3162,6 +3176,7 @@ def balance_view():
             <th style="padding:6px 6px;text-align:left;">Von</th>
             <th style="padding:6px 6px;text-align:left;">Bis</th>
             <th style="padding:6px 6px;text-align:right;width:44px;">Pause</th>
+            <th style="padding:6px 6px;text-align:right;width:54px;">Soll</th>
             <th style="padding:6px 6px;text-align:right;width:70px;">Delta</th>
             <th style="padding:6px 6px;text-align:right;width:70px;">Saldo</th>
           </tr>
@@ -3192,12 +3207,12 @@ def balance_view():
       </div>
       <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;">
         <colgroup>
-          <col style="width:26px;">
-          <col style="width:50px;">
-          <col style="width:48px;">
-          <col style="width:48px;">
-          <col style="width:30px;">
-          <col>
+          <col style="width:24px;">
+          <col style="width:46px;">
+          <col style="width:44px;">
+          <col style="width:44px;">
+          <col style="width:38px;">
+          <col style="width:52px;">
         </colgroup>
         <thead>
           <tr style="background:var(--sf);">
@@ -3205,7 +3220,7 @@ def balance_view():
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Dat.</th>
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Von</th>
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Bis</th>
-            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Pse</th>
+            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Soll</th>
             <th style="padding:5px 4px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Delta</th>
           </tr>
         </thead>
@@ -4493,11 +4508,11 @@ def day_detail(day: str):
             actions = ""
         else:
             actions = (
-                f"<div style='display:flex;gap:10px;align-items:center;'>"
-                f"<a href='/day/{day}/block/{b['id']}/edit'>Bearbeiten</a>"
-                f"<form method='post' action='/day/{day}/block/delete' style='margin:0;' onsubmit=\"return confirm('Zeitblock wirklich löschen?');\">"
+                f"<div style='display:flex;gap:6px;align-items:center;'>"
+                f"<a class='btn btn-sm' href='/day/{day}/block/{b['id']}/edit'>Bearbeiten</a>"
+                f"<form method='post' action='/day/{day}/block/delete' style='display:contents;' onsubmit=\"return confirm('Zeitblock wirklich löschen?');\">"
                 f"<input type='hidden' name='block_id' value='{b['id']}'>"
-                f"<button class='btn danger' type='submit'>Löschen</button></form></div>"
+                f"<button class='btn danger btn-sm' type='submit'>Löschen</button></form></div>"
             )
         cmt = f"<div class='small'>{b['comment']}</div>" if b["comment"] else ""
         blocks_html += (
