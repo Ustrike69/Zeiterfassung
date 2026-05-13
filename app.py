@@ -36,7 +36,7 @@ MOBILE_ASSETS = """
 """
 
 
-def layout(title, body, user, version):
+def layout(title, body, user, version, show_back=True):
     """Wrapper around templates.layout that injects mobile assets globally."""
     banner = ""
     if session.get("impersonator_id") and user:
@@ -50,7 +50,7 @@ def layout(title, body, user, version):
             'padding:4px 12px;cursor:pointer;font-weight:600;font-size:14px;">Zurück zu Admin</button>'
             '</form></div>'
         )
-    return base_layout(title, MOBILE_ASSETS + body, user, version, impersonation_banner=banner)
+    return base_layout(title, MOBILE_ASSETS + body, user, version, impersonation_banner=banner, show_back=show_back)
 
 
 def bootstrap():
