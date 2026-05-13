@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.1"
+APP_VERSION = "v4.5.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2825,19 +2825,21 @@ def balance_view():
         _day_status.setdefault(str(_hol["day"])[:10], []).append((_hol["holiday_name"], "var(--danger)"))
     _db2.close()
 
-    # ── Zeitblöcke (Beginn/Ende/Pause) für Mobile ────────────────────────
-    _blocks_map: dict = {}
+    # ── Zeitblöcke (Beginn/Ende/Pause) für Mobile – alle Blöcke pro Tag ─
+    _all_blocks_map: dict = {}  # day -> [{t_in, t_out, brk}, ...]
     _db3 = connect()
     for _blk in _db3.execute(
-        "SELECT day, MIN(time_in) AS t_in, MAX(time_out) AS t_out, SUM(break_minutes) AS brk"
-        " FROM time_blocks WHERE user_id=? AND day BETWEEN ? AND ? GROUP BY day",
+        "SELECT day, time_in, time_out, break_minutes"
+        " FROM time_blocks WHERE user_id=? AND day BETWEEN ? AND ?"
+        " ORDER BY day, time_in",
         (u["id"], display_start, display_end),
     ).fetchall():
-        _blocks_map[str(_blk["day"])[:10]] = {
-            "t_in": str(_blk["t_in"] or "")[:5],
-            "t_out": str(_blk["t_out"] or "")[:5],
-            "brk": int(_blk["brk"] or 0),
-        }
+        _day_key = str(_blk["day"])[:10]
+        _all_blocks_map.setdefault(_day_key, []).append({
+            "t_in": str(_blk["time_in"] or "")[:5],
+            "t_out": str(_blk["time_out"] or "")[:5],
+            "brk": int(_blk["break_minutes"] or 0),
+        })
     _db3.close()
 
     # ── Mobile Navigation ────────────────────────────────────────────────
@@ -2928,57 +2930,94 @@ def balance_view():
 
     # ── Mobile Tabellenzeilen (Schleife) ────────────────────────────────
     for r in display_rows:
-        _d_obj_m = datetime.date.fromisoformat(r["day"])
-        _wd_m    = _wd_names[_d_obj_m.weekday()]
-        _blk_m   = _blocks_map.get(r["day"], {})
-        _stat_m  = _day_status.get(r["day"], [])
+        _d_obj_m      = datetime.date.fromisoformat(r["day"])
+        _wd_m         = _wd_names[_d_obj_m.weekday()]
+        _blocks_m     = _all_blocks_map.get(r["day"], [])
+        _stat_m       = _day_status.get(r["day"], [])
         _is_today_m   = r["day"] == today_iso
         _is_off_m     = r["expected"] == 0 and r["actual"] == 0 and not _stat_m
         _is_missing_m = r["expected"] > 0 and r["actual"] == 0 and not _stat_m and r["day"] < today_iso
         _delta_clr_m  = _balance_color(r["delta"])
         _delta_str_m  = _fmt_minutes_signed(r["delta"]) if (r["delta"] != 0 or r["actual"] > 0) else ""
+        _date_str_m   = f"{_d_obj_m.day:02d}.{_d_obj_m.month:02d}."
 
+        # Base style for all rows of this day
         if _is_missing_m:
-            _tr_style = "background:rgba(220,38,38,.08);"
+            _base_style = "background:rgba(220,38,38,.08);"
         elif _is_today_m:
-            _tr_style = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
+            _base_style = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
         elif _is_off_m:
-            _tr_style = "opacity:.38;"
+            _base_style = "opacity:.38;"
         else:
-            _tr_style = ""
+            _base_style = ""
 
-        _date_str_m = f"{_d_obj_m.day:02d}.{_d_obj_m.month:02d}."
-
+        # Absence days: single row with badge spanning time columns
         if _stat_m:
-            _abs_label  = _stat_m[0][0]
-            _abs_color  = _stat_m[0][1]
-            _abs_bg     = (_abs_color + "22") if _abs_color.startswith("#") else "rgba(0,0,0,.07)"
-            _time_cells = (
+            _abs_label = _stat_m[0][0]
+            _abs_color = _stat_m[0][1]
+            _abs_bg    = (_abs_color + "22") if _abs_color.startswith("#") else "rgba(0,0,0,.07)"
+            mob_trs += (
+                f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_base_style}'"
+                f" onclick=\"location.href='/day/{r['day']}'\">"
+                f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
+                f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
                 f"<td colspan='3' style='padding:4px 2px;'>"
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:3px;"
                 f"background:{_abs_bg};color:{_abs_color};font-weight:600;white-space:nowrap;'>{_abs_label}</span>"
                 f"</td>"
+                f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
+                f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
+                f"</tr>"
             )
-        else:
-            _t_in  = _blk_m.get("t_in", "")
-            _t_out = _blk_m.get("t_out", "")
-            _brk   = _blk_m.get("brk", 0)
-            _time_cells = (
+            continue
+
+        # No blocks: single empty row (missing or off day)
+        if not _blocks_m:
+            mob_trs += (
+                f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_base_style}'"
+                f" onclick=\"location.href='/day/{r['day']}'\">"
+                f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
+                f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
+                f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
+                f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
+                f"</tr>"
+            )
+            continue
+
+        # One or more blocks: one row per block
+        for _bi, _blk_i in enumerate(_blocks_m):
+            _is_first = _bi == 0
+            _is_last  = _bi == len(_blocks_m) - 1
+            # Thick separator after last block of day; subtle between sibling blocks
+            _border = "border-bottom:1px solid var(--bd);" if _is_last else "border-bottom:1px solid rgba(128,128,128,.13);"
+            _t_in  = _blk_i["t_in"]
+            _t_out = _blk_i["t_out"]
+            _brk   = _blk_i["brk"]
+            if _is_first:
+                _wd_cell    = f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
+                _date_cell  = f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
+                _delta_cell = (
+                    f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
+                    f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
+                )
+            else:
+                _wd_cell    = "<td style='padding:4px 4px;'></td>"
+                _date_cell  = "<td style='padding:4px 2px;'></td>"
+                _delta_cell = "<td style='padding:4px 4px;'></td>"
+            mob_trs += (
+                f"<tr style='cursor:pointer;{_base_style}{_border}'"
+                f" onclick=\"location.href='/day/{r['day']}'\">"
+                f"{_wd_cell}"
+                f"{_date_cell}"
                 f"<td style='padding:4px 2px;'>{_t_in}</td>"
                 f"<td style='padding:4px 2px;'>{_t_out}</td>"
                 f"<td style='padding:4px 2px;text-align:right;'>{str(_brk) if _brk else ''}</td>"
+                f"{_delta_cell}"
+                f"</tr>"
             )
-
-        mob_trs += (
-            f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_tr_style}'"
-            f" onclick=\"location.href='/day/{r['day']}'\">"
-            f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;white-space:nowrap;'>{_wd_m}</td>"
-            f"<td style='padding:4px 2px;white-space:nowrap;font-weight:500;'>{_date_str_m}</td>"
-            f"{_time_cells}"
-            f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
-            f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
-            f"</tr>"
-        )
 
     start_hhmm        = _fmt_minutes_signed(start_minutes)
     period_start_hhmm = _fmt_minutes_signed(period_start_balance)
