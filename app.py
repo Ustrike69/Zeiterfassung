@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.0"
+APP_VERSION = "v4.5.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2825,6 +2825,52 @@ def balance_view():
         _day_status.setdefault(str(_hol["day"])[:10], []).append((_hol["holiday_name"], "var(--danger)"))
     _db2.close()
 
+    # ── Zeitblöcke (Beginn/Ende/Pause) für Mobile ────────────────────────
+    _blocks_map: dict = {}
+    _db3 = connect()
+    for _blk in _db3.execute(
+        "SELECT day, MIN(time_in) AS t_in, MAX(time_out) AS t_out, SUM(break_minutes) AS brk"
+        " FROM time_blocks WHERE user_id=? AND day BETWEEN ? AND ? GROUP BY day",
+        (u["id"], display_start, display_end),
+    ).fetchall():
+        _blocks_map[str(_blk["day"])[:10]] = {
+            "t_in": str(_blk["t_in"] or "")[:5],
+            "t_out": str(_blk["t_out"] or "")[:5],
+            "brk": int(_blk["brk"] or 0),
+        }
+    _db3.close()
+
+    # ── Mobile Navigation ────────────────────────────────────────────────
+    def _mob_nav_btn(url, lbl):
+        if url:
+            return f"<a href='{url}' class='btn' style='padding:5px 9px;font-size:13px;line-height:1;'>{lbl}</a>"
+        return f"<span class='btn' style='padding:5px 9px;font-size:13px;line-height:1;opacity:.28;cursor:not-allowed;'>{lbl}</span>"
+
+    mob_prev_year_url = f"/balance?y={sel_year - 1}&m={sel_month}" if sel_year > min_year else None
+    mob_next_year_url = f"/balance?y={sel_year + 1}&m={sel_month}" if sel_year < today.year else None
+
+    if sel_month == 0:
+        _pm_y, _pm_m = sel_year - 1, 12
+        _nm_y, _nm_m = sel_year, 1
+        mob_month_label = "Gesamtes Jahr"
+    else:
+        _pm_y = sel_year - 1 if sel_month == 1 else sel_year
+        _pm_m = 12 if sel_month == 1 else sel_month - 1
+        _nm_y = sel_year + 1 if sel_month == 12 else sel_year
+        _nm_m = 1 if sel_month == 12 else sel_month + 1
+        mob_month_label = MONTH_NAMES_DE[sel_month]
+
+    mob_prev_month_url = f"/balance?y={_pm_y}&m={_pm_m}" if _pm_y >= min_year else None
+    mob_next_month_url = f"/balance?y={_nm_y}&m={_nm_m}" if _nm_y <= today.year else None
+
+    mob_yr_prev = _mob_nav_btn(mob_prev_year_url, "&#9664;")
+    mob_yr_next = _mob_nav_btn(mob_next_year_url, "&#9654;")
+    mob_mo_prev = _mob_nav_btn(mob_prev_month_url, "&#9664;")
+    mob_mo_next = _mob_nav_btn(mob_next_month_url, "&#9654;")
+
+    # ── Mobile Tabellenzeilen ────────────────────────────────────────────
+    mob_trs = ""
+
     # ── Tabellenzeilen ───────────────────────────────────────────────────
     _wd_names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     trs = ""
@@ -2880,6 +2926,60 @@ def balance_view():
             "</tr>"
         )
 
+    # ── Mobile Tabellenzeilen (Schleife) ────────────────────────────────
+    for r in display_rows:
+        _d_obj_m = datetime.date.fromisoformat(r["day"])
+        _wd_m    = _wd_names[_d_obj_m.weekday()]
+        _blk_m   = _blocks_map.get(r["day"], {})
+        _stat_m  = _day_status.get(r["day"], [])
+        _is_today_m   = r["day"] == today_iso
+        _is_off_m     = r["expected"] == 0 and r["actual"] == 0 and not _stat_m
+        _is_missing_m = r["expected"] > 0 and r["actual"] == 0 and not _stat_m and r["day"] < today_iso
+        _delta_clr_m  = _balance_color(r["delta"])
+        _delta_str_m  = _fmt_minutes_signed(r["delta"]) if (r["delta"] != 0 or r["actual"] > 0) else ""
+
+        if _is_missing_m:
+            _tr_style = "background:rgba(220,38,38,.08);"
+        elif _is_today_m:
+            _tr_style = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
+        elif _is_off_m:
+            _tr_style = "opacity:.38;"
+        else:
+            _tr_style = ""
+
+        _date_str_m = f"{_d_obj_m.day:02d}.{_d_obj_m.month:02d}."
+
+        if _stat_m:
+            _abs_label  = _stat_m[0][0]
+            _abs_color  = _stat_m[0][1]
+            _abs_bg     = (_abs_color + "22") if _abs_color.startswith("#") else "rgba(0,0,0,.07)"
+            _time_cells = (
+                f"<td colspan='3' style='padding:4px 2px;'>"
+                f"<span style='font-size:10px;padding:1px 5px;border-radius:3px;"
+                f"background:{_abs_bg};color:{_abs_color};font-weight:600;white-space:nowrap;'>{_abs_label}</span>"
+                f"</td>"
+            )
+        else:
+            _t_in  = _blk_m.get("t_in", "")
+            _t_out = _blk_m.get("t_out", "")
+            _brk   = _blk_m.get("brk", 0)
+            _time_cells = (
+                f"<td style='padding:4px 2px;'>{_t_in}</td>"
+                f"<td style='padding:4px 2px;'>{_t_out}</td>"
+                f"<td style='padding:4px 2px;text-align:right;'>{str(_brk) if _brk else ''}</td>"
+            )
+
+        mob_trs += (
+            f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_tr_style}'"
+            f" onclick=\"location.href='/day/{r['day']}'\">"
+            f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;white-space:nowrap;'>{_wd_m}</td>"
+            f"<td style='padding:4px 2px;white-space:nowrap;font-weight:500;'>{_date_str_m}</td>"
+            f"{_time_cells}"
+            f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
+            f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
+            f"</tr>"
+        )
+
     start_hhmm        = _fmt_minutes_signed(start_minutes)
     period_start_hhmm = _fmt_minutes_signed(period_start_balance)
     period_end_hhmm   = _fmt_minutes_signed(period_end_balance)
@@ -2888,6 +2988,14 @@ def balance_view():
 
     body = f"""
     {flash_html()}
+    <style>
+    .bal-mob{{display:none;}}
+    @media(max-width:768px){{
+      .bal-desk{{display:none!important;}}
+      .bal-mob{{display:block!important;}}
+    }}
+    </style>
+    <div class="bal-desk">
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <h3 style="margin:0;">Gleitzeitkonto</h3>
@@ -2946,6 +3054,48 @@ def balance_view():
       {("<p class='small'><i>Keine Tage im Zeitraum.</i></p>" if not display_rows else "")}
     </div>
     {_render_absence_summary_card(u["id"], display_start, display_end)}
+    </div>
+
+    <div class="bal-mob card" style="padding:0;overflow:hidden;">
+      <div style="position:sticky;top:0;z-index:20;background:var(--sf);border-bottom:2px solid var(--bd);padding:10px 12px 8px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+          <div style="display:flex;align-items:center;gap:2px;">
+            {mob_yr_prev}
+            <b style="font-size:14px;min-width:42px;text-align:center;">{sel_year}</b>
+            {mob_yr_next}
+          </div>
+          <div style="display:flex;align-items:center;gap:2px;flex:1;justify-content:center;">
+            {mob_mo_prev}
+            <b style="font-size:14px;min-width:66px;text-align:center;">{mob_month_label}</b>
+            {mob_mo_next}
+          </div>
+        </div>
+        <div style="font-size:30px;font-weight:700;letter-spacing:-.02em;color:{period_end_clr};line-height:1.1;">{period_end_hhmm}</div>
+        <div style="font-size:11px;color:var(--mu);margin-top:2px;">Saldo {period_label}</div>
+      </div>
+      <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;">
+        <colgroup>
+          <col style="width:26px;">
+          <col style="width:50px;">
+          <col style="width:48px;">
+          <col style="width:48px;">
+          <col style="width:30px;">
+          <col>
+        </colgroup>
+        <thead>
+          <tr style="background:var(--sf);">
+            <th style="padding:5px 4px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Tag</th>
+            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Dat.</th>
+            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Von</th>
+            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Bis</th>
+            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Pse</th>
+            <th style="padding:5px 4px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Delta</th>
+          </tr>
+        </thead>
+        <tbody>{mob_trs}</tbody>
+      </table>
+      {("<p class='small' style='padding:8px 12px;color:var(--mu);'><i>Keine Tage im Zeitraum.</i></p>" if not display_rows else "")}
+    </div>
     """
     return render_template_string(layout("Gleitzeitkonto", body, u, APP_VERSION))
 
