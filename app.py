@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.6"
+APP_VERSION = "v4.5.7"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2439,35 +2439,20 @@ def index():
             *([("Geplant", planned_flextag)] if planned_flextag else []),
         ])
 
-    body = f'''
-    {flash_html()}
+    _kontiering_card = ""
+    if contouring_enabled:
+        _kontiering_card = f"""
     <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Gleitzeitkonto</div>
-      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{balance_color};line-height:1;">{balance_str}</div>
-      <div class="small" style="margin-top:6px;">Stand heute · <a href="/balance">Details</a></div>
-    </div>
-    <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Resturlaub {year}</div>
-      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;line-height:1;">{vc["remaining_total"]:.1f} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
-      <div class="small" style="margin-top:6px;">von {vc["entitlement"] + vc["effective_carryover"]:.1f} verfügbar{vac_hint} · <a href="/settings/vacation">Details</a></div>
-    </div>
-    <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Fehlende Einträge {year}</div>
-      <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1;">{missing_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
-      <div class="small" style="margin-top:6px;">vergangene Arbeitstage ohne Zeiteintrag · <a href="/calendar">Kalender</a></div>
-    </div>
-    {"" if not contouring_enabled else f"""
-    <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung {year}</div>
-      {"" if not (contouring_start and contouring_start > today.isoformat()) else f"<div style='color:var(--mu);font-size:14px;margin-bottom:6px;'>Kontierung startet ab <b style='color:var(--tx);'>{_fmt_date_de(contouring_start)}</b></div>"}
-      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
-        <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1;">{uncontoured_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
-        <div style="font-size:14px;color:var(--mu);">Kontiert bis: <b style="color:var(--tx);">{max_contoured_str}</b></div>
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung {year}</div>
+      {"" if not (contouring_start and contouring_start > today.isoformat()) else f"<div style='color:var(--mu);font-size:13px;margin-bottom:6px;'>Startet ab <b style='color:var(--tx);'>{_fmt_date_de(contouring_start)}</b></div>"}
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1.1;">{uncontoured_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
+        <span class="small">Kontiert bis: <b style="color:var(--tx);">{max_contoured_str}</b></span>
       </div>
-      <div class="small" style="margin-top:6px;">noch zu kontierende Arbeitstage · <a href="/calendar">Kalender</a></div>
-      <div style="margin-top:10px;">
-        <label style="font-size:13px;color:var(--mu);display:block;margin-bottom:5px;">Kontiert bis:</label>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div class="small" style="margin-bottom:10px;">noch zu kontierende Arbeitstage</div>
+      <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;">
+        <div>
+          <label style="font-size:12px;color:var(--mu);display:block;margin-bottom:4px;">Kontiert bis</label>
           <div class="dt-wrap">
             <input type="text" id="kontier-dt-text" class="dt-text"
                    value="{yesterday_de}" placeholder="TT.MM.JJJJ" maxlength="10"
@@ -2476,19 +2461,67 @@ def index():
                    value="{yesterday_iso}" min="{first_entry_iso}" max="{yesterday_iso}"
                    onchange="kontierDtPick(this)">
           </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button id="kontier-btn" class="btn primary" onclick="doKontieren()"
                   {"" if kontier_has_range else "disabled"}>Kontieren</button>
+          <a class="btn" href="/calendar" style="padding:5px 12px;font-size:13px;">Kalender</a>
         </div>
-        <div id="kontier-toast" style="display:none;margin-top:8px;padding:8px 12px;
-             background:var(--ok);color:#fff;border-radius:8px;font-size:13px;font-weight:600;"></div>
+      </div>
+      <div id="kontier-toast" style="display:none;margin-top:8px;padding:8px 12px;
+           background:var(--ok);color:#fff;border-radius:8px;font-size:13px;font-weight:600;"></div>
+    </div>"""
+
+    body = f'''
+    {flash_html()}
+
+    <a class="btn primary" href="/day/{today.isoformat()}"
+       style="display:block;width:100%;font-size:16px;padding:13px;text-align:center;margin-bottom:16px;box-sizing:border-box;">
+      Zeiterfassung heute
+    </a>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:12px;">
+
+      <div class="card" style="margin:0;">
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Gleitzeitkonto</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{balance_color};line-height:1.1;">{balance_str}</div>
+        <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span class="small">Stand heute</span>
+          <a class="btn" href="/balance" style="padding:5px 12px;font-size:13px;">Details</a>
+        </div>
+      </div>
+
+      <div class="card" style="margin:0;">
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Resturlaub {year}</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;line-height:1.1;">{vc["remaining_total"]:.1f} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
+        <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span class="small">von {vc["entitlement"] + vc["effective_carryover"]:.1f} verfügbar{vac_hint}</span>
+          <a class="btn" href="/settings/vacation" style="padding:5px 12px;font-size:13px;">Details</a>
+        </div>
+      </div>
+
+      <div class="card" style="margin:0;">
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Fehlende Einträge {year}</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1.1;">{missing_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
+        <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <span class="small">vergangene Arbeitstage ohne Zeiteintrag</span>
+          <a class="btn" href="/calendar" style="padding:5px 12px;font-size:13px;">Kalender</a>
+        </div>
+      </div>
+
+    </div>
+
+    {_kontiering_card}
+
+    {"" if contouring_enabled else """
+    <div class="card" style="margin-bottom:12px;opacity:.6;">
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung</div>
+      <div style="font-size:15px;font-weight:600;color:var(--mu);">Deaktiviert</div>
+      <div style="margin-top:8px;">
+        <a class="btn" href="/settings" style="padding:5px 12px;font-size:13px;">Einstellungen</a>
       </div>
     </div>"""}
-    {"" if contouring_enabled else """
-    <div class="card" style="margin-bottom:12px;opacity:.55;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung</div>
-      <div style="font-size:20px;font-weight:600;color:var(--mu);">Kontierung deaktiviert</div>
-      <div class="small" style="margin-top:6px;"><a href="/settings">In Einstellungen aktivieren</a></div>
-    </div>"""}
+
     <script>
     function kontierDtText(inp){{
       var m=inp.value.match(/^(\\d{{1,2}})\\.(\\d{{1,2}})\\.(\\d{{4}})$/);
@@ -2503,7 +2536,9 @@ def index():
       _validateKontier();
     }}
     function _validateKontier(){{
-      var v=document.getElementById('kontier-dt-pick').value;
+      var pick=document.getElementById('kontier-dt-pick');
+      if(!pick)return;
+      var v=pick.value;
       var ok=v&&v>='{first_entry_iso}'&&v<='{yesterday_iso}';
       var btn=document.getElementById('kontier-btn');
       if(btn)btn.disabled=!ok;
@@ -2530,12 +2565,14 @@ def index():
     }}
     _validateKontier();
     </script>
+
     <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;">{ab_cells}</div>
-      <div class="small" style="margin-top:8px;"><a href="/absences">Alle Abwesenheiten →</a></div>
+      <div style="margin-top:10px;">
+        <a class="btn" href="/absences" style="padding:5px 12px;font-size:13px;">Alle Abwesenheiten</a>
+      </div>
     </div>
-    <a class="btn primary" href="/day/{today.isoformat()}" style="width:100%;font-size:17px;padding:14px;">Zeiterfassung heute</a>
     '''
     return render_template_string(layout("Übersicht", body, u, APP_VERSION))
 
