@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.8"
+APP_VERSION = "v4.5.9"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2482,10 +2482,10 @@ def index():
 
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
       <a class="btn primary" href="/day/{today.isoformat()}"
-         style="flex:1;min-width:160px;font-size:16px;padding:12px;text-align:center;">
+         style="flex:1;min-width:160px;padding:12px 16px;font-size:15px;text-align:center;">
         Zeiterfassung heute
       </a>
-      <a class="btn" href="/calendar"
+      <a class="btn primary" href="/calendar"
          style="padding:12px 16px;font-size:15px;white-space:nowrap;">
         Kalender
       </a>
@@ -2575,7 +2575,7 @@ def index():
       </div>
     </div>
     '''
-    return render_template_string(layout("Übersicht", body, u, APP_VERSION))
+    return render_template_string(layout("Übersicht", body, u, APP_VERSION, show_back=False))
 
 
 

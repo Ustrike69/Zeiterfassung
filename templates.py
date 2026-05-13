@@ -1,4 +1,4 @@
-def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "") -> str:
+def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "", show_back: bool = True) -> str:
     nav_html = ""
     if user:
         items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export")]
@@ -153,9 +153,12 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
 </head>
 <body>
 <header class="app-header">
-  <div>
-    <div class="hdr-title">{title}</div>
-    <div class="hdr-sub">Zeiterfassung {app_version}{" · " + user_display if user_display else ""}</div>
+  <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+    {"" if not (user and show_back) else '<button onclick="if(history.length>1){{history.back();}}else{{location.href=\'/\';}" class="btn" style="flex-shrink:0;padding:5px 10px;font-size:13px;">&#8592; Zurück</button>'}
+    <div style="min-width:0;">
+      <div class="hdr-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{title}</div>
+      <div class="hdr-sub">Zeiterfassung {app_version}{" · " + user_display if user_display else ""}</div>
+    </div>
   </div>
   {nav_html}
 </header>
