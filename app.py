@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.3"
+APP_VERSION = "v4.5.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -4479,6 +4479,50 @@ def day_detail(day: str):
     abs_sonstige_id_js = abs_sonstige_id
     abs_remark_html = _remark_select_html(abs_user_remarks, pfx="d_")
 
+    _lock_notice = (
+        "<div class='card' style='margin-top:10px;background:var(--sf);border-color:var(--bd);'>"
+        "<p style='margin:0;'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. "
+        "<a href=\"/periods\">Abschlüsse verwalten</a></p></div>"
+    ) if day_locked else ""
+
+    _add_block_form = "" if day_locked else f"""
+    <div class="card" style="margin-top:10px;">
+      <h3 style="margin-top:0;">Zeitblock hinzufügen</h3>
+      <form method="post" action="/day/{day}/block/add">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
+          <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
+          <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
+<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='30'">30</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='45'">45</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
+        </div>
+        <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
+        <button class="btn" type="submit" style="margin-top:10px;">Speichern</button>
+      </form>
+    </div>"""
+
+    _add_absence_form = "" if day_locked else f"""
+    <div class="card" style="margin-top:10px;">
+      <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
+      <form method="post" action="/day/{day}/absence/add">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
+          <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
+          <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
+        </div>
+        <div id="d_remark_row" style="display:none;margin-top:8px;">{abs_remark_html}</div>
+        <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
+      </form>
+      <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
+    </div>
+<script>
+{_REMARK_JS}
+function syncDayBemerkung(sel) {{
+  var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
+  document.getElementById("d_remark_row").style.display = isSonstige ? "" : "none";
+  if (isSonstige) syncRemarkNew("d_remark_new_row","d_remark_new_inp",document.getElementById("d_remark_sel"));
+}}
+syncDayBemerkung(document.getElementById("day_type_sel"));
+</script>"""
+
     body = f"""
     {flash_html()}
 
@@ -4506,7 +4550,11 @@ def day_detail(day: str):
     {_timepicker_datalist('time_suggestions')}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Tages-Editor – {day}</h3>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <button class="btn" type="button"
+            onclick="if(history.length>1){{history.back();}}else{{location.href='/';}}">← Zurück</button>
+          <h3 style="margin:0;">Tages-Editor – {day}</h3>
+        </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <a class="btn" href="/day/{prev_day}">◀︎ Vorheriger Tag</a>
           <a class="btn" href="/calendar?y={day[:4]}&m={int(day[5:7])}">Kalender</a>
@@ -4517,48 +4565,14 @@ def day_detail(day: str):
     </div>
 
     {_exception_banner(day, is_blocked_day, exc_row, day_locked)}
+    {_lock_notice}
 
-    {"" if day_locked else f'''
-    <div class="card" style="margin-top:10px;">
-      <h3 style="margin-top:0;">Zeitblock hinzufügen</h3>
-      <form method="post" action="/day/{day}/block/add">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
-          <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
-          <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
-<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'30\'">30</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'45\'">45</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById(\'brk_day_add\').value=\'60\'">60</button></div></div>
-        </div>
-        <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
-        <button class="btn" type="submit" style="margin-top:10px;">Speichern</button>
-      </form>
-    </div>
-
-    <div class="card" style="margin-top:10px;">
-      <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
-      <form method="post" action="/day/{day}/absence/add">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
-          <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
-          <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
-        </div>
-        <div id="d_remark_row" style="display:none;margin-top:8px;">{abs_remark_html}</div>
-        <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
-      </form>
-      <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
-    </div>
-<script>
-{_REMARK_JS}
-function syncDayBemerkung(sel) {{
-  var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
-  document.getElementById("d_remark_row").style.display = isSonstige ? "" : "none";
-  if (isSonstige) syncRemarkNew("d_remark_new_row","d_remark_new_inp",document.getElementById("d_remark_sel"));
-}}
-syncDayBemerkung(document.getElementById("day_type_sel"));
-</script>
-'''}
-    {"<div class='card' style='margin-top:10px;background:var(--sf);border-color:var(--bd);'><p style='margin:0;'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. <a href=\"/periods\">Abschlüsse verwalten</a></p></div>" if day_locked else ""}
+    {_add_block_form}
 
     <h3 style="margin-top:14px;">Vorhandene Zeitblöcke</h3>
     {blocks_html or "<div class='small' style='color:#777;'>Keine Zeitblöcke erfasst.</div>"}
+
+    {_add_absence_form}
 
     <h3 style="margin-top:14px;">Vorhandene Abwesenheit</h3>
     {abs_html or "<div class='small' style='color:#777;'>Keine Abwesenheit an diesem Tag.</div>"}
