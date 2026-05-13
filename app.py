@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.4.9"
+APP_VERSION = "v4.5.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2092,6 +2092,23 @@ def _get_tracking_start(user_id: int) -> "str | None":
         db.close()
 
 
+def _get_contouring_info(user_id: int) -> dict:
+    """Return {'enabled': int, 'start_date': str|None} for user."""
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT contouring_enabled, contouring_start_date FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if r:
+            return {
+                "enabled": int(r["contouring_enabled"]) if r["contouring_enabled"] is not None else 1,
+                "start_date": str(r["contouring_start_date"])[:10] if r["contouring_start_date"] else None,
+            }
+        return {"enabled": 1, "start_date": None}
+    finally:
+        db.close()
+
+
 def _before_start_date(user_id: int, iso_day: str) -> "str | None":
     """Return error message if iso_day is before user's tracking_start_date, else None."""
     start = _get_tracking_start(user_id)
@@ -2117,6 +2134,10 @@ def _get_max_contoured_day(user_id: int) -> "str | None":
 
 def _get_uncontoured_days(user_id: int, year: int) -> set:
     """Past days-with-entries in year that have not been contoured."""
+    ci = _get_contouring_info(user_id)
+    if not ci["enabled"]:
+        return set()
+
     today = datetime.date.today()
     year_start = datetime.date(year, 1, 1).isoformat()
     yesterday = (today - datetime.timedelta(days=1)).isoformat()
@@ -2129,6 +2150,8 @@ def _get_uncontoured_days(user_id: int, year: int) -> set:
         db.close()
     if tracking_start:
         year_start = max(year_start, tracking_start)
+    if ci["start_date"]:
+        year_start = max(year_start, ci["start_date"])
 
     if yesterday < year_start:
         return set()
@@ -2147,11 +2170,16 @@ def _get_uncontoured_days(user_id: int, year: int) -> set:
 def api_contour():
     from flask import jsonify
     u = current_user()
+    ci = _get_contouring_info(u["id"])
+    if not ci["enabled"]:
+        return jsonify({"ok": False, "error": "Kontierung ist für diesen Account deaktiviert"}), 403
     data = request.get_json(force=True) or {}
     day = str(data.get("day") or "").strip()[:10]
     action = str(data.get("action") or "mark")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         return jsonify({"ok": False, "error": "Ungültiges Datum"}), 400
+    if ci["start_date"] and day < ci["start_date"]:
+        return jsonify({"ok": False, "error": "Tag liegt vor dem Kontierungsstartdatum"}), 400
     db = connect()
     try:
         if action == "mark":
@@ -2182,6 +2210,9 @@ def api_contour():
 def api_contour_until():
     from flask import jsonify
     u = current_user()
+    ci = _get_contouring_info(u["id"])
+    if not ci["enabled"]:
+        return jsonify({"ok": False, "error": "Kontierung ist für diesen Account deaktiviert"}), 403
     data = request.get_json(force=True) or {}
     until = str(data.get("until") or "").strip()[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", until):
@@ -2199,6 +2230,8 @@ def api_contour_until():
     year_start = f"{datetime.date.today().year}-01-01"
     if tracking_start:
         year_start = max(year_start, tracking_start)
+    if ci["start_date"]:
+        year_start = max(year_start, ci["start_date"])
 
     if until < year_start:
         return jsonify({"ok": True, "marked": 0})
@@ -2237,12 +2270,45 @@ def api_contour_until():
 def api_contoured_days_route():
     from flask import jsonify
     u = current_user()
+    ci = _get_contouring_info(u["id"])
+    if not ci["enabled"]:
+        return jsonify({"ok": False, "error": "Kontierung ist für diesen Account deaktiviert"}), 403
     year = int(request.args.get("year") or datetime.date.today().year)
     start_iso = f"{year}-01-01"
     end_iso = f"{year}-12-31"
     days = sorted(_get_contoured_days(u["id"], start_iso, end_iso))
     max_day = _get_max_contoured_day(u["id"])
     return jsonify({"days": days, "max_day": max_day})
+
+
+@app.post("/settings/contouring/toggle")
+@login_required
+def settings_contouring_toggle():
+    bootstrap()
+    u = current_user()
+    ci = _get_contouring_info(u["id"])
+    db = connect()
+    if ci["enabled"]:
+        db.execute(
+            "UPDATE users SET contouring_enabled=0, contouring_start_date=NULL, updated_at=datetime('now') WHERE id=?",
+            (u["id"],),
+        )
+        db.commit()
+        db.close()
+        add_flash("Kontierung wurde deaktiviert. Bestehende Kontierungen bleiben erhalten.", "success")
+    else:
+        start_date = _parse_date_input(request.form.get("contouring_start_date") or "")
+        if not start_date:
+            today = datetime.date.today()
+            start_date = datetime.date(today.year, today.month, 1).isoformat()
+        db.execute(
+            "UPDATE users SET contouring_enabled=1, contouring_start_date=?, updated_at=datetime('now') WHERE id=?",
+            (start_date, u["id"]),
+        )
+        db.commit()
+        db.close()
+        add_flash(f"Kontierung aktiviert ab {_fmt_date_de(start_date)}.", "success")
+    return redirect("/settings")
 
 
 @app.post("/api/set-exception")
@@ -2303,6 +2369,9 @@ def index():
     missing_color = "var(--danger)" if missing_count > 0 else "var(--ok)"
 
     # Kontierung
+    contouring_info = _get_contouring_info(u["id"])
+    contouring_enabled = contouring_info["enabled"]
+    contouring_start = contouring_info["start_date"]
     uncontoured_count = len(_get_uncontoured_days(u["id"], year))
     uc_color = "var(--danger)" if uncontoured_count > 0 else "var(--ok)"
     max_contoured = _get_max_contoured_day(u["id"])
@@ -2317,6 +2386,8 @@ def index():
         first_entry_iso = str(_fb["d"])[:10] if _fb and _fb["d"] else yesterday_iso
     finally:
         _db_tmp.close()
+    if contouring_start:
+        first_entry_iso = max(first_entry_iso, contouring_start)
     kontier_has_range = first_entry_iso <= yesterday_iso
 
     # Abwesenheiten Jahresübersicht
@@ -2385,8 +2456,10 @@ def index():
       <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1;">{missing_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
       <div class="small" style="margin-top:6px;">vergangene Arbeitstage ohne Zeiteintrag · <a href="/calendar">Kalender</a></div>
     </div>
+    {"" if not contouring_enabled else f"""
     <div class="card" style="margin-bottom:12px;">
       <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung {year}</div>
+      {"" if not (contouring_start and contouring_start > today.isoformat()) else f"<div style='color:var(--mu);font-size:14px;margin-bottom:6px;'>Kontierung startet ab <b style='color:var(--tx);'>{_fmt_date_de(contouring_start)}</b></div>"}
       <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
         <div style="font-size:48px;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1;">{uncontoured_count} <span style="font-size:20px;font-weight:400;color:var(--mu);">Tage</span></div>
         <div style="font-size:14px;color:var(--mu);">Kontiert bis: <b style="color:var(--tx);">{max_contoured_str}</b></div>
@@ -2409,7 +2482,13 @@ def index():
         <div id="kontier-toast" style="display:none;margin-top:8px;padding:8px 12px;
              background:var(--ok);color:#fff;border-radius:8px;font-size:13px;font-weight:600;"></div>
       </div>
-    </div>
+    </div>"""}
+    {"" if contouring_enabled else """
+    <div class="card" style="margin-bottom:12px;opacity:.55;">
+      <div style="color:var(--mu);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung</div>
+      <div style="font-size:20px;font-weight:600;color:var(--mu);">Kontierung deaktiviert</div>
+      <div class="small" style="margin-top:6px;"><a href="/settings">In Einstellungen aktivieren</a></div>
+    </div>"""}
     <script>
     function kontierDtText(inp){{
       var m=inp.value.match(/^(\\d{{1,2}})\\.(\\d{{1,2}})\\.(\\d{{4}})$/);
@@ -3660,6 +3739,7 @@ def calendar_view():
 
     db.close()
 
+    cal_contouring = _get_contouring_info(u["id"])
     contoured_month = _get_contoured_days(u["id"], first_iso, last_iso)
     exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
 
@@ -3769,12 +3849,18 @@ def calendar_view():
         )
         trip_h = f"<div class='dc-trip'>✈ {trip}</div>" if trip else ""
 
-        km_txt  = "✕ Kontierung aufheben" if is_kontiert else "✓ Als kontiert markieren"
-        km_item = (
-            f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{km_txt}</a>"
-            if has_entry else
-            f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
+        contour_allowed = (
+            cal_contouring["enabled"]
+            and (not cal_contouring["start_date"] or iso >= cal_contouring["start_date"])
         )
+        if not contour_allowed:
+            km_item = ""
+        elif is_kontiert:
+            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">✕ Kontierung aufheben</a>"
+        elif has_entry:
+            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">✓ Als kontiert markieren</a>"
+        else:
+            km_item = f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
         exc_badge = "<span class='dc-exc' title='Ausnahme aktiv'>⚡</span>" if iso in exc_days_month else ""
         return (
             f"<td class='daycell' title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
@@ -3840,10 +3926,14 @@ def calendar_view():
         if trip:
             cp += f"<span class='cal-lr-trip'>✈ {trip}</span>"
 
+        cal_contour_visible = (
+            cal_contouring["enabled"]
+            and (not cal_contouring["start_date"] or iso >= cal_contouring["start_date"])
+        )
         ic = ""
         if is_miss:
             ic = "<span class='cal-lr-x' title='Fehlender Eintrag'>✕</span>"
-        elif iso in contoured_month:
+        elif cal_contour_visible and iso in contoured_month:
             ic = "<span class='cal-lr-ok' title='Kontiert'>✓</span>"
         elif cal_locked:
             ic = "<span class='cal-lr-lock'>\U0001f512</span>"
@@ -4698,6 +4788,42 @@ def day_absence_add(day: str):
 # Einstellungen (Zeitschema (mit Gültig ab))
 # -------------------------
 
+def _contouring_settings_card(user_id: int) -> str:
+    ci = _get_contouring_info(user_id)
+    today = datetime.date.today()
+    default_start = datetime.date(today.year, today.month, 1).isoformat()
+    if ci["enabled"]:
+        start_label = _fmt_date_de(ci["start_date"]) if ci["start_date"] else "–"
+        return f"""
+    <div class="card">
+      <h3 style="margin-top:0;">Kontierung</h3>
+      <div style="margin-bottom:10px;">
+        <span style="color:var(--ok);font-weight:600;">&#10003; Kontierung aktiv</span>
+        <span style="color:var(--mu);font-size:13px;margin-left:8px;">seit {start_label}</span>
+      </div>
+      <form method="post" action="/settings/contouring/toggle"
+            onsubmit="return confirm('Kontierung wirklich deaktivieren? Bestehende Kontierungen bleiben erhalten.');">
+        <button class="btn danger" type="submit">Kontierung deaktivieren</button>
+      </form>
+    </div>"""
+    else:
+        return f"""
+    <div class="card">
+      <h3 style="margin-top:0;">Kontierung</h3>
+      <div style="margin-bottom:12px;color:var(--mu);">Kontierung ist deaktiviert.</div>
+      <form method="post" action="/settings/contouring/toggle" id="contour-enable-form">
+        <div style="margin-bottom:10px;">
+          <label>Kontierung gilt ab:</label><br>
+          {_date_input("contouring_start_date", default_start)}
+          <div class="small" style="color:#777;margin-top:3px;">
+            Standard: 1. des aktuellen Monats. Tage vor diesem Datum werden nicht zur Kontierung herangezogen.
+          </div>
+        </div>
+        <button class="btn primary" type="submit">Aktivieren</button>
+      </form>
+    </div>"""
+
+
 @app.get("/settings")
 @login_required
 def settings_view():
@@ -4876,6 +5002,8 @@ def settings_view():
       {_sched_form_html(sched, "/settings/save", "/settings",
                         show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
     </div>
+
+    {_contouring_settings_card(u["id"])}
     """
     return render_template_string(layout("Einstellungen", body, u, APP_VERSION))
 
@@ -5988,7 +6116,8 @@ def admin_users():
     u = current_user()
     db = connect()
     users = db.execute(
-        "SELECT id, username, display_name, is_admin, is_active, vacation_carryover_exception, created_at FROM users ORDER BY username"
+        "SELECT id, username, display_name, is_admin, is_active, vacation_carryover_exception, "
+        "contouring_enabled, contouring_start_date, created_at FROM users ORDER BY username"
     ).fetchall()
     db.close()
 
@@ -6020,9 +6149,15 @@ def admin_users():
         carryover_exc_badge = ""
         if r["vacation_carryover_exception"]:
             carryover_exc_badge = " <span class='small' style='color:#d97706;'>Übertrag⚡</span>"
+        contouring_on = int(r["contouring_enabled"]) if r["contouring_enabled"] is not None else 1
+        csd = str(r["contouring_start_date"] or "")[:10]
+        if contouring_on:
+            c_badge = f" <span class='small' style='color:var(--ok);'>Kontierung aktiv{(' ab ' + _fmt_date_de(csd)) if csd else ''}</span>"
+        else:
+            c_badge = " <span class='small' style='color:var(--mu);'>Kontierung deaktiviert</span>"
         trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{fl}{carryover_exc_badge}</td>'
+            f'<td>{display}{sub_html}{fl}{carryover_exc_badge}{c_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
             f'<td style="white-space:nowrap;">'
             f'<a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>'

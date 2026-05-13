@@ -267,6 +267,14 @@ def init_db():
             "ALTER TABLE users ADD COLUMN vacation_carryover_exception INTEGER NOT NULL DEFAULT 0"
         )
 
+    if not _col_exists(db, "users", "contouring_enabled"):
+        db.execute(
+            "ALTER TABLE users ADD COLUMN contouring_enabled INTEGER NOT NULL DEFAULT 1"
+        )
+
+    if not _col_exists(db, "users", "contouring_start_date"):
+        db.execute("ALTER TABLE users ADD COLUMN contouring_start_date TEXT")
+
     db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
