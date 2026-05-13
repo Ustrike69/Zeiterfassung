@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.4"
+APP_VERSION = "v4.5.5"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -4488,17 +4488,38 @@ def day_detail(day: str):
     _add_block_form = "" if day_locked else f"""
     <div class="card" style="margin-top:10px;">
       <h3 style="margin-top:0;">Zeitblock hinzufügen</h3>
-      <form method="post" action="/day/{day}/block/add">
+      <form method="post" action="/day/{day}/block/add" id="block-add-form" novalidate onsubmit="return validateBlockForm(this)">
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
-          <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" step="900" list="time_suggestions" placeholder="HH:MM" required></div>
+          <div><label>Kommen</label><br><input class="tin" id="tin_add" name="time_in" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
+          <div><label>Gehen</label><br><input class="tout" id="tout_add" name="time_out" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
           <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
 <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='30'">30</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='45'">45</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
         </div>
         <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
+        <div id="block-add-err" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:13px;"></div>
         <button class="btn" type="submit" style="margin-top:10px;">Speichern</button>
       </form>
-    </div>"""
+    </div>
+<script>
+function validateBlockForm(form) {{
+  var tin  = form.querySelector('[name="time_in"]');
+  var tout = form.querySelector('[name="time_out"]');
+  var err  = form.querySelector('[id$="-err"]') || form.querySelector('[id*="err"]');
+  function showErr(msg) {{
+    if (err) {{ err.textContent = msg; err.style.display = 'block'; }}
+    else {{ alert(msg); }}
+    return false;
+  }}
+  var tval = /^\\d{{2}}:\\d{{2}}$/;
+  if (!tin.value || !tval.test(tin.value))  return showErr('Bitte gültige Kommen-Zeit im Format HH:MM eingeben.');
+  if (!tout.value || !tval.test(tout.value)) return showErr('Bitte gültige Gehen-Zeit im Format HH:MM eingeben.');
+  var s = parseInt(tin.value.replace(':',''),10);
+  var e = parseInt(tout.value.replace(':',''),10);
+  if (e <= s) return showErr('Gehen muss nach Kommen liegen.');
+  if (err) err.style.display = 'none';
+  return true;
+}}
+</script>"""
 
     _add_absence_form = "" if day_locked else f"""
     <div class="card" style="margin-top:10px;">
@@ -4864,21 +4885,42 @@ def day_block_edit(day: str, block_id: int):
         <a class="btn" href="/day/{day}">Zurück</a>
       </div>
 
-      <form method="post" action="/day/{day}/block/{block_id}/edit" style="margin-top:10px;">
+      <form method="post" action="/day/{day}/block/{block_id}/edit" style="margin-top:10px;" novalidate onsubmit="return validateBlockForm(this)">
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" step="900" list="time_suggestions" value="{b['time_in']}" required></div>
-          <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" step="900" list="time_suggestions" value="{b['time_out']}" required></div>
+          <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" list="time_suggestions" placeholder="HH:MM" value="{b['time_in']}" required></div>
+          <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" list="time_suggestions" placeholder="HH:MM" value="{b['time_out']}" required></div>
           <div><label>Pause (min)</label><br><input id="brk_day_edit" class="brk" name="break_minutes" type="number" min="0" value="{int(b['break_minutes'] or 0)}" required>
 <div style='margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;'><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='30'">30</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='45'">45</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='60'">60</button></div></div>
           <div class='small' style='display:flex;gap:6px;align-items:center;margin-top:6px;'><span style='color:#777;'>Schnellwahl:</span><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,30);">30</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,45);">45</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,60);">60</a><span style='color:#777;'>min</span></div>
         </div>
         <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" value="{(b['comment'] or '')}" placeholder="optional" style="width:100%;"></div>
+        <div id="block-edit-err" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:13px;"></div>
         <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
           <button class="btn" type="submit">Speichern</button>
           <a class="btn" href="/day/{day}">Abbrechen</a>
         </div>
       </form>
     </div>
+<script>
+function validateBlockForm(form) {{
+  var tin  = form.querySelector('[name="time_in"]');
+  var tout = form.querySelector('[name="time_out"]');
+  var err  = form.querySelector('[id$="-err"]') || form.querySelector('[id*="err"]');
+  function showErr(msg) {{
+    if (err) {{ err.textContent = msg; err.style.display = 'block'; }}
+    else {{ alert(msg); }}
+    return false;
+  }}
+  var tval = /^\\d{{2}}:\\d{{2}}$/;
+  if (!tin.value || !tval.test(tin.value))  return showErr('Bitte gültige Kommen-Zeit im Format HH:MM eingeben.');
+  if (!tout.value || !tval.test(tout.value)) return showErr('Bitte gültige Gehen-Zeit im Format HH:MM eingeben.');
+  var s = parseInt(tin.value.replace(':',''),10);
+  var e = parseInt(tout.value.replace(':',''),10);
+  if (e <= s) return showErr('Gehen muss nach Kommen liegen.');
+  if (err) err.style.display = 'none';
+  return true;
+}}
+</script>
     """
     return render_template_string(layout("Zeitblock bearbeiten", body, u, APP_VERSION))
 
