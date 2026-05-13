@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, session, render_template_string, abort
+from flask import Flask, request, redirect, url_for, session, render_template_string, abort, jsonify
 import datetime
 import calendar
 import sqlite3
@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.0.3"
+APP_VERSION = "v1.0.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1540,6 +1540,22 @@ def add_flash(text, category="success"):
     msgs = session.get("_flash", [])
     msgs.append((category, text))
     session["_flash"] = msgs
+
+
+@app.get("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "Zeiterfassung",
+        "short_name": "Zeiterfassung",
+        "icons": [
+            {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a1f2e",
+        "theme_color": "#1a1f2e",
+    })
 
 
 @app.get("/setup")
