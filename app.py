@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.0.1"
+APP_VERSION = "v1.0.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3963,6 +3963,162 @@ CALENDAR_DAYMENU_ASSETS = (
 
 
 
+@app.get("/calendar/year-list")
+@login_required
+def calendar_year_list():
+    """Returns an HTML fragment with all 12 months of the given year for the mobile list view."""
+    bootstrap()
+    u = current_user()
+    uid = u["id"]
+    try:
+        year = int(request.args.get("y") or datetime.date.today().year)
+    except (ValueError, TypeError):
+        year = datetime.date.today().year
+
+    today = datetime.date.today()
+    user_start_date = _get_tracking_start(uid) or "2026-01-01"
+    y_start = f"{year}-01-01"
+    y_end   = f"{year}-12-31"
+
+    db = connect()
+
+    hol_rows = db.execute(
+        "SELECT day, is_holiday, holiday_name FROM calendar_days"
+        " WHERE region='DE-NW' AND day>=? AND day<=?",
+        (y_start, y_end),
+    ).fetchall()
+    hol_map = {str(r["day"])[:10]: r for r in hol_rows}
+
+    totals: dict = {}
+    for b in db.execute(
+        "SELECT day, time_in, time_out, break_minutes FROM time_blocks"
+        " WHERE user_id=? AND day BETWEEN ? AND ? ORDER BY day, time_in",
+        (uid, y_start, y_end),
+    ).fetchall():
+        iso = str(b["day"])[:10]
+        mins = _minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0)
+        totals[iso] = totals.get(iso, 0) + mins
+    for e in db.execute(
+        "SELECT day, time_in, time_out, break_minutes FROM time_entries"
+        " WHERE user_id=? AND day BETWEEN ? AND ?",
+        (uid, y_start, y_end),
+    ).fetchall():
+        iso = str(e["day"])[:10]
+        if iso not in totals:
+            totals[iso] = _minutes_from_hhmm(e["time_out"]) - _minutes_from_hhmm(e["time_in"]) - int(e["break_minutes"] or 0)
+    net_map = {d: _fmt_minutes(m) for d, m in totals.items()}
+
+    abs_rows = db.execute(
+        """SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name, t.color AS type_color
+           FROM absences a JOIN absence_types t ON t.id = a.type_id
+           WHERE a.user_id=? AND NOT (a.date_to < ? OR a.date_from > ?)""",
+        (uid, y_start, y_end),
+    ).fetchall()
+
+    trip_map: dict = {}
+    for r in db.execute(
+        "SELECT start_date, end_date, destination FROM business_trips"
+        " WHERE user_id=? AND start_date<=? AND (end_date>=? OR end_date IS NULL)",
+        (uid, y_end, y_start),
+    ).fetchall():
+        for _td in _iter_days(str(r["start_date"])[:10], str(r["end_date"] or r["start_date"])[:10]):
+            if y_start <= _td <= y_end:
+                trip_map[_td] = r["destination"]
+
+    lock_rows = db.execute(
+        "SELECT year, month FROM period_locks WHERE user_id=? AND period_type='month' AND year=?",
+        (uid, year),
+    ).fetchall()
+    locked_months = {r["month"] for r in lock_rows}
+    year_locked = bool(db.execute(
+        "SELECT 1 FROM period_locks WHERE user_id=? AND period_type='year' AND year=?",
+        (uid, year),
+    ).fetchone())
+    db.close()
+
+    cal_contouring = _get_contouring_info(uid)
+    contoured_year = _get_contoured_days(uid, y_start, y_end)
+    missing_all    = _get_missing_entry_days(uid, year)
+
+    day_badges: dict = {}
+    for a in abs_rows:
+        d0  = datetime.date.fromisoformat(a["date_from"])
+        d1  = datetime.date.fromisoformat(a["date_to"])
+        cur = d0
+        while cur <= d1:
+            iso = cur.isoformat()
+            txt = a["type_name"]
+            if a["type_name"] == "Sonstige" and a["comment"]:
+                txt += f": {a['comment']}"
+            if a["is_half_day"] and a["date_from"] == a["date_to"]:
+                txt += " (1/2)"
+            day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
+            cur += datetime.timedelta(days=1)
+
+    _wd = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    rows = []
+
+    for mo in range(1, 13):
+        mo_locked = year_locked or mo in locked_months
+        rows.append(
+            f"<div style='font-size:12px;font-weight:700;text-transform:uppercase;"
+            f"letter-spacing:.06em;color:var(--mu);padding:10px 4px 6px;"
+            f"border-bottom:1px solid var(--bd);'>"
+            f"{MONTH_NAMES_DE[mo]} {year}</div>"
+        )
+        d_it  = datetime.date(year, mo, 1)
+        d_end = datetime.date(year, mo, calendar.monthrange(year, mo)[1])
+        while d_it <= d_end:
+            iso = d_it.isoformat()
+            if iso < user_start_date:
+                d_it += datetime.timedelta(days=1)
+                continue
+            hol      = hol_map.get(iso)
+            is_hol   = bool(hol and hol["is_holiday"])
+            is_off   = d_it.weekday() >= 5 or is_hol
+            is_today = d_it == today
+            badges   = day_badges.get(iso, [])
+            net      = net_map.get(iso)
+            trip     = trip_map.get(iso)
+            is_miss  = iso in missing_all
+
+            row_cls = "cal-lr" + (" cal-lr-today" if is_today else "") + (" cal-lr-off" if is_off else "")
+
+            cp = ""
+            if net:
+                cp += f"<span class='cal-lr-h'>{net}</span>"
+            for txt, col, *_ in badges:
+                cp += f"<span class='cal-lr-b' style='border-left:3px solid {col};padding-left:5px;'>{txt}</span>"
+            if is_hol:
+                cp += f"<span class='cal-lr-hol'>{hol['holiday_name']}</span>"
+            if trip:
+                cp += f"<span class='cal-lr-trip'>✈ {trip}</span>"
+
+            cal_contour_visible = (
+                cal_contouring["enabled"]
+                and (not cal_contouring["start_date"] or iso >= cal_contouring["start_date"])
+            )
+            ic = ""
+            if is_miss:
+                ic = "<span class='cal-lr-x' title='Fehlender Eintrag'>✕</span>"
+            elif cal_contour_visible and iso in contoured_year:
+                ic = "<span class='cal-lr-ok' title='Kontiert'>✓</span>"
+            elif mo_locked:
+                ic = "<span class='cal-lr-lock'>\U0001f512</span>"
+
+            rows.append(
+                f"<a href='/day/{iso}' class='{row_cls}'>"
+                f"<div class='cal-lr-date'><span class='cal-lr-wd'>{_wd[d_it.weekday()]}</span>"
+                f"<span class='cal-lr-dm'>{d_it.day:02d}.{mo:02d}.</span></div>"
+                f"<div class='cal-lr-cnt'>{cp}</div>"
+                f"<div class='cal-lr-ico'>{ic}</div>"
+                f"</a>"
+            )
+            d_it += datetime.timedelta(days=1)
+
+    return "".join(rows)
+
+
 @app.get("/calendar")
 @login_required
 def calendar_view():
@@ -4243,21 +4399,29 @@ def calendar_view():
     prev_nav_btn = (
         f"<span class='btn' style='padding:9px 14px;opacity:.35;cursor:not-allowed;'>&#9664;</span>"
         if _prev_blocked else
-        f"<a class='btn' href='/calendar?y={prev_y}&m={prev_m}' style='padding:9px 14px;'>&#9664;</a>"
+        f"<a class='btn' href='/calendar?y={prev_y}&m={prev_m}' style='padding:9px 14px;' onclick='calNavLeave()'>&#9664;</a>"
     )
 
     # ── Styles (plain strings – no f-string brace escaping needed) ────────────
     cal_css = """<style>
 .cal-grid-wrap{display:block;}
 .cal-list-wrap{display:none;border-top:1px solid var(--bd);margin-top:8px;}
+.cal-year-wrap{display:none;border-top:1px solid var(--bd);margin-top:8px;}
 @media(max-width:767px){
   .cal-grid-wrap{display:none;}
   .cal-list-wrap{display:block;}
 }
 [data-cal-view=month] .cal-grid-wrap{display:block!important;}
 [data-cal-view=month] .cal-list-wrap{display:none!important;}
+[data-cal-view=month] .cal-year-wrap{display:none!important;}
 [data-cal-view=list]  .cal-grid-wrap{display:none!important;}
 [data-cal-view=list]  .cal-list-wrap{display:block!important;}
+[data-cal-view=list]  .cal-year-wrap{display:none!important;}
+[data-cal-view=year]  .cal-grid-wrap{display:none!important;}
+[data-cal-view=year]  .cal-list-wrap{display:none!important;}
+[data-cal-view=year]  .cal-year-wrap{display:block!important;}
+.cal-tb-year-btn{display:none!important;}
+@media(max-width:767px){.cal-tb-year-btn{display:inline-flex!important;}}
 .cal-lr{display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--bd);
   text-decoration:none;color:var(--tx);min-height:44px;-webkit-tap-highlight-color:transparent;}
 .cal-lr:active{background:var(--bd);}
@@ -4283,14 +4447,31 @@ td.kw-cell{width:32px;font-size:10px;color:var(--mu);font-weight:600;text-align:
     cal_js = """<script>
 function setCalView(v){
   try{
+    if(v==='year'&&window.innerWidth>=768){v='month';}
     localStorage.setItem('cal_view',v);
     var w=document.getElementById('cal-wrap');
     if(w) w.setAttribute('data-cal-view',v);
     var bm=document.getElementById('cal-tb-month');
     var bl=document.getElementById('cal-tb-list');
+    var by=document.getElementById('cal-tb-year');
     if(bm) bm.classList.toggle('primary',v==='month');
     if(bl) bl.classList.toggle('primary',v==='list');
+    if(by) by.classList.toggle('primary',v==='year');
+    if(v==='year'){
+      var yw=document.querySelector('.cal-year-wrap');
+      if(yw&&!yw.dataset.loaded){
+        var yr=w?w.dataset.year:'';
+        yw.innerHTML='<div style="padding:16px;color:var(--mu);text-align:center;font-size:13px;">Wird geladen…</div>';
+        fetch('/calendar/year-list?y='+yr)
+          .then(function(r){return r.text();})
+          .then(function(html){yw.innerHTML=html;yw.dataset.loaded='1';})
+          .catch(function(){yw.innerHTML='<div style="padding:12px;color:var(--danger);">Fehler beim Laden.</div>';});
+      }
+    }
   }catch(e){}
+}
+function calNavLeave(){
+  try{if(localStorage.getItem('cal_view')==='year')localStorage.setItem('cal_view','list');}catch(e){}
 }
 (function(){
   try{ var v=localStorage.getItem('cal_view'); if(v) setCalView(v); }catch(e){}
@@ -4337,17 +4518,18 @@ function toggleKontiert(iso,ev){{
     {cal_css}
     {contour_js}
 
-    <div id="cal-wrap" class="card">
+    <div id="cal-wrap" class="card" data-year="{year}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:4px;">
           {prev_nav_btn}
           <span style="font-size:16px;font-weight:700;padding:0 6px;white-space:nowrap;">{month_label}{lock_badge}</span>
-          <a class="btn" href="/calendar?y={next_y}&m={next_m}" style="padding:9px 14px;">&#9654;</a>
+          <a class="btn" href="/calendar?y={next_y}&m={next_m}" style="padding:9px 14px;" onclick="calNavLeave()">&#9654;</a>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <a class="btn" href="/calendar?y={today.year}&m={today.month}">Heute</a>
+          <a class="btn" href="/calendar?y={today.year}&m={today.month}" onclick="calNavLeave()">Heute</a>
           <button id="cal-tb-month" class="btn" type="button" onclick="setCalView('month')" style="font-size:13px;padding:8px 10px;">&#8862; Monat</button>
           <button id="cal-tb-list"  class="btn" type="button" onclick="setCalView('list')"  style="font-size:13px;padding:8px 10px;">&#9776; Liste</button>
+          <button id="cal-tb-year"  class="btn cal-tb-year-btn" type="button" onclick="setCalView('year')"  style="font-size:13px;padding:8px 10px;">&#9783; Jahr</button>
         </div>
       </div>
 
@@ -4358,6 +4540,8 @@ function toggleKontiert(iso,ev){{
       <div class="cal-list-wrap">
         {list_html}
       </div>
+
+      <div class="cal-year-wrap"></div>
     </div>
 
     {cal_js}
