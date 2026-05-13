@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.0"
+APP_VERSION = "v4.6.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2479,9 +2479,9 @@ def index():
 @media(min-width:1024px){{.idx-grid{{grid-template-columns:repeat(4,1fr);}}}}
 </style>
 
-    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-      <a class="btn primary btn-lg" href="/day/{today.isoformat()}" style="flex:1;min-width:160px;text-align:center;">Zeiterfassung heute</a>
-      <a class="btn primary btn-lg" href="/calendar">Kalender</a>
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <a class="btn primary btn-lg" href="/day/{today.isoformat()}" style="flex:1;text-align:center;">Zeiterfassung</a>
+      <a class="btn primary btn-lg" href="/calendar" style="flex:1;text-align:center;">Kalender</a>
     </div>
 
     <div class="idx-grid">
@@ -3519,11 +3519,12 @@ def absences_list():
           <td>{scope}</td>
           <td>{bemerkung}</td>
           <td style="white-space:nowrap;">
-            <a href="/absences/{a["id"]}/edit">Bearbeiten</a>
-            &nbsp;|&nbsp;
-            <form method="post" action="/absences/{a["id"]}/delete" style="display:inline;" onsubmit="return confirm('Wirklich löschen?');">
-              <button class="btn" type="submit">Löschen</button>
-            </form>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <a class="btn btn-sm" href="/absences/{a["id"]}/edit">Bearbeiten</a>
+              <form method="post" action="/absences/{a["id"]}/delete" style="display:contents;" onsubmit="return confirm('Wirklich löschen?');">
+                <button class="btn danger btn-sm" type="submit">Löschen</button>
+              </form>
+            </div>
           </td>
         </tr>
         """
@@ -5679,21 +5680,26 @@ def business_trips_list():
     rows_html = ""
     if trips:
         for t in trips:
+            dest = t['destination'] or ''
+            notes = t['notes'] or ''
             rows_html += (
                 f"<tr>"
-                f"<td>{fmt_date_range(t)}</td>"
-                f"<td><b>{t['destination']}</b></td>"
-                f"<td>{fmt_time(t['departure_time'])}</td>"
-                f"<td>{fmt_time(t['departure_end_time'])}</td>"
-                f"<td>{fmt_time(t['return_time'])}</td>"
-                f"<td>{fmt_time(t['return_end_time'])}</td>"
-                f"<td class='small'>{t['notes'] or ''}</td>"
-                f"<td><a href='/day/{t['start_date']}'>Bearb.</a> "
-                f"<form method='post' action='/business_trips/delete' style='display:inline;'"
+                f"<td style='white-space:nowrap;'>{fmt_date_range(t)}</td>"
+                f"<td style='max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'><b title='{dest}'>{dest}</b></td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(t['departure_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(t['departure_end_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(t['return_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(t['return_end_time'])}</td>"
+                f"<td class='small' style='max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='{notes}'>{notes}</td>"
+                f"<td style='white-space:nowrap;'>"
+                f"<div style='display:flex;gap:6px;'>"
+                f"<a class='btn btn-sm' href='/day/{t['start_date']}'>Bearbeiten</a>"
+                f"<form method='post' action='/business_trips/delete' style='display:contents;'"
                 f" onsubmit=\"return confirm('Dienstreise löschen?');\">"
                 f"<input type='hidden' name='trip_id' value='{t['id']}'>"
                 f"<input type='hidden' name='y' value='{year}'>"
-                f"<button class='btn danger btn-sm' type='submit' >Löschen</button></form></td>"
+                f"<button class='btn danger btn-sm' type='submit'>Löschen</button></form>"
+                f"</div></td>"
                 f"</tr>"
             )
     else:
@@ -5754,17 +5760,19 @@ def business_trips_list():
           <a class="btn primary" href="/business_trips?y={year}&new=1">+ Neue Dienstreise</a>
         </div>
       </div>
-      <table style="margin-top:10px;">
-        <thead>
-          <tr>
-            <th>Datum</th><th>Ort</th>
-            <th>Abreise</th><th>Ankunft Ziel</th>
-            <th>Rückreise</th><th>Ankunft Hause</th>
-            <th>Notizen</th><th>Aktionen</th>
-          </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-      </table>
+      <div class="table-scroll" style="margin-top:10px;">
+        <table style="min-width:600px;">
+          <thead>
+            <tr>
+              <th>Datum</th><th>Ort</th>
+              <th>Abreise</th><th>Ziel an</th>
+              <th>Rückreise</th><th>Heim an</th>
+              <th>Notizen</th><th></th>
+            </tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div>
     </div>
     {new_form_html}
     """

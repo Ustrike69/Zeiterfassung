@@ -104,22 +104,21 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
   .table-scroll{{overflow-x:auto;-webkit-overflow-scrolling:touch;}}
   /* ---- Buttons ---- */
   .btn{{
-    display:inline-flex;align-items:center;justify-content:center;
-    padding:9px 14px;border-radius:var(--rs);
+    display:inline-flex;align-items:center;justify-content:center;gap:4px;
+    padding:8px 14px;border-radius:var(--rs);
     border:1px solid var(--bd);background:var(--sf);color:var(--tx);
-    cursor:pointer;text-decoration:none;font-size:15px;font-family:var(--fn);
-    font-weight:500;
+    cursor:pointer;text-decoration:none;font-size:14px;font-family:var(--fn);
+    font-weight:500;line-height:1.25;
     transition:background .12s,opacity .12s;-webkit-tap-highlight-color:transparent;white-space:nowrap;
-    line-height:1.2;
   }}
   .btn:hover{{background:var(--bd);}}
   .btn:active{{opacity:.75;}}
   .btn.primary,.btn-primary{{background:var(--ac);color:var(--ac-fg);border-color:var(--ac);}}
   .btn.primary:hover,.btn-primary:hover{{opacity:.9;background:var(--ac);}}
-  .btn.danger,.btn-danger{{color:var(--danger);border-color:var(--danger);}}
-  .btn.danger:hover,.btn-danger:hover{{background:rgba(220,38,38,.08);}}
-  .btn-sm{{padding:5px 10px;font-size:13px;}}
-  .btn-lg{{padding:12px 16px;font-size:15px;}}
+  .btn.danger,.btn-danger{{background:rgba(220,38,38,.09);color:var(--danger);border-color:rgba(220,38,38,.3);}}
+  .btn.danger:hover,.btn-danger:hover{{background:rgba(220,38,38,.18);}}
+  .btn-sm{{padding:4px 10px;font-size:13px;}}
+  .btn-lg{{padding:11px 18px;font-size:15px;font-weight:600;}}
   /* ---- Forms ---- */
   input,select,textarea{{
     padding:10px 12px;border:1px solid var(--bd);border-radius:var(--rs);
