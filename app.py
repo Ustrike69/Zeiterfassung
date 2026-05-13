@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.3"
+APP_VERSION = "v4.6.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5242,9 +5242,9 @@ def settings_view():
 
         del_btn = ""
         if sid:
-            del_btn = (f"<form method='post' action='/settings/schedule/{sid}/delete' style='display:inline;'"
+            del_btn = (f"<form method='post' action='/settings/schedule/{sid}/delete' style='display:contents;'"
                        f" onsubmit=\"return confirm('Zeitschema ab {_fmt_date_de(valid_from) if valid_from else valid_from} löschen?');\">"
-                       f"<button class='btn danger' style='padding:3px 8px;font-size:12px;'>Löschen</button></form>")
+                       f"<button class='btn danger btn-sm'>Löschen</button></form>")
 
         sched_rows += f"""<tr>
             <td style='white-space:nowrap;'><b>{_fmt_date_de(valid_from) if valid_from else "-"}</b></td>
@@ -5259,100 +5259,182 @@ def settings_view():
     profile_dn = u.get("display_name") or ""
     profile_em = u.get("email") or ""
 
+    ci = _get_contouring_info(u["id"])
+    today_iso_s = datetime.date.today().isoformat()
+    default_start = datetime.date.today().replace(day=1).isoformat()
+    contouring_enabled = ci["enabled"]
+    contouring_start_label = _fmt_date_de(ci["start_date"]) if ci["start_date"] else "–"
+
+    if contouring_enabled:
+        _kont_html = (
+            f"<div style='margin-bottom:10px;'><span style='color:var(--ok);font-weight:600;'>&#10003; Aktiv</span>"
+            f" <span style='color:var(--mu);font-size:13px;'>seit {contouring_start_label}</span></div>"
+            f"<form method='post' action='/settings/contouring/toggle'"
+            f" onsubmit=\"return confirm('Kontierung wirklich deaktivieren? Bestehende Kontierungen bleiben erhalten.');\">"
+            f"<button class='btn danger' type='submit'>Kontierung deaktivieren</button></form>"
+        )
+    else:
+        _kont_html = (
+            f"<div style='margin-bottom:12px;color:var(--mu);'>Kontierung ist deaktiviert.</div>"
+            f"<form method='post' action='/settings/contouring/toggle'>"
+            f"<div style='margin-bottom:10px;'>"
+            f"<label>Kontierung gilt ab:</label><br>"
+            f"{_date_input('contouring_start_date', default_start)}"
+            f"<div class='small' style='color:var(--mu);margin-top:3px;'>Standard: 1. des aktuellen Monats.</div>"
+            f"</div>"
+            f"<button class='btn primary' type='submit'>Aktivieren</button>"
+            f"</form>"
+        )
+
     body = f"""
     {flash_html()}
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Einstellungen</h3>
-        <a class="btn" href="/settings/password">Passwort ändern</a>
+<style>
+.acc{{border:1px solid var(--bd);border-radius:var(--r);margin-bottom:10px;overflow:hidden;background:var(--bg);}}
+.acc-hdr{{width:100%;display:flex;justify-content:space-between;align-items:center;
+  padding:14px 16px;background:var(--sf);border:none;cursor:pointer;
+  font-size:15px;font-weight:600;color:var(--tx);text-align:left;gap:10px;}}
+.acc-hdr:hover{{background:var(--bd);}}
+.acc-hdr.open{{border-bottom:1px solid var(--bd);}}
+.acc-arr{{font-size:12px;flex-shrink:0;color:var(--mu);}}
+.acc-body{{max-height:0;overflow:hidden;transition:max-height .28s ease;}}
+.acc-body.open{{max-height:4000px;}}
+.acc-inner{{padding:16px;}}
+.acc-sub{{border-top:1px solid var(--bd);margin-top:16px;padding-top:16px;}}
+</style>
+<script>
+function accToggle(id){{
+  var b=document.getElementById(id);
+  var h=b.previousElementSibling;
+  var a=h.querySelector('.acc-arr');
+  var op=b.classList.contains('open');
+  b.classList.toggle('open',!op);
+  h.classList.toggle('open',!op);
+  if(a)a.textContent=op?'▼':'▲';
+}}
+</script>
+
+    <h2 style="margin:0 0 14px 0;font-size:18px;">Einstellungen</h2>
+
+    <!-- 1. Persönliche Einstellungen -->
+    <div class="acc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-profil')">
+        <span>👤 Persönliche Einstellungen</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-profil">
+        <div class="acc-inner">
+          <form method="post" action="/settings/profile" style="display:flex;flex-direction:column;gap:10px;max-width:400px;">
+            <div>
+              <label>Anzeigename</label><br>
+              <input name="display_name" value="{profile_dn}" placeholder="{u['username']}">
+              <div class="small" style="color:var(--mu);margin-top:3px;">Wird im Header angezeigt. Leer = Benutzername.</div>
+            </div>
+            <div>
+              <label>E-Mail</label><br>
+              <input type="email" name="email" value="{profile_em}" placeholder="max@example.com">
+            </div>
+            <div><button class="btn" type="submit">Profil speichern</button></div>
+          </form>
+
+          <div class="acc-sub">
+            <b style="font-size:14px;">Passwort ändern</b>
+            <form method="post" action="/settings/password" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
+              <div>
+                <label>Aktuelles Passwort</label><br>
+                <input type="password" name="current_password" required autocomplete="current-password">
+              </div>
+              <div>
+                <label>Neues Passwort</label><br>
+                <input type="password" name="new_password" required autocomplete="new-password" minlength="6">
+              </div>
+              <div>
+                <label>Neues Passwort bestätigen</label><br>
+                <input type="password" name="new_password_confirm" required autocomplete="new-password">
+              </div>
+              <div><button class="btn" type="submit">Passwort ändern</button></div>
+            </form>
+          </div>
+
+          <div class="acc-sub">
+            <div class="small" style="color:var(--mu);">Arbeitsbeginn</div>
+            <div style="font-size:14px;font-weight:600;margin-top:2px;">{_fmt_date_de(u.get("tracking_start_date")) or "–"}</div>
+            <div class="small" style="color:var(--mu);margin-top:2px;">Kein Eintrag vor diesem Datum möglich. Änderung nur durch Admin.</div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Profil</h3>
-      <form method="post" action="/settings/profile" style="display:flex;flex-direction:column;gap:10px;max-width:380px;">
-        <div>
-          <label>Anzeigename</label><br>
-          <input name="display_name" value="{profile_dn}" placeholder="{u['username']}">
-          <div class="small" style="color:#777;margin-top:3px;">Wird im Header und in der Admin-Übersicht angezeigt. Leer = Benutzername.</div>
+    <!-- 2. Urlaub -->
+    <div class="acc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub')">
+        <span>🏖 Urlaub – {vac_year}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-urlaub">
+        <div class="acc-inner">
+          {"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;'><b>Urlaubsübertrag: Ausnahme gilt</b> – " + f"{vac_effective_carryover:.1f} Tage übertragen (verfallen nicht am 31.03.)</div>" if vac_carryover_exception else ""}
+          <p class="small" style="margin-bottom:12px;">
+            Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
+            {"Übertrag-Frist: " + vac_deadline + " <b style='color:#d97706;'>(Ausnahme gilt – kein Verfall)</b>." if vac_carryover_exception else ("<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + "."))}
+          </p>
+          <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:14px;">
+            <input type="hidden" name="year" value="{vac_year}">
+            <div>
+              <label>Urlaubsanspruch (Tage)</label><br>
+              <input name="entitlement_days" type="number" step="0.5" min="0" value="{vac_entitlement}" required style="width:120px;">
+            </div>
+            <div>
+              <label>Übertrag Vorjahr (Tage)</label><br>
+              <input name="carryover_days" type="number" step="0.5" min="0" value="{vac_carryover}" required style="width:120px;">
+            </div>
+            <div><button class="btn" type="submit">Speichern</button></div>
+          </form>
+          <div style="display:flex;gap:18px;flex-wrap:wrap;">
+            <div><div class="small">Genommen</div><div style="font-size:22px;font-weight:700;">{vac_used_total:.1f}</div></div>
+            <div><div class="small">Rest gesamt</div><div style="font-size:22px;font-weight:700;">{vac_remaining_total:.1f}</div></div>
+            <div><div class="small">{"Übertrag (Ausnahme)" if vac_carryover_exception else "Übertrag offen"}</div><div style="font-size:22px;font-weight:700;{"color:#d97706;" if vac_carryover_exception else ""}">{vac_carryover_remaining:.1f}</div></div>
+            <div><div class="small">Anspruch {vac_year} offen</div><div style="font-size:22px;font-weight:700;">{vac_entitlement_remaining:.1f}</div></div>
+            {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;font-weight:700;color:var(--danger);'>" + f"{vac_carryover_forfeited:.1f}" + "</div></div>" if vac_carryover_forfeited > 0 else ""}
+          </div>
         </div>
-        <div>
-          <label>E-Mail</label><br>
-          <input type="email" name="email" value="{profile_em}" placeholder="max@example.com">
-        </div>
-        <div><button class="btn" type="submit">Speichern</button></div>
-      </form>
-      <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--bd);">
-        <div class="small" style="color:#777;">Arbeitsbeginn</div>
-        <div style="font-size:14px;font-weight:600;">{_fmt_date_de(u.get("tracking_start_date")) or "–"}</div>
-        <div class="small" style="color:#777;margin-top:2px;">Kein Eintrag vor diesem Datum möglich. Änderung nur durch Admin.</div>
       </div>
     </div>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Urlaub – {vac_year}</h3>
-      {"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;color:#92400e;'><b>Urlaubsübertrag: Ausnahme gilt</b> – " + f"{vac_effective_carryover:.1f} Tage übertragen (verfallen nicht am 31.03.)</div>" if vac_carryover_exception else ""}
-      <p class="small">
-        Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
-        {"Übertrag-Frist: " + vac_deadline + " <b style='color:#d97706;'>(Ausnahme gilt – kein Verfall)</b>." if vac_carryover_exception else ("<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + "."))}
-      </p>
-
-      <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;">
-        <input type="hidden" name="year" value="{vac_year}">
-        <div>
-          <label>Urlaubsanspruch (Tage)</label><br>
-          <input name="entitlement_days" type="number" step="0.5" min="0" value="{vac_entitlement}" required>
+    <!-- 3. Zeitschema -->
+    <div class="acc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit')">
+        <span>🕐 Zeitschema</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-zeit">
+        <div class="acc-inner">
+          <p class="small" style="margin-bottom:12px;">An Wochenenden/Feiertagen wird standardmäßig nicht gearbeitet (kann als Ausnahme zugelassen werden).</p>
+          <div class="table-scroll" style="margin-bottom:16px;">
+            <table style="min-width:500px;">
+              <thead><tr>
+                <th>Gültig ab</th><th>Status</th><th>Modus</th><th>Soll</th><th>Arbeitstage</th><th></th>
+              </tr></thead>
+              <tbody>{sched_rows if sched_rows else "<tr><td colspan='6' style='color:var(--mu);'>Noch kein Zeitschema gespeichert.</td></tr>"}</tbody>
+            </table>
+          </div>
+          <div class="acc-sub">
+            <b style="font-size:14px;">Neues Zeitschema anlegen</b>
+            <div style="margin-top:10px;">
+              {_sched_form_html(sched, "/settings/save", "/settings", show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
+            </div>
+          </div>
         </div>
-        <div>
-          <label>Übertrag Vorjahr (Tage)</label><br>
-          <input name="carryover_days" type="number" step="0.5" min="0" value="{vac_carryover}" required>
-        </div>
-        <div>
-          <button class="btn" type="submit">Speichern</button>
-        </div>
-      </form>
-
-      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;">
-        <div><div class="small">Genommen (gesamt)</div><div style="font-size:22px;"><b>{vac_used_total:.1f}</b></div></div>
-        <div><div class="small">Rest gesamt</div><div style="font-size:22px;"><b>{vac_remaining_total:.1f}</b></div></div>
-        <div style="opacity:.6;">|</div>
-        <div><div class="small">{"Übertrag (Ausnahme)" if vac_carryover_exception else "Übertrag offen"}</div><div style="font-size:22px;{'color:#d97706;' if vac_carryover_exception else ''}"><b>{vac_carryover_remaining:.1f}</b></div></div>
-        <div><div class="small">Anspruch {vac_year} offen</div><div style="font-size:22px;"><b>{vac_entitlement_remaining:.1f}</b></div></div>
-        {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;color:var(--danger);'><b>" + f"{vac_carryover_forfeited:.1f}" + "</b></div></div>" if vac_carryover_forfeited > 0 else ""}
       </div>
     </div>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Zeitschema</h3>
-      <p class="small">Regeln: An Wochenenden/Feiertagen wird standardmäßig nicht gearbeitet (kann bei Bedarf als Ausnahme zugelassen werden).</p>
-
-      
-      <div class="card" style="margin-bottom:14px;">
-        <h3 style="margin:0 0 8px 0;">Vorhandene Zeitschemata</h3>
-        <div class="small" style="color:#666;margin-bottom:8px;">Alle Schemas inkl. Gültigkeit (gültig ab).</div>
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Gültig ab</th>
-              <th>Status</th>
-              <th>Modus</th>
-              <th>Soll</th>
-              <th>Arbeitstage</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {sched_rows if sched_rows else "<tr><td colspan='6' style='color:#666;'>Noch kein Zeitschema gespeichert.</td></tr>"}
-          </tbody>
-        </table>
+    <!-- 4. Kontierung -->
+    <div class="acc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-kont')">
+        <span>📋 Kontierung</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-kont">
+        <div class="acc-inner">
+          {_kont_html}
+        </div>
       </div>
-
-      <h4 style="margin:14px 0 6px 0;">Neues Zeitschema anlegen</h4>
-      {_sched_form_html(sched, "/settings/save", "/settings",
-                        show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
     </div>
-
-    {_contouring_settings_card(u["id"])}
     """
     return render_template_string(layout("Einstellungen", body, u, APP_VERSION))
 
