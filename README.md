@@ -1,23 +1,24 @@
-# Zeiterfassung v4.2.0
+# Zeiterfassung v4.6.6
 
-Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung.
+Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion und Admin-Benutzerverwaltung.
 
 ---
 
 ## Inhaltsverzeichnis
 
 1. [Erste Schritte](#erste-schritte)
-2. [Einrichtungs-Wizard (Onboarding)](#einrichtungs-wizard-onboarding)
-3. [Übersicht (Startseite)](#übersicht-startseite)
-4. [Zeiterfassung](#zeiterfassung)
-5. [Kalender](#kalender)
+2. [Übersicht (Startseite)](#übersicht-startseite)
+3. [Zeiterfassung](#zeiterfassung)
+4. [Kalender](#kalender)
+5. [Gleitzeitkonto](#gleitzeitkonto)
 6. [Abwesenheiten](#abwesenheiten)
 7. [Dienstreisen](#dienstreisen)
-8. [Stundensaldo](#stundensaldo)
+8. [Kontierung](#kontierung)
 9. [Einstellungen](#einstellungen)
 10. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
 11. [Admin-Bereich](#admin-bereich)
 12. [Technischer Betrieb](#technischer-betrieb)
+13. [Versionshistorie](#versionshistorie)
 
 ---
 
@@ -25,222 +26,150 @@ Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von 
 
 ### Login
 
-Aufruf der App im Browser. Beim ersten Start wird ein Admin-Konto über `/setup` angelegt.
+Aufruf der App im Browser. Beim ersten Start wird ein Admin-Konto über `/setup` angelegt. Anmeldung unter `/login`.
 
-Anmeldung mit Benutzername (Kleinschreibung) und Passwort unter `/login`.
+### Einrichtungs-Wizard (Onboarding)
 
----
-
-## Einrichtungs-Wizard (Onboarding)
-
-Neue Nutzer werden beim ersten Login automatisch durch einen 6-stufigen Einrichtungs-Wizard geführt (`/onboarding`). Alle anderen Seiten sind bis zum Abschluss des Wizards gesperrt.
+Neue Nutzer werden beim ersten Login durch einen 6-stufigen Wizard geführt (`/onboarding`).
 
 | Schritt | Inhalt |
 |---------|--------|
-| 1 | **Passwort ändern** – Pflicht; ersetzt das temporäre Admin-Passwort |
-| 2 | **Profil** – Anzeigename und E-Mail (optional) |
-| 3 | **Zeitschema** – Wochenstunden, Modus, Arbeitstage (überspringbar) |
-| 4 | **Urlaubskontingent** – Anspruch und Übertrag für das aktuelle Jahr (überspringbar) |
-| 5 | **Startsaldo & Erfassung ab** – Gleitzeitguthaben und frühestes Erfassungsdatum (überspringbar) |
-| 6 | **Zusammenfassung** – Bestätigung, Wizard abschließen |
-
-Schritte 2–5 können übersprungen und jederzeit in den Einstellungen nachgeholt werden. Der Admin-Account bei `/setup` überspringt den Wizard.
+| 1 | **Passwort ändern** – Pflicht |
+| 2 | **Profil** – Anzeigename und E-Mail |
+| 3 | **Zeitschema** – Wochenstunden, Modus, Arbeitstage |
+| 4 | **Urlaubskontingent** – Anspruch und Übertrag |
+| 5 | **Startsaldo & Erfassung ab** – Gleitzeitguthaben und frühestes Erfassungsdatum |
+| 6 | **Zusammenfassung** – Bestätigung |
 
 ### Sprache und Format
 
-Die App ist vollständig auf Deutsch. Datumsangaben werden im Format **TT.MM.JJJJ** angezeigt und eingegeben. Uhrzeiten im Format **HH:MM**. Alle Datums- und Zeitfelder unterstützen sowohl direkte Texteingabe als auch die Auswahl per Kalender- bzw. Zeit-Picker.
+Vollständig auf Deutsch. Datum: **TT.MM.JJJJ**, Uhrzeiten: **HH:MM** (15-Minuten-Schritte). Die App ist ab **01.01.2026** ausgelegt – Einträge vor dem `tracking_start_date` eines Users sind nicht möglich.
 
 ---
 
 ## Übersicht (Startseite)
 
-Die Startseite zeigt auf einen Blick die wichtigsten Informationen des aktuellen Jahres:
+### Button-Leiste oben
+- **Zeiterfassung** – Direktlink zur Tagesansicht heute
+- **Kalender** – Direktlink zur Kalenderansicht
 
-### Gleitzeitkonto
-Aktueller Stundenssaldo (Über-/Unterstunden) in Stunden und Minuten. Grün = Plusstunden, Rot = Minusstunden. Link zu den Details führt zur Saldo-Ansicht.
+### Widgets (4er-Grid auf Desktop)
 
-### Resturlaub
-Verbleibende Urlaubstage des aktuellen Jahres. Angezeigt wird die Anzahl der noch verfügbaren Tage sowie das Gesamtkontingent.
-
-**Übertrag-Regel:** Urlaubstage aus dem Vorjahr müssen bis **31.03.** angetreten sein (Urlaubsbeginn ≤ 31.03.), können aber nach dem 31.03. noch enden. Nicht bis 31.03. angetretener Übertrag verfällt. Bis zum 31.03. wird ein Hinweis angezeigt.
-
-### Fehlende Einträge
-Anzahl vergangener Arbeitstage im aktuellen Jahr, für die noch kein Zeiteintrag vorhanden ist (kein Urlaub, kein Feiertag, keine Abwesenheit). Link führt direkt zum Kalender.
+| Widget | Inhalt |
+|--------|--------|
+| **Gleitzeitkonto** | Aktueller Saldo. Grün = Plus, Rot = Minus. Button „Details" |
+| **Resturlaub** | Verbleibende Urlaubstage + Übertrag-Hinweis. Button „Details" |
+| **Fehlende Einträge** | Vergangene Arbeitstage ohne Zeiteintrag. Button „Details" |
+| **Kontierung** | Unkontierte Tage + Datumsfeld + Button „Kontieren" |
 
 ### Abwesenheitskarte
-Kompakte Übersicht aller Abwesenheiten des aktuellen Jahres:
 
-- **Urlaub:** Genommen / Geplant / Verfügbar
-- **Krank:** Anzahl Tage (nur vergangene)
-- **Verdi:** Genommen / Geplant
-- **Flextag:** Genommen / Geplant
-
-Nur Gruppen mit mindestens einem Eintrag werden angezeigt. Urlaub wird immer angezeigt.
-
-### Button „Zeiterfassung heute"
-Direktlink zur Tagesansicht des heutigen Tages.
+Übersicht Urlaub / Krank / Flextag / Verdi. Button „Alle Abwesenheiten".
 
 ---
 
 ## Zeiterfassung
 
-### Tagesansicht (`/day/TT.MM.JJJJ`)
+### Tagesansicht (`/day/JJJJ-MM-TT`)
 
-Aufruf über den Button auf der Startseite oder direkt über den Kalender. Pro Tag können mehrere Zeitblöcke erfasst werden (z. B. Vormittag und Nachmittag getrennt).
+**Reihenfolge der Sektionen:**
+1. Zeitblock hinzufügen
+2. Vorhandene Zeitblöcke
+3. Abwesenheit hinzufügen
+4. Vorhandene Abwesenheiten
+5. Dienstreise
 
-Jeder Zeitblock hat:
-- **Startzeit** und **Endzeit**
-- Optional: Pause
+Mehrere Zeitblöcke pro Tag möglich. Gehen-Zeit ist Pflichtfeld. Alle Zeiteingaben in 15-Minuten-Schritten.
 
-Die Summe aller Zeitblöcke ergibt die Ist-Zeit des Tages, die mit dem Soll-Wert (laut Arbeitszeitmodell) verglichen wird.
+### Wochenende / Feiertage
 
-### Arbeitstage ohne Eintrag
-
-Im Kalender werden vergangene Arbeitstage ohne Zeiteintrag mit einem kleinen roten **✕** unten rechts in der Tageszelle markiert. Die Anzahl wird auch auf der Startseite angezeigt.
+Erfassung standardmäßig blockiert. „Ausnahme setzen"-Button ermöglicht trotzdem speichern.
 
 ---
 
 ## Kalender
 
-Aufruf über die Navigation. Anzeige eines Monats mit Navigations-Pfeilen und „Heute"-Button.
+Monatsansicht mit Navigation. Wechsel zwischen Monat- und Listen-Ansicht.
 
 ### Zelleninhalt
 
-Jede Tageszelle zeigt:
-- Erfasste Stunden (Ist-Zeit des Tages)
-- Abwesenheits-Badge (Urlaub, Krank, Sonstige)
-- Feiertagsname (falls Feiertag)
-- ✈ + Ort bei Dienstreisen
-- ✕ bei vergangenen Arbeitstagen ohne Eintrag
+- Erfasste Stunden · Abwesenheits-Badge · Feiertagsname
+- ✈ + Ort bei Dienstreisen · ✕ fehlender Eintrag · Bernstein-Punkt kontiert
 
-### Legende
+### Kontextmenü (···)
 
-Am oberen Rand des Kalenders: Abwesenheit | Feiertag | ✕ fehlender Eintrag
+Zeit erfassen · Abwesenheit eintragen · Als kontiert markieren / aufheben
 
-### Abgeschlossene Monate
+---
 
-Abgeschlossene Monate zeigen ein 🔒-Symbol im Monatstitel. Einträge in gesperrten Monaten können nicht mehr bearbeitet werden.
+## Gleitzeitkonto
+
+Aufruf unter `/balance`. Tageweise Auflistung mit Jahr-/Monatsauswahl.
+
+### Spalten
+
+Tag | Datum | Beginn | Ende | Pause | Soll | Delta | (Desktop: kum. Saldo)
+
+- Mehrere Zeitblöcke: nur erste Zeile zeigt Tag + Datum
+- Wochenenden + Feiertage: dezent (gedimmt)
+- Urlaub/Krank/Feiertag: farbiges Badge
+- Klick auf Zeile → Tages-Editor
+
+### Saldo-Berechnung
+
+Iteriert über alle Tage ab `tracking_start_date` bis heute. Identisch mit der Detailansicht. Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
 
 ---
 
 ## Abwesenheiten
 
-Aufruf über die Navigation unter `/absences`.
-
-### Typen
-
-Es gibt drei fest definierte Abwesenheitstypen:
+Aufruf unter `/absences`.
 
 | Typ | Beschreibung |
 |-----|-------------|
-| **Urlaub** | Geplanter Urlaub, wird gegen das Urlaubskontingent gerechnet |
+| **Urlaub** | Gegen Urlaubskontingent |
 | **Krank** | Krankheitstage |
-| **Sonstige** | Alle anderen Abwesenheiten, mit Pflichtfeld „Bemerkung" |
+| **Sonstige** | Pflichtfeld Bemerkung (Flextag, Verdi, freie Eingabe) |
 
-### Sonstige – Bemerkungen
-
-Bei Typ „Sonstige" muss eine Bemerkung eingetragen werden. Vorbelegte Auswahlmöglichkeiten:
-- **Verdi** (Gewerkschaftsveranstaltung)
-- **Flextag** (Freizeitausgleich für Überstunden)
-- **Neuer Eintrag** (freie Eingabe)
-
-Alle selbst eingegebenen Bemerkungen werden gespeichert und stehen künftig als Vorauswahl zur Verfügung.
-
-### Flextag-Logik
-
-Ein Flextag gilt als genommener Ausgleich für angesammelte Plusstunden: Der Soll-Wert des Tages wird auf 0 gesetzt (kein Fehlzeitvormwurf) und zusätzlich vom Gleitzeitkonto abgezogen. Nur vergangene Flextage wirken sich auf den Saldo aus.
-
-### Neue Abwesenheit anlegen
-
-Button „+ Neu" oben rechts. Pflichtfelder: Typ, Von-Datum. Bis-Datum optional (bei eintägigen Abwesenheiten gleich dem Von-Datum).
-
-### Übersicht
-
-Tabelle mit allen Abwesenheiten, filterbar nach Zeitraum. Spalten: Typ, Von, Bis, Umfang, Kommentar (nur bei Sonstige). Datumformat: TT.MM.JJJJ.
+**Flextag:** Setzt Soll auf 0 und zieht Sollzeit zusätzlich vom Gleitzeitkonto ab.
 
 ---
 
 ## Dienstreisen
 
-Dienstreisen sind **zusätzliche Informationen** zu einem Tag – die Arbeitszeit muss separat über die normale Zeiterfassung eingetragen werden.
+Zusätzliche Information zu einem Tag – Arbeitszeit separat erfassen.
 
-### Neue Dienstreise anlegen
-
-Über `/business_trips` → Button „+ Neue Dienstreise", oder direkt in der Tagesansicht über den Abschnitt „Dienstreise".
-
-### Felder
-
-| Feld | Pflicht | Beschreibung |
-|------|---------|-------------|
-| Ort | ✓ | Reiseziel |
-| Startdatum | ✓ | Abreisedatum |
-| Mehrtägig | – | Checkbox: aktiviert Enddatum-Feld |
-| Enddatum | – | Nur bei mehrtägigen Reisen |
-| Abreise Start | – | Uhrzeit Abfahrt |
-| Abreise Ende | – | Uhrzeit Ankunft am Ziel |
-| Rückreise Start | – | Uhrzeit Abfahrt Rückreise |
-| Rückreise Ende | – | Uhrzeit Ankunft zuhause |
-| Notizen | – | Freitext |
-
-### Anzeige im Kalender
-
-An Reisetagen wird ✈ + Ort in der Tageszelle angezeigt. Bei mehrtägigen Reisen erscheint das Symbol an jedem betroffenen Tag.
-
-### Übersicht `/business_trips`
-
-Tabelle aller Dienstreisen, sortiert nach Datum (neueste zuerst), filterbar nach Jahr. Bei mehrtägigen Reisen: Datumsbereich TT.MM. – TT.MM.JJJJ.
+| Feld | Pflicht |
+|------|---------|
+| Ort | ✓ |
+| Startdatum | ✓ |
+| Mehrtägig / Enddatum | – |
+| Abreise/Rückreise Zeiten | – |
+| Notizen | – |
 
 ---
 
-## Stundensaldo
+## Kontierung
 
-Aufruf über die Navigation unter `/balance`.
+Separate Buchhaltungsfunktion: Zeiten als „kontiert" (gebucht) markieren.
 
-### Zeitraum-Auswahl
-
-Oben auf der Seite: Auswahl von **Jahr** und **Monat** (oder „Gesamtes Jahr"). Standard: aktueller Monat.
-
-### Saldo-Tabelle
-
-Tageweise Auflistung mit: Datum, Soll, Ist, Tagesdelta, kumulierter Saldo. Der Startsaldo des gewählten Monats wird oben ausgewiesen.
-
-### Abwesenheits-Zusammenfassung
-
-Unterhalb der Tabelle: Aufschlüsselung der Abwesenheitstage im gewählten Zeitraum, getrennt nach:
-
-**Erfasst** (vergangene Tage):
-- Urlaub, Krank, Sonstige (gruppiert nach Bemerkung)
-- Flextage: mit Hinweis „(vom Gleitzeitkonto)"
-
-**Geplant** (zukünftige Tage):
-- Urlaub, Flextag, Verdi, Sonstige
+- **Einzeln**: Kontextmenü (···) im Kalender
+- **Bulk**: Startseite → Datum eingeben → „Kontieren"
+- **Aktivierung**: In den Einstellungen mit Startdatum aktivieren/deaktivieren
+- **Darstellung**: Bernsteinfarbener Punkt im Kalender
 
 ---
 
 ## Einstellungen
 
-Aufruf unter `/settings`.
+Aufruf unter `/settings`. 4 Accordion-Bereiche:
 
-### Profil
-
-- **Anzeigename** – Wird im Header und in der Admin-Übersicht angezeigt (Fallback: Benutzername)
-- **E-Mail** – Optionales Kontaktfeld
-
-### Arbeitszeitmodell
-
-Zwei Modi:
-- **Wöchentlich:** Gesamte Wochenstunden werden gleichmäßig auf Arbeitstage verteilt
-- **Täglich:** Explizite Minutenziele pro Wochentag
-
-Mehrere Arbeitszeitmodelle mit Gültigkeitsdaten möglich (z. B. bei Stundenreduzierung).
-
-### Arbeitstage
-
-Konfiguration per Bitmask (Mo–So). Feiertage und Wochenenden können das Soll blockieren.
-
-### Urlaubskontingent
-
-Jährliches Urlaubskontingent in Tagen. Übertrag aus dem Vorjahr wird separat erfasst.
+| Bereich | Inhalt |
+|---------|--------|
+| **Persönliche Einstellungen** | Name, E-Mail, Passwort |
+| **Urlaub** | Jahresanspruch, Übertrag-Regelung (Standard 31.03. oder Ausnahme) |
+| **Zeitschema** | Aktuelle + alle Schemas, Bearbeiten/Löschen/Neu anlegen |
+| **Kontierung** | Aktivieren/Deaktivieren + Startdatum |
 
 ---
 
@@ -248,47 +177,29 @@ Jährliches Urlaubskontingent in Tagen. Übertrag aus dem Vorjahr wird separat e
 
 Aufruf unter `/periods`.
 
-### Abschluss
-
-Vergangene Monate können abgeschlossen werden. Ein abgeschlossener Monat sperrt alle Einträge (Zeitblöcke, Abwesenheiten, Dienstreisen) gegen weitere Bearbeitung.
-
-Ein Jahresabschluss schließt automatisch alle noch offenen Monate des Jahres ab.
-
-### Gesperrte Zeiträume
-
-- Im Kalender: 🔒 im Monatstitel
-- In der Tagesansicht: Hinweis „Monat abgeschlossen" statt Bearbeiten-Buttons
-- Bei Versuch einer Bearbeitung: Fehlermeldung
-
-### Entsperren
-
-Nur Admins können Abschlüsse rückgängig machen. Der laufende Monat kann nicht abgeschlossen werden.
+- Abgeschlossene Monate sperren alle Einträge
+- **Jahresabschluss**: Nur Monate ab `tracking_start_date` müssen abgeschlossen sein – Monate vor Arbeitsbeginn blockieren nicht
+- Entsperren: nur durch Admins
 
 ---
 
 ## Admin-Bereich
 
-Aufruf unter `/admin`. Nur für Benutzer mit Admin-Rolle zugänglich.
+Aufruf unter `/admin`.
 
-### Benutzerverwaltung (`/admin/users`)
+### Benutzerverwaltung
 
-- Neue Benutzer anlegen (mit „Erfassung ab"-Datum und temporärem Passwort)
-- Passwörter zurücksetzen
-- Admin-Rechte vergeben/entziehen
-- Benutzer deaktivieren
-- **Benutzer löschen** – löscht alle zugehörigen Daten (Zeitblöcke, Abwesenheiten, Dienstreisen, Saldo, Periodenabschlüsse etc.)
+- Neue User anlegen (mit Arbeitsbeginn-Datum)
+- Passwörter zurücksetzen · Admin-Rechte · Deaktivieren/Löschen
+- **Identität annehmen**: Als anderer User agieren (oranger Banner + „Zurück zu Admin")
+- Zeitschema-Verwaltung pro User (Bearbeiten/Löschen/Überlappungswarnung)
+- Urlaubsübertrag-Ausnahme pro User
 
-**Schutzregeln beim Löschen:**
-- Der eigene Account kann nicht gelöscht werden
-- Der letzte aktive Admin-Account kann nicht gelöscht werden
+### Schutzregeln
 
-### Abwesenheits-Entsperrung
-
-Admins können Periodenabschlüsse anderer Benutzer einsehen und entsperren.
-
-### Feiertage
-
-Feiertage werden automatisch über `calendar_seed.py` für NRW (DE-NW) importiert. Eine manuelle Bearbeitung ist nicht vorgesehen.
+- Eigener Account nicht löschbar
+- Letzter aktiver Admin nicht löschbar
+- Admin kann keine andere Admin-Identität annehmen
 
 ---
 
@@ -296,35 +207,19 @@ Feiertage werden automatisch über `calendar_seed.py` für NRW (DE-NW) importier
 
 ### Voraussetzungen
 
-- Python 3.x mit virtualenv unter `/opt/zeiterfassung/.venv`
-- SQLite-Datenbank (Pfad via `ZEITERFASSUNG_DB` Umgebungsvariable, Standard: `zeiterfassung.db` im Arbeitsverzeichnis)
+- Python 3.x + virtualenv unter `/opt/zeiterfassung/.venv`
+- SQLite-Datenbank (via `ZEITERFASSUNG_DB`, Standard: `zeiterfassung.db`)
+- Gunicorn via systemd
 
-### Starten
+### Starten / Neustarten
 
 ```bash
-# Entwicklung
-cd /opt/zeiterfassung
-.venv/bin/python app.py
-
-# Produktion (Gunicorn via systemd)
-systemctl start zeiterfassung
 systemctl restart zeiterfassung
 systemctl status zeiterfassung
-```
-
-### Datenbankmigrationen
-
-Migrationen laufen automatisch beim Start über `db.py` (`init_db()`). Kein manueller Eingriff nötig.
-
-### Logs
-
-```bash
 journalctl -u zeiterfassung -f
 ```
 
 ### Backup
-
-Vor Updates empfiehlt sich ein Backup der Datenbankdatei:
 
 ```bash
 cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
@@ -334,21 +229,112 @@ cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 
 | Datei | Beschreibung |
 |-------|-------------|
-| `app.py` | Alle Routes und Business-Logik (~4.500 Zeilen) |
+| `app.py` | Alle Routes und Business-Logik (~6.300 Zeilen) |
 | `db.py` | Datenbankinitialisierung und Migrationen |
 | `auth.py` | Session-basierte Authentifizierung |
-| `templates.py` | HTML-Layout-Wrapper |
-| `calendar_seed.py` | Import NRW-Feiertage |
-
----
+| `templates.py` | HTML-Layout-Wrapper (f-strings) |
+| `calendar_seed.py` | Import NRW-Feiertage 2026 |
 
 ---
 
 ## Versionshistorie
 
-### v4.2.0
-- Einheitlicher Timepicker: alle Zeiteingaben (Zeitblöcke, Dienstreisen) verwenden jetzt ein einzelnes natives `<input type="time">` – kein zweigeteiltes Widget mehr
-- 15-Minuten-Schritte für alle Zeiteingaben: `step="900"` + automatisches Runden auf nächsten 15-Minuten-Wert bei Texteingabe
-- Sollzeiten (tägliche Minutenziele in den Einstellungen) sind von der 15-Minuten-Beschränkung ausgenommen
+### v4.6.6
+- Wochenende-Widget an kompaktes Zeiterfassungs-Design angepasst
 
-*Zeiterfassung v4.2.0 – Flask + SQLite – NRW*
+### v4.6.5
+- Zeiterfassung Redesign: kompakteres Layout, Widgets nebeneinander (Desktop)
+
+### v4.6.4
+- Einstellungen Redesign: 4 Accordion-Bereiche
+
+### v4.6.3
+- Dienstreisen: Datum-Link entfernt, Button-Design angepasst
+
+### v4.6.2
+- Kontieren-Button vereinheitlicht, Soll-Spalte im Gleitzeitkonto, Feiertage dezent
+
+### v4.6.1
+- Alle Buttons vereinheitlicht (.btn-primary/.btn-secondary/.btn-danger)
+
+### v4.6.0
+- Kritischer Server-Error behoben, globale Button-Vereinheitlichung
+
+### v4.5.9
+- Zurück-Button auf allen Seiten
+
+### v4.5.8
+- Desktop Übersicht: 4er-Grid, Kontierung kompakt
+
+### v4.5.7
+- Übersicht Redesign: Buttons oben, Links→Buttons, kompaktere Salden
+
+### v4.5.6
+- Mobile Timepicker: nur 15-Minuten-Schritte
+
+### v4.5.5
+- Fix Gehen-Feld Validierungs-Bug Mobile
+
+### v4.5.4
+- Tages-Editor: Sektionen-Reihenfolge + Zurück-Button
+
+### v4.5.3
+- Desktop Gleitzeitübersicht: einheitliches Layout mit Mobile
+
+### v4.5.2
+- Mobile Gleitzeitübersicht: mehrere Zeitblöcke pro Tag
+
+### v4.5.1
+- Mobile Gleitzeitübersicht: kompaktes Spalten-Layout
+
+### v4.5.0
+- Kontierung aktivieren/deaktivieren mit Startdatum
+
+### v4.4.9
+- Urlaub-Übertrag Ausnahme-Regelung pro User
+
+### v4.4.8
+- Admin Identitätswechsel (Impersonation)
+
+### v4.4.7
+- Dashboard-Saldo identisch mit Details (_iter_days)
+
+### v4.4.6
+- Gleitzeitkonto: Wochentag, farbige Werte, Link zur Zeiterfassung
+
+### v4.4.5
+- Zeitschema-Verwaltung: Bearbeiten + Löschen
+
+### v4.4.4
+- Gleitzeitkonto: Status-Badges, dezente Zeilen
+
+### v4.4.3
+- Gleitzeitkonto: Wochentag eingeblendet
+
+### v4.4.2
+- Gleitzeitkonto: positive grün, negative rot
+
+### v4.4.1
+- Zeitschema bearbeiten/löschen
+
+### v4.4.0
+- Zeitraum-Filterung nach Arbeitsbeginn, Jahresabschluss-Fix
+
+### v4.3.9
+- Anfangsdatum-Validierung
+
+### v4.3.8
+- Ausnahme-Funktion Wochenende/Feiertag
+
+### v4.3.7
+- Kalender-Layout: Urlaub auf gleicher Höhe
+
+### v4.3.0 – v4.3.6
+- Kontierungsfunktion eingeführt und verfeinert
+
+### v4.2.0 – v4.2.1
+- Einheitlicher Timepicker, 15-Minuten-Schritte, Bugfixes
+
+---
+
+*Zeiterfassung v4.6.6 – Flask + SQLite – NRW*

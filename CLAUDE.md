@@ -1,84 +1,125 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-**Zeiterfassung** (v3.0.0) is a multi-user German-language time tracking web app built with Flask + SQLite. Users record work time blocks, absences, and vacations; the app computes balances against configurable work schedules.
+**Zeiterfassung** (v4.6.6) is a multi-user German-language time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. All content and UI is in German.
 
 ## Running the Application
 
 ```bash
-# Production service (Gunicorn via systemd)
-systemctl restart zeiterfassung.service
-systemctl is-active zeiterfassung.service
+# Production (Gunicorn via systemd)
+systemctl restart zeiterfassung
+systemctl is-active zeiterfassung
+journalctl -u zeiterfassung -n 50 --no-pager
 
 # Test via Unix socket
 curl -s --unix-socket /run/zeiterfassung/zeiterfassung.sock http://localhost/login
 ```
 
-Database location is configurable via `ZEITERFASSUNG_DB` env var (default: `zeiterfassung.db` in working directory). Use `.venv/bin/python3` — `python` is not available. No test suite, no linting config.
+Database path is configurable via `ZEITERFASSUNG_DB` env var (default: `zeiterfassung.db` in working dir). Use `.venv/bin/python3` — `python` is not available. No test suite, no linting config.
 
 ## Architecture
 
-All business logic and routes live in a single `app.py` (~4,000 lines). The other modules are narrow:
+All business logic and routes live in a single `app.py` (~6,300 lines). Other modules are narrow:
 
-- **`db.py`** — `init_db()` creates all tables + runs inline `ALTER TABLE` migrations; `connect()` returns a `sqlite3.Row`-enabled connection with FK enforcement on; `seed_defaults()` inserts the three fixed absence types
+- **`db.py`** — `init_db()` creates all tables + runs inline `ALTER TABLE` migrations; `connect()` returns `sqlite3.Row`-enabled connection with FK enforcement; `seed_defaults()` inserts fixed absence types
 - **`auth.py`** — session-based auth with Werkzeug hashing; `@login_required` / `@admin_required` decorators; usernames stored/compared lowercase
-- **`templates.py`** — single `layout()` function that renders the full HTML shell including nav, CSS variables, and responsive styles; all page bodies are f-strings passed into `render_template_string` in `app.py`
-- **`calendar_seed.py`** — seeds NRW public holidays for 2026 on first run
+- **`templates.py`** — single `layout()` function rendering the full HTML shell (nav, CSS variables, responsive styles, back-button, impersonation banner); all page bodies are f-strings in `app.py`
+- **`calendar_seed.py`** — seeds NRW public holidays for 2026
 
-### Database Schema
+## Database Schema
 
 Key tables:
-- `users` → `user_schedules` (1:N validity-dated schedules; `_get_user_schedule_for_day()` picks the row active on a given date)
-- `user_schedule` — legacy single-schedule table; still present but superseded by `user_schedules`
-- `users` → `time_blocks` (multiple per day; the current model) + `time_entries` (legacy single-entry-per-day; still read for old data)
-- `users` → `absences` → `absence_types` (exactly three fixed types: Urlaub, Krank, Sonstige)
-- `absence_remarks` — per-user history of free-text remarks used with "Sonstige" absences
-- `calendar_days` — holiday/weekend flags keyed by ISO date + region (`DE-NW`)
 
-Removed tables (dropped via migration): `key_types`.
+| Table | Description |
+|-------|-------------|
+| `users` | User accounts; includes `tracking_start_date`, `contouring_enabled`, `contouring_start_date`, `vacation_carryover_exception` |
+| `user_schedules` | Validity-dated work schedules (1:N per user); `_get_user_schedule_for_day()` picks active row |
+| `time_blocks` | Multiple time blocks per day (current model) |
+| `time_entries` | Legacy single-entry-per-day; still read for old data |
+| `absences` | Linked to `absence_types` (exactly 3: Urlaub, Krank, Sonstige) |
+| `absence_remarks` | Per-user free-text remark history for Sonstige absences |
+| `calendar_days` | Holiday/weekend flags by ISO date + region (DE-NW) |
+| `contoured_days` | Days marked as contoured (user_id, day) |
+| `vacation_carryover_overrides` | Per-user/year carryover exceptions |
+| `weekend_exceptions` | Per-user exceptions allowing work on weekends/holidays |
 
-### Schedule System
+## Schedule System
 
-`workdays_mask` is a bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64. Default Mon–Fri = 31.
+`workdays_mask` bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64. Default Mon–Fri = 31.
 
-Two modes (`mode` column in `user_schedules`):
-- `weekly` — `weekly_minutes` divided evenly across the days that match `workdays_mask`. **The denominator is the count of mask-matching days in the week, ignoring holidays and absences** — holidays/absences cause those days to return Soll=0 via early returns, but do not inflate the Soll of other days.
+Two modes (`mode` in `user_schedules`):
+- `weekly` — `weekly_minutes` divided evenly across mask-matching days; holidays/absences return Soll=0 without inflating other days
 - `daily` — explicit per-weekday columns (`mon_minutes` … `sun_minutes`)
 
-### Balance Calculation
+## Balance Calculation
 
-`_expected_minutes_for_day(user_id, iso_day)` priority order:
-1. Manual per-day override (stored in `time_entries.expected_minutes` or an override table)
-2. Holiday/weekend block → 0
-3. Mask check → 0
-4. Absence check → 0
-5. Schedule-based computation
+`_expected_minutes_for_day(user_id, iso_day)` priority:
+1. Holiday/weekend → 0
+2. Mask check → 0
+3. Absence check → 0
+4. Schedule-based computation
 
-`_calc_balance()` and `_calc_balance_end_at()` iterate days and accumulate `actual − expected`. **Flextag special rule**: if a day is a "Sonstige/Flextag" absence and is in the past, `_scheduled_minutes_ignoring_absence()` is called to get the day's planned Soll, and that amount is additionally subtracted from the running balance (the day "consumes" saved overtime). Future Flextag days have no effect on the balance.
+`_calc_balance_end_at(user_id, end_iso)` iterates **all days** via `_iter_days(start_iso, end_iso)` — identical logic to `balance_view`. Respects `tracking_start_date`. Dashboard and Details always show the same value.
 
-`balance_view` always computes from Jan 1 of the selected year and filters display to the chosen month, ensuring cumulative correctness.
+**Flextag rule**: past Flextag days deduct additionally `_scheduled_minutes_ignoring_absence()` from the running balance.
 
-### Absence Types
+## Contour System
 
-Hardcoded to exactly three types (enforced at DB seed + migration time):
-- **Urlaub** — no comment required; shown in absence list without Bemerkung column
-- **Krank** — same
-- **Sonstige** — requires a Bemerkung (comment); stored in `absences.comment`; per-user remark history saved to `absence_remarks`; preset suggestions: `FIXED_REMARKS = ["Flextag", "Verdi"]`
+- `contoured_days` table: (user_id, day)
+- `_get_contoured_days()` — set of contoured days for a date range
+- `_get_uncontoured_days()` — past workdays with entries not yet contoured (respects `contouring_start_date`)
+- `POST /api/contour` — toggle single day
+- `POST /api/contour-until` — bulk contour up to a date
+- Only active when `contouring_enabled = 1` for the user
 
-### Route Groups
+## Tracking Start Date
+
+`tracking_start_date` on users table: no entries, absences, or closures possible before this date. Default: 2026-01-01. Affects:
+- Kalender (days before are disabled)
+- Balance calculation start
+- Missing entries check
+- Jahresabschluss: only months from tracking_start_date must be closed
+
+## Impersonation (Admin)
+
+Admin can act as another user:
+- `POST /admin/impersonate/<user_id>` — sets `session['impersonator_id']`
+- `POST /admin/impersonate/stop` — restores admin session
+- Orange banner shown on all pages during impersonation
+- Admins cannot impersonate other admins
+
+## Route Groups
 
 | Prefix | Description |
-|---|---|
+|--------|-------------|
 | `/setup`, `/login`, `/logout` | Auth |
-| `/`, `/presence` | Dashboard / current week |
+| `/`, | Dashboard |
 | `/day/<YYYY-MM-DD>` | Day detail, time block CRUD |
-| `/balance` | Running balance with month/year selector, absence summary, Flextag deduction |
+| `/balance` | Gleitzeitkonto with month/year selector |
 | `/absences` | Absence CRUD |
 | `/business_trips` | Business trip CRUD |
 | `/calendar` | Month calendar view |
-| `/settings` | User preferences, schedule |
+| `/settings` | User preferences (accordion: personal, vacation, schedule, contouring) |
+| `/periods` | Month/year close |
 | `/export/*` | CSV exports |
-| `/admin/users` | User management only (absence-types and key-types admin removed) |
+| `/admin/*` | Admin: users, schedules, vacation overrides, impersonation |
+| `/api/contour*` | Contouring API |
+
+## UI Conventions
+
+- All buttons use `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger` classes
+- Back button (`← Zurück`, `history.back()`) on all navigable pages — defined once in `layout()` in `templates.py`
+- Timepicker: 15-minute steps enforced on both frontend (rounding on blur) and backend
+- Mobile: responsive layout, same routes, compact Gleitzeitkonto table view
+- CSS variables for theming: `--accent`, `--ok`, `--danger`, `--mu`, `--surface`, `--surface2`, `--text`
+- App version: `APP_VERSION = "v4.6.6"` at top of `app.py`
+
+## Important Implementation Notes
+
+- Zeitschema overlaps: warn user when new schedule overlaps existing one
+- Jahresabschluss: skip months before `tracking_start_date` — they must not block the close
+- Gleitzeitkonto table: multiple time_blocks per day → first row shows Tag+Datum+Delta, subsequent rows blank Tag+Datum, no Delta
+- `_calc_balance_end_at` must stay in sync with `balance_view` logic — both use `_iter_days`
