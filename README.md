@@ -1,6 +1,6 @@
-# Zeiterfassung v4.6.6
+# Zeiterfassung v1.0.0
 
-Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion und Admin-Benutzerverwaltung.
+Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail und einem umfassenden Admin-Bereich.
 
 ---
 
@@ -8,17 +8,18 @@ Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von 
 
 1. [Erste Schritte](#erste-schritte)
 2. [Übersicht (Startseite)](#übersicht-startseite)
-3. [Zeiterfassung](#zeiterfassung)
+3. [Zeiterfassung (Tagesansicht)](#zeiterfassung-tagesansicht)
 4. [Kalender](#kalender)
 5. [Gleitzeitkonto](#gleitzeitkonto)
 6. [Abwesenheiten](#abwesenheiten)
 7. [Dienstreisen](#dienstreisen)
 8. [Kontierung](#kontierung)
 9. [Einstellungen](#einstellungen)
-10. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
-11. [Admin-Bereich](#admin-bereich)
-12. [Technischer Betrieb](#technischer-betrieb)
-13. [Versionshistorie](#versionshistorie)
+10. [Export](#export)
+11. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
+12. [Admin-Bereich](#admin-bereich)
+13. [Technischer Betrieb](#technischer-betrieb)
+14. [Versionshistorie](#versionshistorie)
 
 ---
 
@@ -50,6 +51,7 @@ Vollständig auf Deutsch. Datum: **TT.MM.JJJJ**, Uhrzeiten: **HH:MM** (15-Minute
 ## Übersicht (Startseite)
 
 ### Button-Leiste oben
+
 - **Zeiterfassung** – Direktlink zur Tagesansicht heute
 - **Kalender** – Direktlink zur Kalenderansicht
 
@@ -68,22 +70,29 @@ Vollständig auf Deutsch. Datum: **TT.MM.JJJJ**, Uhrzeiten: **HH:MM** (15-Minute
 
 ---
 
-## Zeiterfassung
+## Zeiterfassung (Tagesansicht)
 
-### Tagesansicht (`/day/JJJJ-MM-TT`)
+Aufruf unter `/day/JJJJ-MM-TT`. Kompaktes 2-Spalten-Grid auf Desktop (Zeit links | Abwesenheit rechts).
 
-**Reihenfolge der Sektionen:**
-1. Zeitblock hinzufügen
-2. Vorhandene Zeitblöcke
-3. Abwesenheit hinzufügen
-4. Vorhandene Abwesenheiten
-5. Dienstreise
+### Header
 
-Mehrere Zeitblöcke pro Tag möglich. Gehen-Zeit ist Pflichtfeld. Alle Zeiteingaben in 15-Minuten-Schritten.
+Wochentag + Datum mit ◀ / ▶ Navigation. Soll / Ist / Δ-Badges direkt im Header.
+
+### Zeitblöcke
+
+Mehrere Zeitblöcke pro Tag möglich. Formular: Kommen + Gehen + Pause in einer Zeile, Speichern-Button direkt daneben. Alle Zeiteingaben in 15-Minuten-Schritten.
+
+### Abwesenheit
+
+Typ-Auswahl und ½-Tag-Checkbox in einer Zeile. Bestehende Abwesenheit wird nicht überschrieben.
 
 ### Wochenende / Feiertage
 
-Erfassung standardmäßig blockiert. „Ausnahme setzen"-Button ermöglicht trotzdem speichern.
+Erfassung standardmäßig blockiert. Kompakter Hinweisbanner mit „Ausnahme setzen"-Button direkt daneben.
+
+### Dienstreise
+
+Ort + Datum + Mehrtägig-Checkbox in einer Zeile. Zeiten (Abreise, Ziel, Rückreise, Zuhause) in einer Zeile.
 
 ---
 
@@ -108,16 +117,16 @@ Aufruf unter `/balance`. Tageweise Auflistung mit Jahr-/Monatsauswahl.
 
 ### Spalten
 
-Tag | Datum | Beginn | Ende | Pause | Soll | Delta | (Desktop: kum. Saldo)
+Tag | Datum | Beginn | Ende | Pause | Soll | Delta | (Desktop: kum. Saldo + Status)
 
-- Mehrere Zeitblöcke: nur erste Zeile zeigt Tag + Datum
+- Mehrere Zeitblöcke: erste Zeile zeigt Tag + Datum, Folgezeilen leer
 - Wochenenden + Feiertage: dezent (gedimmt)
 - Urlaub/Krank/Feiertag: farbiges Badge
 - Klick auf Zeile → Tages-Editor
 
 ### Saldo-Berechnung
 
-Iteriert über alle Tage ab `tracking_start_date` bis heute. Identisch mit der Detailansicht. Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
+Iteriert über alle Tage ab `tracking_start_date` bis heute. Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
 
 ---
 
@@ -173,27 +182,71 @@ Aufruf unter `/settings`. 4 Accordion-Bereiche:
 
 ---
 
+## Export
+
+Aufruf unter `/export`.
+
+### Download (CSV)
+
+Zeitraum wählbar (Datepicker + Schnellwahl: Akt. Monat / Letzter Monat / Akt. Jahr / Letztes Jahr).
+
+Verfügbare Exporte: Zeitblöcke · Abwesenheiten · Dienstreisen · Gleitzeitkonto · Feiertage · Benutzer (Admin)
+
+### CSV-Format (Zeitblöcke)
+
+Spalten wie im Gleitzeitkonto: **Wochentag | Datum | Beginn | Ende | Pause (min) | Soll | Delta | Bemerkung**
+
+- Bemerkung: Feiertagsname, Abwesenheitstyp, Dienstreise-Ort (kombinierbar mit `|`)
+- Mehrere Blöcke pro Tag: erste Zeile mit Soll/Delta/Bemerkung, Folgezeilen nur Beginn/Ende/Pause
+- Encoding: UTF-8 mit BOM (Excel-kompatibel), Trennzeichen: Semikolon
+
+### Per E-Mail senden
+
+Zeitraum aus dem Datepicker wird übernommen. Empfänger vorausgefüllt mit hinterlegter E-Mail. Exporttyp: Zeitblöcke oder Abwesenheiten. Admin kann Benutzer auswählen.
+
+---
+
 ## Monats- und Jahresabschluss
 
 Aufruf unter `/periods`.
 
 - Abgeschlossene Monate sperren alle Einträge
-- **Jahresabschluss**: Nur Monate ab `tracking_start_date` müssen abgeschlossen sein – Monate vor Arbeitsbeginn blockieren nicht
-- Entsperren: nur durch Admins
+- **Jahresabschluss**: Nur Monate ab `tracking_start_date` müssen abgeschlossen sein
+- Entsperren: nur durch Admins (über Admin-Bereich)
 
 ---
 
 ## Admin-Bereich
 
-Aufruf unter `/admin`.
+Aufruf unter `/admin`. Accordion-Layout mit 5 Bereichen:
 
-### Benutzerverwaltung
+### 1. Benutzerverwaltung
 
-- Neue User anlegen (mit Arbeitsbeginn-Datum)
+- Neue User anlegen (inline, per Button einblenden)
 - Passwörter zurücksetzen · Admin-Rechte · Deaktivieren/Löschen
 - **Identität annehmen**: Als anderer User agieren (oranger Banner + „Zurück zu Admin")
-- Zeitschema-Verwaltung pro User (Bearbeiten/Löschen/Überlappungswarnung)
-- Urlaubsübertrag-Ausnahme pro User
+
+### 2. Zeitschemas
+
+- Übersicht aller User mit aktuellem Soll-Wert
+- Link zu Zeitschema-Verwaltung pro User (Bearbeiten/Löschen/Neu anlegen)
+
+### 3. Urlaubsverwaltung
+
+- Übersicht aller User mit Ausnahme-Kennzeichnung
+- Übertrag-Ausnahme: ob Resturlaub am 31.03. verfällt oder unbegrenzt gilt
+
+### 4. Abschlüsse
+
+- Monats- und Jahresabschlüsse aller User mit Jahr-Auswahl
+- Status pro User (Keine / X Monate / Jahr abgeschlossen)
+- Alle Abschlüsse eines Users für ein Jahr entsperren
+
+### 5. Maileinstellungen
+
+- SMTP-Konfiguration (Server, Port, Benutzername, Passwort, Absender)
+- Einstellungen werden in der DB gespeichert (Fallback: Umgebungsvariablen)
+- Test-Mail an beliebige Adresse senden
 
 ### Schutzregeln
 
@@ -225,11 +278,23 @@ journalctl -u zeiterfassung -f
 cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 ```
 
+### SMTP-Konfiguration
+
+Entweder über den Admin-Bereich (Maileinstellungen) oder via Umgebungsvariablen in der systemd-Unit:
+
+```
+Environment="MAIL_SERVER=mail.beispiel.de"
+Environment="MAIL_PORT=587"
+Environment="MAIL_USERNAME=user@beispiel.de"
+Environment="MAIL_PASSWORD=geheim"
+Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
+```
+
 ### Architektur
 
 | Datei | Beschreibung |
 |-------|-------------|
-| `app.py` | Alle Routes und Business-Logik (~6.300 Zeilen) |
+| `app.py` | Alle Routes und Business-Logik (~8.000 Zeilen) |
 | `db.py` | Datenbankinitialisierung und Migrationen |
 | `auth.py` | Session-basierte Authentifizierung |
 | `templates.py` | HTML-Layout-Wrapper (f-strings) |
@@ -239,102 +304,32 @@ cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 
 ## Versionshistorie
 
-### v4.6.6
-- Wochenende-Widget an kompaktes Zeiterfassungs-Design angepasst
-
-### v4.6.5
-- Zeiterfassung Redesign: kompakteres Layout, Widgets nebeneinander (Desktop)
-
-### v4.6.4
-- Einstellungen Redesign: 4 Accordion-Bereiche
-
-### v4.6.3
-- Dienstreisen: Datum-Link entfernt, Button-Design angepasst
-
-### v4.6.2
-- Kontieren-Button vereinheitlicht, Soll-Spalte im Gleitzeitkonto, Feiertage dezent
-
-### v4.6.1
-- Alle Buttons vereinheitlicht (.btn-primary/.btn-secondary/.btn-danger)
-
-### v4.6.0
-- Kritischer Server-Error behoben, globale Button-Vereinheitlichung
-
-### v4.5.9
+### v1.0.0
+- Admin-Bereich zusammengefasst: Accordion-Layout mit 5 Bereichen (Benutzer, Zeitschemas, Urlaub, Abschlüsse, Mail)
+- CSV-Export per E-Mail (Zeitblöcke + Abwesenheiten)
+- Neues CSV-Format: Wochentag|Datum|Beginn|Ende|Pause|Soll|Delta|Bemerkung
+- Admin Maileinstellungen: SMTP-Konfiguration in DB gespeichert, Verbindungstest
+- Tagesansicht Redesign: kompaktes 2-Spalten-Grid, Soll/Ist/Δ im Header
+- Einstellungen als Accordion (4 Bereiche)
+- Button-Design vereinheitlicht (btn, btn-primary, btn-danger, btn-sm, btn-lg)
 - Zurück-Button auf allen Seiten
+- Mobile Timepicker: 15-Minuten-Schritte erzwungen
+- Soll-Spalte im Gleitzeitkonto, Feiertage dezent gedimmt
+- Wochenende/Feiertag-Widget: kompakter Inline-Banner
 
-### v4.5.8
-- Desktop Übersicht: 4er-Grid, Kontierung kompakt
+### v4.6.x (Basis)
+- v4.6.6: Wochenende-Widget angepasst
+- v4.6.5: Zeiterfassung Redesign kompakt
+- v4.6.4: Einstellungen Accordion
+- v4.6.3: Dienstreisen Button-Fix
+- v4.6.2: Soll-Spalte, Feiertage gedimmt
+- v4.6.1: Button-Vereinheitlichung
+- v4.6.0: Kritischer Bug behoben
+- v4.5.x: Zurück-Button, Dashboard Grid, Timepicker-Fixes
 
-### v4.5.7
-- Übersicht Redesign: Buttons oben, Links→Buttons, kompaktere Salden
-
-### v4.5.6
-- Mobile Timepicker: nur 15-Minuten-Schritte
-
-### v4.5.5
-- Fix Gehen-Feld Validierungs-Bug Mobile
-
-### v4.5.4
-- Tages-Editor: Sektionen-Reihenfolge + Zurück-Button
-
-### v4.5.3
-- Desktop Gleitzeitübersicht: einheitliches Layout mit Mobile
-
-### v4.5.2
-- Mobile Gleitzeitübersicht: mehrere Zeitblöcke pro Tag
-
-### v4.5.1
-- Mobile Gleitzeitübersicht: kompaktes Spalten-Layout
-
-### v4.5.0
-- Kontierung aktivieren/deaktivieren mit Startdatum
-
-### v4.4.9
-- Urlaub-Übertrag Ausnahme-Regelung pro User
-
-### v4.4.8
-- Admin Identitätswechsel (Impersonation)
-
-### v4.4.7
-- Dashboard-Saldo identisch mit Details (_iter_days)
-
-### v4.4.6
-- Gleitzeitkonto: Wochentag, farbige Werte, Link zur Zeiterfassung
-
-### v4.4.5
-- Zeitschema-Verwaltung: Bearbeiten + Löschen
-
-### v4.4.4
-- Gleitzeitkonto: Status-Badges, dezente Zeilen
-
-### v4.4.3
-- Gleitzeitkonto: Wochentag eingeblendet
-
-### v4.4.2
-- Gleitzeitkonto: positive grün, negative rot
-
-### v4.4.1
-- Zeitschema bearbeiten/löschen
-
-### v4.4.0
-- Zeitraum-Filterung nach Arbeitsbeginn, Jahresabschluss-Fix
-
-### v4.3.9
-- Anfangsdatum-Validierung
-
-### v4.3.8
-- Ausnahme-Funktion Wochenende/Feiertag
-
-### v4.3.7
-- Kalender-Layout: Urlaub auf gleicher Höhe
-
-### v4.3.0 – v4.3.6
-- Kontierungsfunktion eingeführt und verfeinert
-
-### v4.2.0 – v4.2.1
-- Einheitlicher Timepicker, 15-Minuten-Schritte, Bugfixes
+### v4.4.x – v4.5.x (Vorarbeit)
+- Kontierungsfunktion, Admin-Identitätswechsel, Gleitzeitkonto-Redesign, Zeitschema-Verwaltung, Urlaubsübertrag-Ausnahme, Wochenend-Ausnahmen
 
 ---
 
-*Zeiterfassung v4.6.6 – Flask + SQLite – NRW*
+*Zeiterfassung v1.0.0 – Flask + SQLite – NRW*
