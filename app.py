@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.0.2"
+APP_VERSION = "v1.0.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3983,8 +3983,8 @@ def calendar_year_list():
     db = connect()
 
     hol_rows = db.execute(
-        "SELECT day, is_holiday, holiday_name FROM calendar_days"
-        " WHERE region='DE-NW' AND day>=? AND day<=?",
+        "SELECT day, is_holiday, is_weekend, holiday_name FROM calendar_days"
+        " WHERE day>=? AND day<=?",
         (y_start, y_end),
     ).fetchall()
     hol_map = {str(r["day"])[:10]: r for r in hol_rows}
