@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.4"
+APP_VERSION = "v4.6.5"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -4482,6 +4482,9 @@ def day_detail(day: str):
     for b in blocks:
         total += (_minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0))
 
+    expected_min = _expected_minutes_for_day(u["id"], day)
+    delta_min = total - expected_min
+
     # exception banner data
     sched_day = _get_user_schedule(u["id"])
     is_blocked_day = (
@@ -4501,63 +4504,107 @@ def day_detail(day: str):
 
     day_locked = _is_day_locked(u["id"], day)
 
-    blocks_html = ""
+    _WD_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    weekday_de = _WD_DE[dcur.weekday()]
+    date_de = _fmt_date_de(day)
+
+    # Soll/Ist/Delta badges
+    soll_str = _fmt_minutes(expected_min) if expected_min else "–"
+    ist_str  = _fmt_minutes(total) if total else "–"
+    if expected_min == 0 and total == 0:
+        delta_html = ""
+    else:
+        delta_str = _fmt_minutes_signed(delta_min)
+        delta_cls = "pos" if delta_min >= 0 else "neg"
+        delta_html = f"<span class='day-stat {delta_cls}'>Δ&thinsp;<b>{delta_str}</b></span>"
+
+    # Existing time blocks — compact table rows
+    blocks_rows = ""
     for b in blocks:
         mins = _minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0)
+        cmt_td = f"<span class='day-cmt'>{b['comment']}</span>" if b["comment"] else ""
         if day_locked:
-            actions = ""
+            act_td = ""
         else:
-            actions = (
-                f"<div style='display:flex;gap:6px;align-items:center;'>"
-                f"<a class='btn btn-sm' href='/day/{day}/block/{b['id']}/edit'>Bearbeiten</a>"
-                f"<form method='post' action='/day/{day}/block/delete' style='display:contents;' onsubmit=\"return confirm('Zeitblock wirklich löschen?');\">"
+            act_td = (
+                f"<a class='btn btn-sm' href='/day/{day}/block/{b['id']}/edit' style='padding:2px 7px;'>✎</a>"
+                f"<form method='post' action='/day/{day}/block/delete' style='display:contents;'"
+                f" onsubmit=\"return confirm('Zeitblock wirklich löschen?');\">"
                 f"<input type='hidden' name='block_id' value='{b['id']}'>"
-                f"<button class='btn danger btn-sm' type='submit'>Löschen</button></form></div>"
+                f"<button class='btn danger btn-sm' type='submit' style='padding:2px 7px;'>✕</button></form>"
             )
-        cmt = f"<div class='small'>{b['comment']}</div>" if b["comment"] else ""
-        blocks_html += (
-            f"<div class='card' style='margin-top:10px;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;'>"
-            f"<div><b>{b['time_in']}–{b['time_out']}</b> · Pause {int(b['break_minutes'] or 0)} min"
-            f" · <b>{_fmt_minutes(mins)}</b></div>"
-            f"{actions}</div>{cmt}</div>"
+        blocks_rows += (
+            f"<tr>"
+            f"<td>{b['time_in']}</td><td>{b['time_out']}</td>"
+            f"<td style='color:var(--mu);'>{int(b['break_minutes'] or 0)}m</td>"
+            f"<td><b>{_fmt_minutes(mins)}</b></td>"
+            f"<td>{cmt_td}</td>"
+            f"<td><div style='display:flex;gap:4px;'>{act_td}</div></td>"
+            f"</tr>"
         )
 
-    abs_html = ""
+    if blocks_rows:
+        blocks_content = (
+            f"<div class='table-scroll'><table class='day-ct'>"
+            f"<colgroup><col><col><col><col style='min-width:52px'><col style='min-width:60px'><col></colgroup>"
+            f"<thead><tr><th>Von</th><th>Bis</th><th>Pause</th><th>Netto</th><th>Notiz</th><th></th></tr></thead>"
+            f"<tbody>{blocks_rows}</tbody></table></div>"
+            f"<div class='day-total'>Gesamt: <b>{_fmt_minutes(total)}</b></div>"
+        )
+    else:
+        blocks_content = "<div class='day-empty'>Keine Zeitblöcke erfasst.</div>"
+
+    # Existing absence — compact info
     if abs_row:
-        abs_html = f"""
-        <div class="card" style="margin-top:10px;">
-          <b>Abwesenheit:</b> <span style="display:inline-block;width:10px;height:10px;background:{abs_row['type_color'] or '#999'};border-radius:2px;margin-right:6px;"></span>{abs_row['type_name']}{" (1/2)" if abs_row['is_half_day'] else ""}
-          {f"<div class='small'>{abs_row['comment']}</div>" if abs_row['comment'] else ""}
-          <div class="small" style="margin-top:6px;color:#777;">Abwesenheiten bearbeitest du im Modul "Abwesenheiten".</div>
-        </div>
-        """
+        dot = f"<span style='display:inline-block;width:9px;height:9px;background:{abs_row['type_color'] or '#999'};border-radius:2px;margin-right:5px;vertical-align:middle;'></span>"
+        half = " <span style='color:var(--mu);font-size:12px;'>(½ Tag)</span>" if abs_row['is_half_day'] else ""
+        cmt_abs = f"<div style='font-size:12px;color:var(--mu);margin-top:3px;'>{abs_row['comment']}</div>" if abs_row['comment'] else ""
+        abs_content = (
+            f"<div style='display:flex;align-items:center;gap:6px;flex-wrap:wrap;'>"
+            f"{dot}<b>{abs_row['type_name']}</b>{half}</div>"
+            f"{cmt_abs}"
+            f"<div style='font-size:11px;color:var(--mu);margin-top:5px;'>Änderungen über → Abwesenheiten</div>"
+        )
+    else:
+        abs_content = "<div class='day-empty'>Keine Abwesenheit.</div>"
 
     abs_opts = "".join([f"<option value='{t['id']}'>{t['name']}</option>" for t in abs_types])
     abs_sonstige_id_js = abs_sonstige_id
     abs_remark_html = _remark_select_html(abs_user_remarks, pfx="d_")
 
     _lock_notice = (
-        "<div class='card' style='margin-top:10px;background:var(--sf);border-color:var(--bd);'>"
-        "<p style='margin:0;'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. "
-        "<a href=\"/periods\">Abschlüsse verwalten</a></p></div>"
+        "<div class='day-lock'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. "
+        "<a href='/periods'>Abschlüsse verwalten</a></div>"
     ) if day_locked else ""
 
-    _add_block_form = "" if day_locked else f"""
-    <div class="card" style="margin-top:10px;">
-      <h3 style="margin-top:0;">Zeitblock hinzufügen</h3>
+    # Compact add-block form
+    _add_block_form_html = "" if day_locked else f"""
       <form method="post" action="/day/{day}/block/add" id="block-add-form" novalidate onsubmit="return validateBlockForm(this)">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <div><label>Kommen</label><br><input class="tin" id="tin_add" name="time_in" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
-          <div><label>Gehen</label><br><input class="tout" id="tout_add" name="time_out" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
-          <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
-<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='30'">30</button><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='45'">45</button><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
+        <div class="tb-row">
+          <div class="tb-field">
+            <label>Kommen</label>
+            <input class="tin" id="tin_add" name="time_in" type="time" list="time_suggestions" required>
+          </div>
+          <div class="tb-field">
+            <label>Gehen</label>
+            <input id="tout_add" name="time_out" type="time" list="time_suggestions" required>
+          </div>
+          <div class="tb-field">
+            <label>Pause&thinsp;(min)</label>
+            <input id="brk_day_add" name="break_minutes" type="number" min="0" value="0" style="width:60px;" required>
+            <div class="brk-btns">
+              <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='30'">30</button>
+              <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='45'">45</button>
+              <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='60'">60</button>
+            </div>
+          </div>
+          <button class="btn primary btn-sm" type="submit" style="align-self:flex-end;white-space:nowrap;">+ Speichern</button>
         </div>
-        <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
-        <div id="block-add-err" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:13px;"></div>
-        <button class="btn" type="submit" style="margin-top:10px;">Speichern</button>
+        <div style="margin-top:6px;">
+          <input name="comment" placeholder="Kommentar (optional)" style="width:100%;font-size:13px;padding:5px 8px;">
+        </div>
+        <div id="block-add-err" style="display:none;margin-top:6px;padding:5px 9px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:12px;"></div>
       </form>
-    </div>
 <script>
 function validateBlockForm(form) {{
   var tin  = form.querySelector('[name="time_in"]');
@@ -4569,8 +4616,8 @@ function validateBlockForm(form) {{
     return false;
   }}
   var tval = /^\\d{{2}}:\\d{{2}}$/;
-  if (!tin.value || !tval.test(tin.value))  return showErr('Bitte gültige Kommen-Zeit im Format HH:MM eingeben.');
-  if (!tout.value || !tval.test(tout.value)) return showErr('Bitte gültige Gehen-Zeit im Format HH:MM eingeben.');
+  if (!tin.value || !tval.test(tin.value))  return showErr('Kommen fehlt oder ungültig (HH:MM).');
+  if (!tout.value || !tval.test(tout.value)) return showErr('Gehen fehlt oder ungültig (HH:MM).');
   var s = parseInt(tin.value.replace(':',''),10);
   var e = parseInt(tout.value.replace(':',''),10);
   if (e <= s) return showErr('Gehen muss nach Kommen liegen.');
@@ -4579,19 +4626,20 @@ function validateBlockForm(form) {{
 }}
 </script>"""
 
-    _add_absence_form = "" if day_locked else f"""
-    <div class="card" style="margin-top:10px;">
-      <h3 style="margin-top:0;">Abwesenheit hinzufügen (optional)</h3>
+    # Compact add-absence form
+    _add_absence_form_html = "" if day_locked else f"""
       <form method="post" action="/day/{day}/absence/add">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
-          <div><label>Typ</label><br><select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select></div>
-          <label style="margin-left:8px;"><input type="checkbox" name="is_half_day" value="1"> halber Tag</label>
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
+          <div class="tb-field" style="flex:1;min-width:120px;">
+            <label>Typ</label>
+            <select name="type_id" id="day_type_sel" required onchange="syncDayBemerkung(this)">{abs_opts}</select>
+          </div>
+          <label style="font-size:13px;padding-bottom:6px;white-space:nowrap;font-weight:400;"><input type="checkbox" name="is_half_day" value="1"> ½ Tag</label>
+          <button class="btn primary btn-sm" type="submit" style="white-space:nowrap;">+ Speichern</button>
         </div>
-        <div id="d_remark_row" style="display:none;margin-top:8px;">{abs_remark_html}</div>
-        <button class="btn" type="submit" style="margin-top:10px;">Abwesenheit speichern</button>
+        <div id="d_remark_row" style="display:none;">{abs_remark_html}</div>
       </form>
-      <div class="small" style="margin-top:6px;color:#777;">Wenn bereits eine Abwesenheit existiert, wird keine neue angelegt.</div>
-    </div>
+      <div style="font-size:11px;color:var(--mu);margin-top:4px;">Bereits vorhandene Abwesenheit wird nicht überschrieben.</div>
 <script>
 {_REMARK_JS}
 function syncDayBemerkung(sel) {{
@@ -4604,60 +4652,191 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
 
     body = f"""
     {flash_html()}
-
-<script>
-  function syncTimeMin(startId, endId){{
-    try{{
-      const s = document.getElementById(startId);
-      const e = document.getElementById(endId);
-      if(!s || !e) return;
-      if(s.value){{
-        e.min = s.value;
-        if(e.value && e.value <= s.value){{ e.value = ''; }}
-      }} else {{ e.min = ''; }}
-    }}catch(_){{}}
-  }}
-  function setBreak(id, val){{
-    const el = document.getElementById(id);
-    if(!el) return;
-    el.value = String(val);
-  }}
-</script>
-
     {FORM_ASSETS_JS}
-
     {_timepicker_datalist('time_suggestions')}
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <button class="btn btn-sm" type="button" onclick="goBack()">← Zurück</button>
-          <h3 style="margin:0;">Tages-Editor – {day}</h3>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <a class="btn" href="/day/{prev_day}">◀︎ Vorheriger Tag</a>
-          <a class="btn" href="/calendar?y={day[:4]}&m={int(day[5:7])}">Kalender</a>
-          <a class="btn" href="/day/{next_day}">Nächster Tag ▶︎</a>
+<style>
+/* ── Day editor compact ── */
+.day-hdr{{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 0 10px;border-bottom:1px solid var(--bd);margin-bottom:10px;}}
+.day-hdr-l{{display:flex;align-items:center;gap:6px;}}
+.day-nav{{display:flex;align-items:center;gap:4px;}}
+.day-title{{font-weight:700;font-size:17px;}}
+.day-sub{{color:var(--mu);font-size:13px;margin-left:4px;}}
+.day-hdr-r{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}}
+.day-stat{{font-size:12px;padding:3px 7px;background:var(--sf);border:1px solid var(--bd);border-radius:5px;white-space:nowrap;}}
+.day-stat.pos{{color:var(--ok);border-color:rgba(22,163,74,.35);background:rgba(22,163,74,.07);}}
+.day-stat.neg{{color:var(--danger);border-color:rgba(220,38,38,.3);background:rgba(220,38,38,.06);}}
+.day-grid{{display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:10px;}}
+@media(min-width:640px){{.day-grid{{grid-template-columns:1fr 1fr;}}}}
+.day-col{{display:flex;flex-direction:column;gap:8px;}}
+.day-sec{{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;}}
+.day-sec-hdr{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);padding:7px 12px;border-bottom:1px solid var(--bd);background:var(--bg);}}
+.day-sec-body{{padding:10px 12px;}}
+.day-ct td,.day-ct th{{padding:4px 6px;font-size:13px;}}
+.day-ct th{{font-size:11px;}}
+.day-ct tr:last-child td{{border-bottom:none;}}
+.day-total{{font-size:13px;padding:5px 6px;color:var(--mu);border-top:1px solid var(--bd);margin-top:2px;}}
+.day-empty{{font-size:13px;color:var(--mu);padding:4px 0;}}
+.day-cmt{{font-size:11px;color:var(--mu);}}
+.day-lock{{padding:9px 12px;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);font-size:13px;margin-bottom:8px;}}
+.tb-row{{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}}
+.tb-field{{display:flex;flex-direction:column;gap:2px;}}
+.tb-field label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mu);margin-bottom:0;}}
+.tb-field input[type=time]{{min-width:90px;font-size:14px;padding:5px 7px;}}
+.tb-field select{{font-size:14px;padding:5px 7px;}}
+.brk-btns{{display:flex;gap:3px;margin-top:3px;}}
+.brk-btns .btn{{padding:2px 6px;font-size:11px;}}
+.day-trip{{margin-bottom:0;}}
+.day-trip .day-sec-body label{{font-size:12px;margin-bottom:2px;}}
+.day-trip .day-sec-body input,.day-trip .day-sec-body select,.day-trip .day-sec-body textarea{{font-size:13px;padding:5px 8px;}}
+</style>
+
+    <!-- Day header -->
+    <div class="day-hdr">
+      <div class="day-hdr-l">
+        <div class="day-nav">
+          <a class="btn btn-sm" href="/day/{prev_day}" title="Vorheriger Tag">◀</a>
+          <div style="margin:0 4px;">
+            <span class="day-title">{weekday_de}</span>
+            <span class="day-sub">{date_de}</span>
+          </div>
+          <a class="btn btn-sm" href="/day/{next_day}" title="Nächster Tag">▶</a>
         </div>
       </div>
-      <p class="small">Mehrere Zeitblöcke pro Tag möglich. Netto-Summe: <b>{_fmt_minutes(total)}</b></p>
+      <div class="day-hdr-r">
+        <span class="day-stat">Soll&thinsp;<b>{soll_str}</b></span>
+        <span class="day-stat">Ist&thinsp;<b>{ist_str}</b></span>
+        {delta_html}
+        <a class="btn btn-sm" href="/calendar?y={day[:4]}&m={int(day[5:7])}">Kalender</a>
+      </div>
     </div>
 
     {_exception_banner(day, is_blocked_day, exc_row, day_locked)}
     {_lock_notice}
 
-    {_add_block_form}
+    <!-- Main grid: Zeit | Abwesenheit -->
+    <div class="day-grid">
 
-    <h3 style="margin-top:14px;">Vorhandene Zeitblöcke</h3>
-    {blocks_html or "<div class='small' style='color:#777;'>Keine Zeitblöcke erfasst.</div>"}
+      <!-- Left column: Zeit -->
+      <div class="day-col">
+        <div class="day-sec">
+          <div class="day-sec-hdr">Zeitblock hinzufügen</div>
+          <div class="day-sec-body">
+            {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
+          </div>
+        </div>
+        <div class="day-sec">
+          <div class="day-sec-hdr">Vorhandene Zeitblöcke</div>
+          <div class="day-sec-body" style="padding:8px 12px;">
+            {blocks_content}
+          </div>
+        </div>
+      </div>
 
-    {_add_absence_form}
+      <!-- Right column: Abwesenheit -->
+      <div class="day-col">
+        <div class="day-sec">
+          <div class="day-sec-hdr">Abwesenheit hinzufügen</div>
+          <div class="day-sec-body">
+            {_add_absence_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
+          </div>
+        </div>
+        <div class="day-sec">
+          <div class="day-sec-hdr">Vorhandene Abwesenheit</div>
+          <div class="day-sec-body">
+            {abs_content}
+          </div>
+        </div>
+      </div>
 
-    <h3 style="margin-top:14px;">Vorhandene Abwesenheit</h3>
-    {abs_html or "<div class='small' style='color:#777;'>Keine Abwesenheit an diesem Tag.</div>"}
+    </div>
 
-    {_business_trip_section(day, trip, locked=day_locked)}
+    <!-- Business trip: full width -->
+    <div class="day-sec day-trip">
+      {_business_trip_section_compact(day, trip, locked=day_locked)}
+    </div>
     """
-    return render_template_string(layout("Tages-Editor", body, u, APP_VERSION))
+    return render_template_string(layout("Tages-Editor", body, u, APP_VERSION, show_back=False))
+
+
+def _business_trip_section_compact(day: str, trip, locked: bool = False) -> str:
+    """Compact Dienstreise card for the redesigned day editor."""
+    t = dict(trip) if trip else {}
+    trip_id   = t.get("id") or ""
+    dest      = t.get("destination") or ""
+    dep       = t.get("departure_time") or ""
+    dep_e     = t.get("departure_end_time") or ""
+    ret       = t.get("return_time") or ""
+    ret_e     = t.get("return_end_time") or ""
+    notes     = t.get("notes") or ""
+    start_iso = str(t.get("start_date") or day)[:10]
+    end_iso   = str(t.get("end_date") or start_iso)[:10]
+    is_multi  = (start_iso != end_iso)
+    multi_checked = "checked" if is_multi else ""
+    multi_display = "" if is_multi else "none"
+
+    delete_btn = ""
+    if trip_id and not locked:
+        delete_btn = (
+            f"<form method='post' action='/day/{day}/business_trip/delete' style='display:contents;'"
+            f" onsubmit=\"return confirm('Dienstreise löschen?');\">"
+            f"<input type='hidden' name='trip_id' value='{trip_id}'>"
+            f"<button class='btn danger btn-sm' type='submit'>Löschen</button></form>"
+        )
+
+    hdr_label = "Dienstreise bearbeiten" if trip else "Dienstreise hinzufügen"
+    if locked:
+        hdr_label = "Dienstreise (schreibgeschützt)"
+
+    inner = "" if locked else f"""
+      <form method="post" action="/day/{day}/business_trip/save">
+        <input type="hidden" name="trip_id" value="{trip_id}">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+          <div class="tb-field" style="flex:1;min-width:160px;">
+            <label>Ort *</label>
+            <input name="destination" required value="{dest}" placeholder="Reiseziel" style="font-size:13px;padding:5px 8px;">
+          </div>
+          <div class="tb-field">
+            <label>Startdatum *</label>
+            {_date_input("start_date", start_iso, required=True)}
+          </div>
+          <div class="tb-field" style="justify-content:flex-end;padding-bottom:6px;">
+            <label style="font-weight:400;font-size:13px;"><input type="checkbox" onchange="toggleMultiday(this)" {multi_checked}> Mehrtägig</label>
+          </div>
+        </div>
+        <div class="multiday-fields" style="display:{multi_display};margin-bottom:8px;">
+          <div class="tb-field" style="display:inline-flex;">
+            <label>Enddatum</label>
+            {_date_input("end_date", end_iso if is_multi else "")}
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <div class="tb-field"><label>Abreise</label>{_time_input("departure_time", dep)}</div>
+          <div class="tb-field"><label>Am Ziel</label>{_time_input("departure_end_time", dep_e)}</div>
+          <div class="tb-field"><label>Rückreise</label>{_time_input("return_time", ret)}</div>
+          <div class="tb-field"><label>Zuhause</label>{_time_input("return_end_time", ret_e)}</div>
+        </div>
+        <div style="margin-bottom:8px;">
+          <textarea name="notes" rows="2" placeholder="Notizen (optional)" style="font-size:13px;padding:5px 8px;">{notes}</textarea>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn primary btn-sm" type="submit">Dienstreise speichern</button>
+          <div style="display:contents;">{delete_btn}</div>
+        </div>
+      </form>"""
+
+    if locked and trip:
+        inner = (
+            f"<div style='font-size:13px;'><b>{dest}</b> · {_fmt_date_de(start_iso)}"
+            f"{' – ' + _fmt_date_de(end_iso) if is_multi else ''}</div>"
+            f"<div class='small' style='color:var(--mu);margin-top:4px;'>🔒 Schreibgeschützt</div>"
+        )
+    elif locked:
+        inner = "<div class='day-empty'>Keine Dienstreise / gesperrt.</div>"
+
+    return (
+        f"<div class='day-sec-hdr'>✈ {hdr_label}</div>"
+        f"<div class='day-sec-body'>{inner}</div>"
+    )
 
 
 def _business_trip_section(day: str, trip, locked: bool = False) -> str:
