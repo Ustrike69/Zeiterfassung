@@ -287,6 +287,18 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
+    db.execute("""CREATE TABLE IF NOT EXISTS mail_config(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        value TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    # Ensure all expected keys exist (INSERT OR IGNORE leaves existing values intact)
+    for _key in ("mail_server", "mail_port", "mail_username", "mail_password", "mail_from"):
+        db.execute(
+            "INSERT OR IGNORE INTO mail_config(key, value) VALUES(?, '')",
+            (_key,),
+        )
 
 
 

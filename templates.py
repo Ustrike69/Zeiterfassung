@@ -5,6 +5,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
         if user.get("is_admin"):
             items.append(("/admin/users", "Admin: Benutzer"))
             items.append(("/admin/periods", "Admin: Abschlüsse"))
+            items.append(("/admin/mail-settings", "Admin: Maileinstellungen"))
         items.append(("/logout", "Logout"))
         li = "".join([f'<li><a class="nav-link" href="{u}">{t}</a></li>' for u, t in items])
         nav_html = f"""<nav class="app-nav">

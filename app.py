@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.7"
+APP_VERSION = "v4.6.8"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5852,21 +5852,70 @@ def _build_csv_bytes(headers: list, data: list, delimiter: str = ";") -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+def _get_mail_config() -> dict:
+    """Read SMTP config from mail_config table, falling back to env vars."""
+    import os
+    db = connect()
+    rows = db.execute("SELECT key, value FROM mail_config").fetchall()
+    db.close()
+    cfg = {r["key"]: (r["value"] or "") for r in rows}
+    # Env var fallback for any key not set in DB
+    defaults = {
+        "mail_server":   os.environ.get("MAIL_SERVER", ""),
+        "mail_port":     os.environ.get("MAIL_PORT", "587"),
+        "mail_username": os.environ.get("MAIL_USERNAME", ""),
+        "mail_password": os.environ.get("MAIL_PASSWORD", ""),
+        "mail_from":     os.environ.get("MAIL_FROM", ""),
+    }
+    for k, v in defaults.items():
+        if not cfg.get(k):
+            cfg[k] = v
+    return cfg
+
+
+def _save_mail_config(server: str, port: str, username: str, password: str, from_addr: str, update_password: bool) -> None:
+    db = connect()
+    now = "datetime('now')"
+    for key, val in [
+        ("mail_server",   server),
+        ("mail_port",     port),
+        ("mail_username", username),
+        ("mail_from",     from_addr),
+    ]:
+        db.execute(
+            "UPDATE mail_config SET value=?, updated_at=datetime('now') WHERE key=?",
+            (val, key),
+        )
+    if update_password:
+        db.execute(
+            "UPDATE mail_config SET value=?, updated_at=datetime('now') WHERE key='mail_password'",
+            (password,),
+        )
+    db.commit()
+    db.close()
+
+
+_MAIL_PW_PLACEHOLDER = "••••••••"
+
+
 def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, attachment_bytes: bytes) -> None:
-    import os, smtplib
+    import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     from email.mime.base import MIMEBase
     from email import encoders
 
-    server   = os.environ.get("MAIL_SERVER", "")
-    port     = int(os.environ.get("MAIL_PORT", "587"))
-    username = os.environ.get("MAIL_USERNAME", "")
-    password = os.environ.get("MAIL_PASSWORD", "")
-    from_addr = os.environ.get("MAIL_FROM", username)
+    cfg = _get_mail_config()
+    server    = cfg.get("mail_server", "")
+    port      = int(cfg.get("mail_port") or "587")
+    username  = cfg.get("mail_username", "")
+    password  = cfg.get("mail_password", "")
+    from_addr = cfg.get("mail_from") or username
 
     if not server or not username:
-        raise RuntimeError("SMTP nicht konfiguriert (MAIL_SERVER / MAIL_USERNAME fehlt).")
+        raise RuntimeError("SMTP nicht konfiguriert (Mailserver / Benutzername fehlt).")
+    if not password:
+        raise RuntimeError("SMTP-Passwort nicht konfiguriert.")
 
     msg = MIMEMultipart()
     msg["From"]    = from_addr
@@ -5887,23 +5936,113 @@ def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, atta
         s.sendmail(username, [to], msg.as_string())
 
 
-def _build_time_blocks_export(user_id: int, date_from: str, date_to: str):
-    """Return (headers, data, total_minutes) for time_blocks CSV."""
+def _build_rich_day_export(user_id: int, date_from: str, date_to: str):
+    """Build day-by-day export matching balance view: Wochentag|Datum|Beginn|Ende|Pause|Soll|Delta|Bemerkung."""
+    _WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
     db = connect()
-    rows = db.execute(
-        "SELECT day, time_in, time_out, break_minutes, comment FROM time_blocks "
+    blocks_raw = db.execute(
+        "SELECT day, time_in, time_out, break_minutes FROM time_blocks "
         "WHERE user_id=? AND day BETWEEN ? AND ? ORDER BY day, time_in",
         (user_id, date_from, date_to),
     ).fetchall()
+    absences_raw = db.execute(
+        "SELECT a.date_from, a.date_to, t.name AS type_name, a.comment "
+        "FROM absences a JOIN absence_types t ON t.id=a.type_id "
+        "WHERE a.user_id=? AND NOT (a.date_to < ? OR a.date_from > ?)",
+        (user_id, date_from, date_to),
+    ).fetchall()
+    holidays_raw = db.execute(
+        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND day BETWEEN ? AND ?",
+        (date_from, date_to),
+    ).fetchall()
+    trips_raw = db.execute(
+        "SELECT start_date, end_date, destination FROM business_trips "
+        "WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL)",
+        (user_id, date_to, date_from),
+    ).fetchall()
     db.close()
-    total = 0
+
+    # Build lookup maps
+    blocks_by_day: dict = {}
+    for b in blocks_raw:
+        blocks_by_day.setdefault(b["day"], []).append(dict(b))
+
+    absence_map: dict = {}
+    for a in absences_raw:
+        d0 = datetime.date.fromisoformat(a["date_from"])
+        d1 = datetime.date.fromisoformat(a["date_to"])
+        cur = d0
+        while cur <= d1:
+            iso = cur.isoformat()
+            if date_from <= iso <= date_to:
+                absence_map.setdefault(iso, (a["type_name"], a["comment"] or ""))
+            cur += datetime.timedelta(days=1)
+
+    holiday_map: dict = {str(h["day"])[:10]: h["holiday_name"] or "" for h in holidays_raw}
+
+    trip_map: dict = {}
+    for t in trips_raw:
+        sd = t["start_date"][:10]
+        ed = (t["end_date"] or sd)[:10]
+        cur = datetime.date.fromisoformat(max(sd, date_from))
+        end = datetime.date.fromisoformat(min(ed, date_to))
+        while cur <= end:
+            trip_map[cur.isoformat()] = t["destination"]
+            cur += datetime.timedelta(days=1)
+
+    headers = ["Wochentag", "Datum", "Beginn", "Ende", "Pause (min)", "Soll", "Delta", "Bemerkung"]
     data = []
-    for r in rows:
-        mins = _minutes_from_hhmm(r["time_out"]) - _minutes_from_hhmm(r["time_in"]) - int(r["break_minutes"] or 0)
-        total += mins
-        data.append([r["day"], r["time_in"], r["time_out"], int(r["break_minutes"] or 0),
-                     _fmt_minutes(mins), r["comment"] or ""])
-    headers = ["day", "time_in", "time_out", "break_minutes", "net_hhmm", "comment"]
+    total_actual = 0
+
+    for iso in _iter_days(date_from, date_to):
+        d = datetime.date.fromisoformat(iso)
+        wd = _WD[d.weekday()]
+        datum = f"{d.day:02d}.{d.month:02d}.{d.year}"
+
+        expected = _expected_minutes_for_day(user_id, iso)
+        soll_str = _fmt_minutes(expected) if expected else ""
+
+        # Build Bemerkung
+        parts = []
+        if iso in holiday_map and holiday_map[iso]:
+            parts.append(holiday_map[iso])
+        if iso in absence_map:
+            atype, acomment = absence_map[iso]
+            parts.append(acomment if (atype == "Sonstige" and acomment) else atype)
+        if iso in trip_map:
+            parts.append(f"Dienstreise: {trip_map[iso]}")
+        bemerkung = " | ".join(parts)
+
+        day_blocks = blocks_by_day.get(iso, [])
+
+        if not day_blocks:
+            if expected or bemerkung:
+                delta_str = _fmt_minutes_signed(-expected) if expected else ""
+                data.append([wd, datum, "", "", "", soll_str, delta_str, bemerkung])
+        else:
+            actual_total = sum(
+                _minutes_from_hhmm(b["time_out"]) - _minutes_from_hhmm(b["time_in"]) - int(b["break_minutes"] or 0)
+                for b in day_blocks
+            )
+            total_actual += actual_total
+            delta = actual_total - expected
+            delta_str = _fmt_minutes_signed(delta)
+
+            for i, b in enumerate(day_blocks):
+                brk = int(b["break_minutes"] or 0)
+                if i == 0:
+                    data.append([wd, datum, b["time_in"], b["time_out"], brk,
+                                 soll_str, delta_str, bemerkung])
+                else:
+                    data.append(["", "", b["time_in"], b["time_out"], brk, "", "", ""])
+
+    return headers, data, total_actual
+
+
+def _build_time_blocks_export(user_id: int, date_from: str, date_to: str):
+    """Legacy simple export — delegates to rich export."""
+    headers, data, total = _build_rich_day_export(user_id, date_from, date_to)
     return headers, data, total
 
 
@@ -7608,6 +7747,119 @@ def admin_periods_unlock():
         db.close()
     add_flash(f"Alle Abschlüsse für Jahr {year} entsperrt.", "success")
     return redirect(f"/admin/periods?y={year}")
+
+
+@app.get("/admin/mail-settings")
+@admin_required
+def admin_mail_settings():
+    bootstrap()
+    u = current_user()
+    cfg = _get_mail_config()
+    pw_set = bool(cfg.get("mail_password"))
+
+    body = f"""
+    {flash_html()}
+    <div class="card">
+      <h3 style="margin-top:0;">Mailserver-Einstellungen</h3>
+      <p class="small">Einstellungen werden in der Datenbank gespeichert und überschreiben Umgebungsvariablen.</p>
+      <form method="post" action="/admin/mail-settings">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+          <div style="flex:2;min-width:200px;">
+            <label>Mailserver (SMTP)</label>
+            <input type="text" name="mail_server" value="{cfg.get('mail_server','')}" placeholder="mail.beispiel.de" required>
+          </div>
+          <div style="flex:0 0 100px;">
+            <label>Port</label>
+            <input type="number" name="mail_port" value="{cfg.get('mail_port','587')}" min="1" max="65535" required style="width:90px;">
+          </div>
+        </div>
+        <div style="margin-bottom:10px;">
+          <label>Benutzername (Login)</label>
+          <input type="text" name="mail_username" value="{cfg.get('mail_username','')}" placeholder="user@beispiel.de" required>
+        </div>
+        <div style="margin-bottom:10px;">
+          <label>Passwort {"<span class='small' style='color:var(--mu);font-weight:400;'>(leer lassen = nicht ändern)</span>" if pw_set else ""}</label>
+          <input type="password" name="mail_password" value="" placeholder="{'Passwort nicht ändern' if pw_set else 'Passwort eingeben'}">
+        </div>
+        <div style="margin-bottom:14px;">
+          <label>Absender (Anzeigename &lt;adresse@domain&gt;)</label>
+          <input type="text" name="mail_from" value="{cfg.get('mail_from','')}" placeholder="Zeiterfassung &lt;noreply@beispiel.de&gt;">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn primary" type="submit">Speichern</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Verbindung testen</h3>
+      <p class="small">Sendet eine Test-E-Mail an deine Admin-Adresse (<b>{u.get('email') or u.get('username')}</b>).</p>
+      <form method="post" action="/admin/mail-settings/test">
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div>
+            <label>Test-Empfänger</label>
+            <input type="email" name="test_recipient" value="{u.get('email') or ''}" placeholder="admin@beispiel.de" required>
+          </div>
+          <button class="btn" type="submit">Test-Mail senden</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Aktuelle Konfiguration</h3>
+      <table>
+        <tr><th>Key</th><th>Wert</th></tr>
+        <tr><td>Mailserver</td><td>{cfg.get('mail_server') or '<span style="color:var(--mu);">–</span>'}</td></tr>
+        <tr><td>Port</td><td>{cfg.get('mail_port') or '587'}</td></tr>
+        <tr><td>Benutzername</td><td>{cfg.get('mail_username') or '<span style="color:var(--mu);">–</span>'}</td></tr>
+        <tr><td>Passwort</td><td>{'<span style="color:var(--ok);">gesetzt</span>' if pw_set else '<span style="color:var(--danger);">nicht gesetzt</span>'}</td></tr>
+        <tr><td>Absender</td><td>{cfg.get('mail_from') or '<span style="color:var(--mu);">–</span>'}</td></tr>
+      </table>
+    </div>
+    """
+    return render_template_string(layout("Admin: Maileinstellungen", body, u, APP_VERSION))
+
+
+@app.post("/admin/mail-settings")
+@admin_required
+def admin_mail_settings_save():
+    bootstrap()
+    mail_server  = (request.form.get("mail_server") or "").strip()
+    mail_port    = (request.form.get("mail_port") or "587").strip()
+    mail_username = (request.form.get("mail_username") or "").strip()
+    mail_password = (request.form.get("mail_password") or "").strip()
+    mail_from    = (request.form.get("mail_from") or "").strip()
+
+    if not mail_server or not mail_username:
+        add_flash("Mailserver und Benutzername sind Pflichtfelder.", "error")
+        return redirect("/admin/mail-settings")
+
+    update_pw = bool(mail_password)
+    _save_mail_config(mail_server, mail_port, mail_username, mail_password, mail_from, update_pw)
+    add_flash("Maileinstellungen gespeichert.", "success")
+    return redirect("/admin/mail-settings")
+
+
+@app.post("/admin/mail-settings/test")
+@admin_required
+def admin_mail_settings_test():
+    bootstrap()
+    recipient = (request.form.get("test_recipient") or "").strip()
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', recipient):
+        add_flash("Ungültige E-Mail-Adresse.", "error")
+        return redirect("/admin/mail-settings")
+    try:
+        _send_mail(
+            to=recipient,
+            subject="Zeiterfassung – Test-Mail",
+            body_text="Dies ist eine Test-Mail von Zeiterfassung.\nWenn du diese Mail erhältst, funktioniert die SMTP-Konfiguration korrekt.\n",
+            attachment_name="test.csv",
+            attachment_bytes=_build_csv_bytes(["test"], [["OK"]]),
+        )
+        add_flash(f"Test-Mail erfolgreich gesendet an {recipient}.", "success")
+    except Exception as exc:
+        add_flash(f"Fehler beim Senden: {exc}", "error")
+    return redirect("/admin/mail-settings")
 
 
 if __name__ == "__main__":
