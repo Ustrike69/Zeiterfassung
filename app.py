@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.2"
+APP_VERSION = "v4.5.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2873,60 +2873,105 @@ def balance_view():
     # ── Mobile Tabellenzeilen ────────────────────────────────────────────
     mob_trs = ""
 
-    # ── Tabellenzeilen ───────────────────────────────────────────────────
+    # ── Desktop Tabellenzeilen ───────────────────────────────────────────
     _wd_names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     trs = ""
     for r in display_rows:
-        flextag_badge = (
-            f"<span class='small' style='color:var(--ac);white-space:nowrap;'>"
-            f"Flextag −{_fmt_minutes(r['flextag_min'])}</span>"
-            if r.get("flextag_min") else ""
-        )
+        _d_obj    = datetime.date.fromisoformat(r["day"])
+        _wd_lbl   = _wd_names[_d_obj.weekday()]
+        _blocks_d = _all_blocks_map.get(r["day"], [])
+        _statuses = _day_status.get(r["day"], [])
+        _is_today_d   = r["day"] == today_iso
+        _is_off_d     = r["expected"] == 0 and r["actual"] == 0 and not _statuses
+        _is_missing_d = r["expected"] > 0 and r["actual"] == 0 and not _statuses and r["day"] < today_iso
         delta_clr   = _balance_color(r["delta"])
         running_clr = _balance_color(r["running"])
-        _d_obj = datetime.date.fromisoformat(r["day"])
-        _wd_lbl = _wd_names[_d_obj.weekday()]
+        _delta_str_d   = _fmt_minutes_signed(r["delta"]) if (r["delta"] != 0 or r["actual"] > 0) else ""
+        _running_str_d = _fmt_minutes_signed(r["running"])
+        _date_str_d    = _fmt_date_de(r["day"])
 
-        # Status badges
-        _statuses = _day_status.get(r["day"], [])
+        # Build status badge HTML (absence + flextag)
         _status_html = ""
         for _label, _color in _statuses[:2]:
             _bg = (_color + "22") if _color.startswith("#") else "rgba(0,0,0,.07)"
-            _txt_clr = _color if _color != "var(--danger)" else "var(--danger)"
             _status_html += (
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:4px;"
-                f"background:{_bg};color:{_txt_clr};white-space:nowrap;font-weight:600;'>"
+                f"background:{_bg};color:{_color};white-space:nowrap;font-weight:600;'>"
                 f"{_label}</span> "
             )
+        if r.get("flextag_min"):
+            _status_html += (
+                f"<span style='font-size:10px;padding:1px 5px;border-radius:4px;"
+                f"background:rgba(37,99,235,.1);color:var(--ac);white-space:nowrap;'>"
+                f"Flextag&nbsp;−{_fmt_minutes(r['flextag_min'])}</span>"
+            )
 
-        # Dim rows with no expected time, no actual work, and no status
-        _no_soll = r["expected"] == 0 and r["actual"] == 0 and not _statuses
-        _row_style = " style='opacity:.38;'" if _no_soll else ""
+        # Row base style
+        if _is_missing_d:
+            _base_d = "background:rgba(220,38,38,.08);"
+        elif _is_today_d:
+            _base_d = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
+        elif _is_off_d:
+            _base_d = "opacity:.38;"
+        else:
+            _base_d = ""
 
-        trs += (
-            f"<tr{_row_style}>"
-            f"<td style='white-space:nowrap;'>"
-            f"<a href='/day/{r['day']}' title='Zur Zeiterfassung' style='text-decoration:none;color:inherit;display:flex;gap:5px;align-items:center;'>"
-            f"<span style='min-width:22px;'>{_wd_lbl}</span>"
-            f"{_fmt_date_de(r['day'])}"
-            f"<span style='font-size:12px;opacity:.4;'>&#8599;</span>"
-            f"</a></td>"
-            f"<td>{_status_html}</td>"
-            f"<td style='text-align:right;'>"
-            f"<form method='post' action='/balance/expected' style='margin:0;display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap;'>"
-            f"<input type='hidden' name='day' value='{r['day']}'>"
-            f"<input type='hidden' name='y' value='{sel_year}'>"
-            f"<input type='hidden' name='m' value='{sel_month}'>"
-            f"<input name='expected' value='{_fmt_minutes(r['expected'])}' style='width:70px;text-align:right;' placeholder='HH:MM'>"
-            f"<button class='btn' type='submit' style='padding:4px 8px;'>OK</button>"
-            f"</form>"
-            f"{flextag_badge}"
-            f"</td>"
-            f"<td style='text-align:right;'>{_fmt_minutes(r['actual'])}</td>"
-            f"<td style='text-align:right;'><b style='color:{delta_clr};'>{_fmt_minutes_signed(r['delta'])}</b></td>"
-            f"<td style='text-align:right;'><b style='color:{running_clr};'>{_fmt_minutes_signed(r['running'])}</b></td>"
-            "</tr>"
-        )
+        _td = "style='padding:8px 6px;vertical-align:middle;'"
+        _td_r = "style='padding:8px 6px;vertical-align:middle;text-align:right;'"
+
+        # Single row (no blocks or absence-only day)
+        if not _blocks_d:
+            trs += (
+                f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_base_d}'"
+                f" onclick=\"location.href='/day/{r['day']}'\">"
+                f"<td {_td} style='padding:8px 6px;color:var(--mu);white-space:nowrap;'>{_wd_lbl}</td>"
+                f"<td {_td} style='padding:8px 6px;white-space:nowrap;'>"
+                f"<a href='/day/{r['day']}' style='text-decoration:none;color:inherit;'>{_date_str_d}"
+                f"<span style='font-size:11px;opacity:.35;margin-left:3px;'>&#8599;</span></a></td>"
+                f"<td {_td}>{_status_html}</td>"
+                f"<td {_td}></td><td {_td}></td><td {_td_r}></td>"
+                f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
+                f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
+                f"</tr>"
+            )
+            continue
+
+        # Multi-block rows
+        for _bi, _blk_i in enumerate(_blocks_d):
+            _is_first = _bi == 0
+            _is_last  = _bi == len(_blocks_d) - 1
+            _border = "border-bottom:1px solid var(--bd);" if _is_last else "border-bottom:1px solid rgba(128,128,128,.13);"
+            _t_in  = _blk_i["t_in"]
+            _t_out = _blk_i["t_out"]
+            _brk   = _blk_i["brk"]
+
+            if _is_first:
+                _wd_cell    = f"<td {_td} style='padding:8px 6px;color:var(--mu);white-space:nowrap;'>{_wd_lbl}</td>"
+                _date_cell  = (
+                    f"<td {_td} style='padding:8px 6px;white-space:nowrap;'>"
+                    f"<a href='/day/{r['day']}' style='text-decoration:none;color:inherit;'>{_date_str_d}"
+                    f"<span style='font-size:11px;opacity:.35;margin-left:3px;'>&#8599;</span></a></td>"
+                )
+                _stat_cell  = f"<td {_td}>{_status_html}</td>"
+                _delta_cell = f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
+                _run_cell   = f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
+            else:
+                _wd_cell    = f"<td {_td}></td>"
+                _date_cell  = f"<td {_td}></td>"
+                _stat_cell  = f"<td {_td}></td>"
+                _delta_cell = f"<td {_td}></td>"
+                _run_cell   = f"<td {_td}></td>"
+
+            trs += (
+                f"<tr style='cursor:pointer;{_base_d}{_border}'"
+                f" onclick=\"location.href='/day/{r['day']}'\">"
+                f"{_wd_cell}{_date_cell}{_stat_cell}"
+                f"<td {_td}>{_t_in}</td>"
+                f"<td {_td}>{_t_out}</td>"
+                f"<td {_td_r}>{str(_brk) if _brk else ''}</td>"
+                f"{_delta_cell}{_run_cell}"
+                f"</tr>"
+            )
 
     # ── Mobile Tabellenzeilen (Schleife) ────────────────────────────────
     for r in display_rows:
@@ -3077,15 +3122,17 @@ def balance_view():
       <hr>
 
       <p class="small">Delta = Ist − Soll. Wochenenden, Feiertage und Abwesenheitstage zählen als Soll = 0. Flextage werden zusätzlich vom Gleitzeitkonto abgezogen.</p>
-      <table>
+      <table style="border-collapse:collapse;width:100%;">
         <thead>
           <tr>
-            <th>Tag</th>
-            <th></th>
-            <th style="text-align:right;">Soll</th>
-            <th style="text-align:right;">Ist</th>
-            <th style="text-align:right;">Delta</th>
-            <th style="text-align:right;">Saldo</th>
+            <th style="padding:6px 6px;text-align:left;width:32px;">Tag</th>
+            <th style="padding:6px 6px;text-align:left;">Datum</th>
+            <th style="padding:6px 6px;text-align:left;">Status</th>
+            <th style="padding:6px 6px;text-align:left;">Von</th>
+            <th style="padding:6px 6px;text-align:left;">Bis</th>
+            <th style="padding:6px 6px;text-align:right;width:44px;">Pause</th>
+            <th style="padding:6px 6px;text-align:right;width:70px;">Delta</th>
+            <th style="padding:6px 6px;text-align:right;width:70px;">Saldo</th>
           </tr>
         </thead>
         <tbody>{trs}</tbody>
