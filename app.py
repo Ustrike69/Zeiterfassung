@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.6"
+APP_VERSION = "v4.6.7"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5842,6 +5842,169 @@ def _csv_response(filename: str, headers: list, data: list, delimiter: str = ";"
     )
 
 
+def _build_csv_bytes(headers: list, data: list, delimiter: str = ";") -> bytes:
+    import csv
+    from io import StringIO
+    buf = StringIO()
+    w = csv.writer(buf, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    w.writerow(headers)
+    w.writerows(data)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, attachment_bytes: bytes) -> None:
+    import os, smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.base import MIMEBase
+    from email import encoders
+
+    server   = os.environ.get("MAIL_SERVER", "")
+    port     = int(os.environ.get("MAIL_PORT", "587"))
+    username = os.environ.get("MAIL_USERNAME", "")
+    password = os.environ.get("MAIL_PASSWORD", "")
+    from_addr = os.environ.get("MAIL_FROM", username)
+
+    if not server or not username:
+        raise RuntimeError("SMTP nicht konfiguriert (MAIL_SERVER / MAIL_USERNAME fehlt).")
+
+    msg = MIMEMultipart()
+    msg["From"]    = from_addr
+    msg["To"]      = to
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body_text, "plain", "utf-8"))
+
+    part = MIMEBase("text", "csv")
+    part.set_payload(attachment_bytes)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{attachment_name}"')
+    msg.attach(part)
+
+    with smtplib.SMTP(server, port, timeout=10) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(username, password)
+        s.sendmail(username, [to], msg.as_string())
+
+
+def _build_time_blocks_export(user_id: int, date_from: str, date_to: str):
+    """Return (headers, data, total_minutes) for time_blocks CSV."""
+    db = connect()
+    rows = db.execute(
+        "SELECT day, time_in, time_out, break_minutes, comment FROM time_blocks "
+        "WHERE user_id=? AND day BETWEEN ? AND ? ORDER BY day, time_in",
+        (user_id, date_from, date_to),
+    ).fetchall()
+    db.close()
+    total = 0
+    data = []
+    for r in rows:
+        mins = _minutes_from_hhmm(r["time_out"]) - _minutes_from_hhmm(r["time_in"]) - int(r["break_minutes"] or 0)
+        total += mins
+        data.append([r["day"], r["time_in"], r["time_out"], int(r["break_minutes"] or 0),
+                     _fmt_minutes(mins), r["comment"] or ""])
+    headers = ["day", "time_in", "time_out", "break_minutes", "net_hhmm", "comment"]
+    return headers, data, total
+
+
+@app.post("/export/mail")
+@login_required
+def export_mail():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+
+    date_from = (request.form.get("date_from") or "").strip()
+    date_to   = (request.form.get("date_to") or "").strip()
+    recipient = (request.form.get("recipient_email") or "").strip()
+    export_type = (request.form.get("export_type") or "time_blocks").strip()
+
+    # Admin can select another user
+    target_uid = u["id"]
+    target_name = u.get("display_name") or u.get("username") or "–"
+    if u.get("is_admin"):
+        uid_param = (request.form.get("user_id") or "").strip()
+        if uid_param and uid_param.isdigit():
+            db = connect()
+            row = db.execute(
+                "SELECT id, username, display_name FROM users WHERE id=? AND is_active=1",
+                (int(uid_param),),
+            ).fetchone()
+            db.close()
+            if row:
+                target_uid = row["id"]
+                target_name = row["display_name"] or row["username"]
+
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_from):
+        add_flash("Ungültiges Von-Datum.", "error")
+        return redirect("/export")
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_to):
+        add_flash("Ungültiges Bis-Datum.", "error")
+        return redirect("/export")
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', recipient):
+        add_flash("Ungültige E-Mail-Adresse.", "error")
+        return redirect("/export")
+    if date_from > date_to:
+        add_flash("Von-Datum muss vor Bis-Datum liegen.", "error")
+        return redirect("/export")
+
+    # Clamp to user tracking start
+    start = _get_tracking_start(target_uid)
+    if start:
+        date_from = max(date_from, start)
+
+    # Build CSV
+    if export_type == "absences":
+        db = connect()
+        rows = db.execute(
+            "SELECT a.date_from, a.date_to, a.is_half_day, t.name AS type, a.comment "
+            "FROM absences a JOIN absence_types t ON t.id=a.type_id "
+            "WHERE a.user_id=? AND NOT (a.date_to < ? OR a.date_from > ?) ORDER BY a.date_from",
+            (target_uid, date_from, date_to),
+        ).fetchall()
+        db.close()
+        data = [[r["date_from"], r["date_to"], r["is_half_day"], r["type"], r["comment"] or ""] for r in rows]
+        headers = ["date_from", "date_to", "is_half_day", "type", "comment"]
+        total_min = 0
+        entry_count = len(data)
+        type_label = "Abwesenheiten"
+        fname_pfx = "abwesenheiten"
+    else:
+        headers, data, total_min = _build_time_blocks_export(target_uid, date_from, date_to)
+        entry_count = len(data)
+        type_label = "Zeitblöcke"
+        fname_pfx = "zeitbloecke"
+
+    if not data:
+        add_flash(f"Keine Daten für den Zeitraum {date_from} – {date_to}.", "error")
+        return redirect("/export")
+
+    attachment_name = f"{fname_pfx}_{target_name.lower().replace(' ','_')}_{date_from}_{date_to}.csv"
+    csv_bytes = _build_csv_bytes(headers, data)
+
+    body_text = (
+        f"Zeiterfassung Export\n"
+        f"{'─'*40}\n"
+        f"Mitarbeiter: {target_name}\n"
+        f"Typ:         {type_label}\n"
+        f"Zeitraum:    {date_from} bis {date_to}\n"
+        f"Einträge:    {entry_count}\n"
+    )
+    if total_min:
+        body_text += f"Gesamtstunden: {_fmt_minutes(total_min)}\n"
+    body_text += f"\nDieser Export wurde automatisch von Zeiterfassung generiert.\n"
+
+    subject = f"Zeiterfassung Export – {target_name} – {date_from} bis {date_to}"
+
+    try:
+        _send_mail(recipient, subject, body_text, attachment_name, csv_bytes)
+        add_flash(f"Export wurde an {recipient} gesendet.", "success")
+    except Exception as exc:
+        add_flash(f"E-Mail konnte nicht gesendet werden: {exc}", "error")
+
+    return redirect("/export")
+
+
 @app.post("/settings/save")
 @login_required
 def settings_save():
@@ -6348,12 +6511,32 @@ def export_home():
     u = current_user()
     today = datetime.date.today()
     year = today.year
-    month = today.month
     default_from = f"{year}-01-01"
     default_to   = f"{year}-12-31"
     default_from_de = f"01.01.{year}"
     default_to_de   = f"31.12.{year}"
+    user_email = u.get("email") or ""
     admin_btn = f'<button class="btn" type="button" onclick="dlExport(\'/export/users.csv\',false)">Benutzer (Admin)</button>' if u.get("is_admin") else ""
+
+    # Admin: build user select options for mail form
+    admin_user_select = ""
+    if u.get("is_admin"):
+        db = connect()
+        all_users = db.execute(
+            "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY username"
+        ).fetchall()
+        db.close()
+        opts = "".join(
+            f'<option value="{r["id"]}" {"selected" if r["id"] == u["id"] else ""}>'
+            f'{r["display_name"] or r["username"]}</option>'
+            for r in all_users
+        )
+        admin_user_select = (
+            f'<div style="margin-bottom:10px;">'
+            f'<label>Mitarbeiter</label><br>'
+            f'<select name="user_id" style="max-width:300px;">{opts}</select>'
+            f'</div>'
+        )
 
     body = f"""
     {flash_html()}
@@ -6401,6 +6584,31 @@ def export_home():
       </div>
     </div>
 
+    <div class="card">
+      <h3 style="margin-top:0;">Per E-Mail senden</h3>
+      <p class="small">Der gewählte Zeitraum wird als CSV-Anhang gesendet.</p>
+      <form method="post" action="/export/mail" onsubmit="return injectMailDates(this)">
+        <input type="hidden" name="date_from" id="mail-date-from" value="{default_from}">
+        <input type="hidden" name="date_to"   id="mail-date-to"   value="{default_to}">
+        {admin_user_select}
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;">
+          <div style="flex:1;min-width:200px;">
+            <label>Empfänger-E-Mail</label><br>
+            <input type="email" name="recipient_email" value="{user_email}"
+                   placeholder="empfaenger@beispiel.de" required style="max-width:360px;width:100%;">
+          </div>
+          <div>
+            <label>Exporttyp</label><br>
+            <select name="export_type">
+              <option value="time_blocks">Zeitblöcke</option>
+              <option value="absences">Abwesenheiten</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn primary" type="submit">Export senden</button>
+      </form>
+    </div>
+
     <script>
     function pad2(n){{return n<10?'0'+n:''+n;}}
     function lastDay(y,m){{return new Date(y,m,0).getDate();}}
@@ -6417,6 +6625,13 @@ def export_home():
       document.getElementById('exp-to-txt').value=isoToDE(to);
       document.getElementById('exp-from-iso').value=from;
       document.getElementById('exp-to-iso').value=to;
+      syncMailDates(from,to);
+    }}
+    function syncMailDates(from,to){{
+      var f=document.getElementById('mail-date-from');
+      var t=document.getElementById('mail-date-to');
+      if(f)f.value=from||'';
+      if(t)t.value=to||'';
     }}
     function dlExport(base,withRange){{
       if(!withRange){{window.location=base;return;}}
@@ -6424,6 +6639,14 @@ def export_home():
       var to=document.getElementById('exp-to-iso').value;
       if(!from||!to){{alert('Bitte Von- und Bis-Datum auswählen.');return;}}
       window.location=base+'?from='+from+'&to='+to;
+    }}
+    function injectMailDates(form){{
+      var from=document.getElementById('exp-from-iso').value;
+      var to=document.getElementById('exp-to-iso').value;
+      if(!from||!to){{alert('Bitte Von- und Bis-Datum auswählen.');return false;}}
+      document.getElementById('mail-date-from').value=from;
+      document.getElementById('mail-date-to').value=to;
+      return true;
     }}
     </script>
     """
