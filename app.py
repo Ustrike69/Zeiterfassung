@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.8"
+APP_VERSION = "v4.6.9"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -7343,7 +7343,7 @@ def admin_users_edit_post(user_id: int):
         set_password(user_id, new_pw)
 
     add_flash("Benutzer gespeichert.", "success")
-    return redirect(url_for("admin_users"))
+    return redirect("/admin#acc-user")
 
 
 @app.post("/admin/users/<int:user_id>/delete")
@@ -7746,7 +7746,352 @@ def admin_periods_unlock():
     finally:
         db.close()
     add_flash(f"Alle Abschlüsse für Jahr {year} entsperrt.", "success")
-    return redirect(f"/admin/periods?y={year}")
+    return redirect(f"/admin?y={year}#acc-abschl")
+
+
+@app.get("/admin")
+@admin_required
+def admin_home():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+
+    try:
+        sel_year = int(request.args.get("y") or today.year)
+    except (ValueError, TypeError):
+        sel_year = today.year
+
+    # ── fetch all data ─────────────────────────────────────────────────────────
+    db = connect()
+    all_users = db.execute(
+        "SELECT id, username, display_name, is_admin, is_active, "
+        "vacation_carryover_exception, contouring_enabled, created_at FROM users ORDER BY username"
+    ).fetchall()
+    locks_raw = db.execute(
+        "SELECT pl.*, u.username AS locked_by_name FROM period_locks pl "
+        "LEFT JOIN users u ON u.id=pl.locked_by WHERE pl.year=? ORDER BY pl.user_id, pl.period_type, pl.month",
+        (sel_year,),
+    ).fetchall()
+    db.close()
+
+    mail_cfg = _get_mail_config()
+    pw_set = bool(mail_cfg.get("mail_password"))
+
+    locks_by_user: dict = {}
+    for r in locks_raw:
+        uid = r["user_id"]
+        locks_by_user.setdefault(uid, {})
+        if r["period_type"] == "year":
+            locks_by_user[uid]["year"] = dict(r)
+        else:
+            locks_by_user[uid][f"{sel_year}-{r['month']:02d}"] = dict(r)
+
+    # ── Section 1+2+3: build user table rows ──────────────────────────────────
+    user_trs = ""
+    sched_trs = ""
+    vac_trs = ""
+    for r in all_users:
+        uid = r["id"]
+        display = r["display_name"] or r["username"]
+        sub = r["username"] if r["display_name"] else ""
+        sub_html = f" <span class='small' style='color:var(--mu);'>({sub})</span>" if sub else ""
+        flags_l = []
+        if r["is_admin"]: flags_l.append("Admin")
+        if not r["is_active"]: flags_l.append("inaktiv")
+        fl = f" <span class='small'>· {', '.join(flags_l)}</span>" if flags_l else ""
+
+        # delete / impersonate buttons
+        del_btn = ""
+        if uid != u["id"]:
+            safe = display.replace("'", "\\'")
+            del_btn = (
+                f'<form method="post" action="/admin/users/{uid}/delete" style="display:contents;" '
+                f'onsubmit="return confirm(\'Nutzer {safe} unwiderruflich löschen?\')">'
+                f'<button class="btn danger btn-sm" type="submit">Löschen</button></form>'
+            )
+        imp_btn = ""
+        if not r["is_admin"] and r["is_active"] and uid != u["id"]:
+            imp_btn = (
+                f'<form method="post" action="/admin/impersonate/{uid}" style="display:contents;">'
+                f'<button class="btn btn-sm" type="submit">👤 Identität</button></form>'
+            )
+        user_trs += (
+            f'<tr>'
+            f'<td>{display}{sub_html}{fl}</td>'
+            f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
+            f'<td><div style="display:flex;gap:4px;flex-wrap:wrap;">'
+            f'<a class="btn btn-sm" href="/admin/users/{uid}/edit">Bearbeiten</a>'
+            f'{imp_btn}{del_btn}</div></td>'
+            f'</tr>'
+        )
+
+        # Schedule row
+        sched = _get_user_schedule_for_day(uid, today_iso) or {}
+        mode = (sched.get("mode") or "weekly").lower()
+        if mode == "daily":
+            dp = []
+            for dk, lbl in [("mon_minutes","Mo"),("tue_minutes","Di"),("wed_minutes","Mi"),
+                             ("thu_minutes","Do"),("fri_minutes","Fr"),("sat_minutes","Sa"),("sun_minutes","So")]:
+                v = int(sched.get(dk) or 0)
+                if v: dp.append(f"{lbl}:{_fmt_minutes(v)}")
+            soll_str = " ".join(dp) if dp else "–"
+        else:
+            wm = int(sched.get("weekly_minutes") or 0)
+            soll_str = f"{wm/60:g} h/Woche" if wm else "–"
+        sched_trs += (
+            f'<tr><td>{display}{sub_html}</td>'
+            f'<td class="small">{soll_str}</td>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">Zeitschemata</a></td></tr>'
+        )
+
+        # Vacation row
+        exc_on = int(r["vacation_carryover_exception"] or 0)
+        exc_badge = " <span class='small' style='color:#d97706;'>⚡ Ausnahme</span>" if exc_on else ""
+        vac_trs += (
+            f'<tr><td>{display}{sub_html}{exc_badge}</td>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/vacation-carryover">Übertrag verwalten</a></td></tr>'
+        )
+
+    # ── Section 4: Periods ────────────────────────────────────────────────────
+    available_years = list(range(max(today.year - 5, 2020), today.year + 1))
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
+        for y in reversed(available_years)
+    )
+    periods_trs = ""
+    for usr in all_users:
+        uid = usr["id"]
+        display = usr["display_name"] or usr["username"]
+        ulocks = locks_by_user.get(uid, {})
+        year_lk = "year" in ulocks
+        locked_months = [m for m in range(1, 13) if year_lk or f"{sel_year}-{m:02d}" in ulocks]
+        n = len(locked_months)
+        if n == 0:
+            status = "<span class='small' style='color:var(--mu);'>Keine Abschlüsse</span>"
+        elif n == 12 or year_lk:
+            status = "<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
+        else:
+            names = ", ".join(MONTH_NAMES_DE[m][:3] for m in locked_months)
+            status = f"<span style='color:var(--ok);'>🔒 {n} Monate ({names})</span>"
+        unlock_form = (
+            f"<form method='post' action='/admin/periods/unlock' style='display:contents;'>"
+            f"<input type='hidden' name='target_user_id' value='{uid}'>"
+            f"<input type='hidden' name='year' value='{sel_year}'>"
+            f"<button class='btn danger btn-sm'>Entsperren</button></form>"
+        ) if ulocks else ""
+        periods_trs += (
+            f"<tr><td><b>{display}</b></td><td>{status}</td>"
+            f"<td><div style='display:flex;gap:4px;'>{unlock_form}</div></td></tr>"
+        )
+
+    # ── Section 5: Mail ───────────────────────────────────────────────────────
+    mail_status_row = lambda k, v: (
+        f"<tr><td style='color:var(--mu);font-size:12px;'>{k}</td><td style='font-size:13px;'>{v}</td></tr>"
+    )
+    mail_status_html = (
+        f"<table style='width:auto;margin-bottom:12px;'>"
+        f"{mail_status_row('Server', mail_cfg.get('mail_server') or '–')}"
+        f"{mail_status_row('Port', mail_cfg.get('mail_port') or '587')}"
+        f"{mail_status_row('User', mail_cfg.get('mail_username') or '–')}"
+        f"{mail_status_row('Passwort', '<span style=\"color:var(--ok);\">gesetzt</span>' if pw_set else '<span style=\"color:var(--danger);\">nicht gesetzt</span>')}"
+        f"{mail_status_row('Absender', mail_cfg.get('mail_from') or '–')}"
+        f"</table>"
+    )
+
+    admin_email = u.get("email") or ""
+
+    body = f"""
+    {flash_html()}
+<style>
+.acc{{border:1px solid var(--bd);border-radius:var(--r);margin-bottom:10px;overflow:hidden;background:var(--bg);}}
+.acc-hdr{{width:100%;display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;background:var(--sf);border:none;cursor:pointer;
+  font-size:15px;font-weight:600;color:var(--tx);text-align:left;gap:10px;}}
+.acc-hdr:hover{{background:var(--bd);}}
+.acc-hdr.open{{border-bottom:1px solid var(--bd);}}
+.acc-arr{{font-size:12px;flex-shrink:0;color:var(--mu);}}
+.acc-body{{max-height:0;overflow:hidden;transition:max-height .28s ease;}}
+.acc-body.open{{max-height:8000px;}}
+.acc-inner{{padding:14px 16px;}}
+</style>
+<script>
+function accToggle(id){{
+  var b=document.getElementById(id);
+  var h=b.previousElementSibling;
+  var a=h.querySelector('.acc-arr');
+  var op=b.classList.contains('open');
+  b.classList.toggle('open',!op);
+  h.classList.toggle('open',!op);
+  if(a)a.textContent=op?'▼':'▲';
+}}
+function toggleNewUser(){{
+  var p=document.getElementById('new-user-panel');
+  if(!p)return;
+  p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';
+}}
+window.addEventListener('DOMContentLoaded',function(){{
+  var h=window.location.hash;
+  if(h){{
+    var el=document.querySelector(h+' .acc-body');
+    var hd=document.querySelector(h+' .acc-hdr');
+    var ar=document.querySelector(h+' .acc-arr');
+    if(el){{el.classList.add('open');if(hd)hd.classList.add('open');if(ar)ar.textContent='▲';}}
+  }}
+}});
+</script>
+
+    <!-- Section 1: Benutzerverwaltung -->
+    <div class="acc" id="acc-user">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-user-body')">
+        <span>👥 Benutzerverwaltung</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-user-body">
+        <div class="acc-inner">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <span class="small">{len(all_users)} Benutzer</span>
+            <button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">+ Neuer Benutzer</button>
+          </div>
+
+          <div id="new-user-panel" style="display:none;border:1px solid var(--bd);border-radius:var(--rs);padding:12px;margin-bottom:12px;background:var(--sf);">
+            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Neuen Benutzer anlegen</div>
+            <form method="post" action="/admin/users/new">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+                <div><label style="font-size:12px;">Username</label><br><input name="username" required style="font-size:13px;padding:5px 8px;"></div>
+                <div><label style="font-size:12px;">Temporäres Passwort</label><br><input type="password" name="password" required style="font-size:13px;padding:5px 8px;"></div>
+                <div><label style="font-size:12px;">Erfassung ab</label><br>{_date_input("tracking_start_date", today_iso)}</div>
+              </div>
+              <div style="display:flex;gap:16px;margin-bottom:10px;">
+                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="is_admin" value="1"> Admin</label>
+                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="is_active" value="1" checked> aktiv</label>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="btn primary btn-sm" type="submit">Anlegen</button>
+                <button class="btn btn-sm" type="button" onclick="toggleNewUser()">Abbrechen</button>
+              </div>
+              <div class="small" style="margin-top:6px;color:var(--mu);">Nutzer wird beim ersten Login durch den Einrichtungs-Wizard geführt.</div>
+            </form>
+          </div>
+
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Benutzer</th><th>Angelegt</th><th></th></tr></thead>
+              <tbody>{user_trs}</tbody>
+            </table>
+          </div>
+          <div class="small" style="color:var(--mu);margin-top:6px;">Eigener Account kann nicht gelöscht werden.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 2: Zeitschemas -->
+    <div class="acc" id="acc-zeit">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit-body')">
+        <span>🕐 Zeitschemas</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-zeit-body">
+        <div class="acc-inner">
+          <p class="small" style="margin-bottom:8px;">Zeitschemata werden pro Benutzer unter "Bearbeiten" verwaltet.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Benutzer</th><th>Aktuelles Soll</th><th></th></tr></thead>
+              <tbody>{sched_trs}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 3: Urlaubsverwaltung -->
+    <div class="acc" id="acc-urlaub">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
+        <span>🏖 Urlaubsverwaltung</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-urlaub-body">
+        <div class="acc-inner">
+          <p class="small" style="margin-bottom:8px;">Übertrag-Ausnahmen steuern, ob Resturlaub am 31.03. verfällt.</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Benutzer</th><th></th></tr></thead>
+              <tbody>{vac_trs}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 4: Abschlüsse -->
+    <div class="acc" id="acc-abschl">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-abschl-body')">
+        <span>🔒 Abschlüsse</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-abschl-body">
+        <div class="acc-inner">
+          <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
+            <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;">
+              <div><label style="font-size:12px;">Jahr</label><br><select name="y" style="font-size:13px;padding:4px 8px;">{year_opts}</select></div>
+              <button class="btn btn-sm" type="submit">Anzeigen</button>
+            </form>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Benutzer</th><th>Status {sel_year}</th><th></th></tr></thead>
+              <tbody>{periods_trs}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 5: Maileinstellungen -->
+    <div class="acc" id="acc-mail">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-mail-body')">
+        <span>✉ Maileinstellungen</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-mail-body">
+        <div class="acc-inner">
+          {mail_status_html}
+          <form method="post" action="/admin/mail-settings" style="margin-bottom:16px;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+              <div style="flex:2;min-width:180px;">
+                <label style="font-size:12px;">Mailserver (SMTP)</label>
+                <input type="text" name="mail_server" value="{mail_cfg.get('mail_server','')}" placeholder="mail.beispiel.de" required style="font-size:13px;padding:5px 8px;">
+              </div>
+              <div style="flex:0 0 90px;">
+                <label style="font-size:12px;">Port</label>
+                <input type="number" name="mail_port" value="{mail_cfg.get('mail_port','587')}" min="1" max="65535" required style="width:80px;font-size:13px;padding:5px 8px;">
+              </div>
+            </div>
+            <div style="margin-bottom:8px;">
+              <label style="font-size:12px;">Benutzername</label>
+              <input type="text" name="mail_username" value="{mail_cfg.get('mail_username','')}" placeholder="user@beispiel.de" required style="font-size:13px;padding:5px 8px;">
+            </div>
+            <div style="margin-bottom:8px;">
+              <label style="font-size:12px;">Passwort {"<span style='font-weight:400;color:var(--mu);'>(leer = nicht ändern)</span>" if pw_set else ""}</label>
+              <input type="password" name="mail_password" value="" placeholder="{'nicht ändern' if pw_set else 'Passwort'}" style="font-size:13px;padding:5px 8px;">
+            </div>
+            <div style="margin-bottom:10px;">
+              <label style="font-size:12px;">Absender</label>
+              <input type="text" name="mail_from" value="{mail_cfg.get('mail_from','')}" placeholder="Zeiterfassung &lt;noreply@beispiel.de&gt;" style="font-size:13px;padding:5px 8px;">
+            </div>
+            <button class="btn primary btn-sm" type="submit">Speichern</button>
+          </form>
+          <hr style="margin:12px 0;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Verbindung testen</div>
+          <form method="post" action="/admin/mail-settings/test">
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+              <div>
+                <label style="font-size:12px;">Test-Empfänger</label>
+                <input type="email" name="test_recipient" value="{admin_email}" placeholder="admin@beispiel.de" required style="font-size:13px;padding:5px 8px;">
+              </div>
+              <button class="btn btn-sm" type="submit">Test-Mail senden</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    """
+    return render_template_string(layout("Admin", body, u, APP_VERSION))
 
 
 @app.get("/admin/mail-settings")
@@ -7837,7 +8182,7 @@ def admin_mail_settings_save():
     update_pw = bool(mail_password)
     _save_mail_config(mail_server, mail_port, mail_username, mail_password, mail_from, update_pw)
     add_flash("Maileinstellungen gespeichert.", "success")
-    return redirect("/admin/mail-settings")
+    return redirect("/admin#acc-mail")
 
 
 @app.post("/admin/mail-settings/test")
@@ -7859,7 +8204,7 @@ def admin_mail_settings_test():
         add_flash(f"Test-Mail erfolgreich gesendet an {recipient}.", "success")
     except Exception as exc:
         add_flash(f"Fehler beim Senden: {exc}", "error")
-    return redirect("/admin/mail-settings")
+    return redirect("/admin#acc-mail")
 
 
 if __name__ == "__main__":
