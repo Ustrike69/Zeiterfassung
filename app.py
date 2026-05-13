@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.5"
+APP_VERSION = "v4.6.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -4410,32 +4410,29 @@ def _exception_banner(day: str, is_blocked_day: bool, exc_row, locked: bool) -> 
         return ""
     if exc_row is not None:
         note = exc_row["note"] or ""
-        note_html = f" &ndash; <i>{note}</i>" if note else ""
+        note_part = f" &ndash; <i style='font-weight:400;'>{note}</i>" if note else ""
         remove_btn = "" if locked else (
-            f"<form method='post' action='/api/remove-exception' style='margin:0;'>"
+            f"<form method='post' action='/api/remove-exception' style='display:contents;'>"
             f"<input type='hidden' name='day' value='{day}'>"
-            f"<button class='btn danger' type='submit' style='padding:6px 12px;font-size:13px;'>Ausnahme entfernen</button>"
-            f"</form>"
+            f"<button class='btn danger btn-sm' type='submit'>Entfernen</button></form>"
         )
         return (
-            f"<div class='card' style='margin-top:10px;border-color:#16a34a;background:rgba(22,163,74,.07);'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;'>"
-            f"<div><b style='color:#16a34a;'>⚡ Ausnahme aktiv</b>{note_html}"
-            f"<div class='small' style='margin-top:2px;'>Zeitblöcke an diesem Wochenende/Feiertag sind erlaubt.</div></div>"
-            f"{remove_btn}</div></div>"
+            f"<div class='exc-banner exc-ok'>"
+            f"<span style='flex:1;min-width:0;'>⚡ <b>Ausnahme aktiv</b>{note_part}"
+            f"<span class='exc-sub'>Zeitblöcke an diesem Wochenende/Feiertag sind erlaubt.</span></span>"
+            f"{remove_btn}</div>"
         )
     set_form = "" if locked else (
-        f"<form method='post' action='/api/set-exception' style='display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;'>"
+        f"<form method='post' action='/api/set-exception' style='display:flex;gap:6px;align-items:center;flex-wrap:wrap;'>"
         f"<input type='hidden' name='day' value='{day}'>"
-        f"<div><label style='font-size:13px;'>Grund <span style='color:var(--mu);'>(optional)</span></label><br>"
-        f"<input name='note' placeholder='z.B. Notfalleinsatz' style='max-width:260px;'></div>"
-        f"<button class='btn primary' type='submit'>Ausnahme setzen</button>"
+        f"<input name='note' placeholder='Grund (optional)' style='font-size:13px;padding:4px 8px;width:160px;'>"
+        f"<button class='btn primary btn-sm' type='submit'>Ausnahme setzen</button>"
         f"</form>"
     )
     return (
-        f"<div class='card' style='margin-top:10px;border-color:#f59e0b;background:rgba(245,158,11,.07);'>"
-        f"<b style='color:#b45309;'>⚠ Wochenende / Feiertag – Speichern blockiert</b>"
-        f"<p class='small' style='margin:6px 0 0;'>Zeitblöcke für diesen Tag können erst eingetragen werden, nachdem eine Ausnahme gesetzt wurde.</p>"
+        f"<div class='exc-banner exc-warn'>"
+        f"<span style='flex:1;min-width:0;'>⚠ <b>Wochenende / Feiertag</b>"
+        f"<span class='exc-sub'>Ausnahme erforderlich, um Zeitblöcke zu erfassen.</span></span>"
         f"{set_form}</div>"
     )
 
@@ -4688,6 +4685,14 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
 .day-trip{{margin-bottom:0;}}
 .day-trip .day-sec-body label{{font-size:12px;margin-bottom:2px;}}
 .day-trip .day-sec-body input,.day-trip .day-sec-body select,.day-trip .day-sec-body textarea{{font-size:13px;padding:5px 8px;}}
+.exc-banner{{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 12px;border-radius:var(--rs);font-size:13px;margin-bottom:8px;border:1px solid;}}
+.exc-ok{{border-color:#16a34a;background:rgba(22,163,74,.07);color:#15803d;}}
+.exc-warn{{border-color:#f59e0b;background:rgba(245,158,11,.08);color:#b45309;}}
+.exc-sub{{display:block;font-size:11px;opacity:.8;margin-top:1px;}}
+@media(prefers-color-scheme:dark){{
+  .exc-ok{{color:#4ade80;}}
+  .exc-warn{{color:#fbbf24;}}
+}}
 </style>
 
     <!-- Day header -->
