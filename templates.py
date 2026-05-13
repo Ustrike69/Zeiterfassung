@@ -108,13 +108,18 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
     padding:9px 14px;border-radius:var(--rs);
     border:1px solid var(--bd);background:var(--sf);color:var(--tx);
     cursor:pointer;text-decoration:none;font-size:15px;font-family:var(--fn);
-    transition:background .12s;-webkit-tap-highlight-color:transparent;white-space:nowrap;
+    font-weight:500;
+    transition:background .12s,opacity .12s;-webkit-tap-highlight-color:transparent;white-space:nowrap;
     line-height:1.2;
   }}
   .btn:hover{{background:var(--bd);}}
   .btn:active{{opacity:.75;}}
-  .btn.primary{{background:var(--ac);color:var(--ac-fg);border-color:var(--ac);}}
-  .btn.primary:hover{{opacity:.9;background:var(--ac);}}
+  .btn.primary,.btn-primary{{background:var(--ac);color:var(--ac-fg);border-color:var(--ac);}}
+  .btn.primary:hover,.btn-primary:hover{{opacity:.9;background:var(--ac);}}
+  .btn.danger,.btn-danger{{color:var(--danger);border-color:var(--danger);}}
+  .btn.danger:hover,.btn-danger:hover{{background:rgba(220,38,38,.08);}}
+  .btn-sm{{padding:5px 10px;font-size:13px;}}
+  .btn-lg{{padding:12px 16px;font-size:15px;}}
   /* ---- Forms ---- */
   input,select,textarea{{
     padding:10px 12px;border:1px solid var(--bd);border-radius:var(--rs);
@@ -154,7 +159,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
 <body>
 <header class="app-header">
   <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
-    {"" if not (user and show_back) else '<button onclick="if(history.length>1){{history.back();}}else{{location.href=\'/\';}" class="btn" style="flex-shrink:0;padding:5px 10px;font-size:13px;">&#8592; Zurück</button>'}
+    {"" if not (user and show_back) else '<button onclick="goBack()" class="btn btn-sm">&#8592; Zurück</button>'}
     <div style="min-width:0;">
       <div class="hdr-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{title}</div>
       <div class="hdr-sub">Zeiterfassung {app_version}{" · " + user_display if user_display else ""}</div>
@@ -167,6 +172,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
 {body}
 </div>
 <script>
+  function goBack(){{if(history.length>1){{history.back();}}else{{location.href='/';}}}}
   function setBreak(el,mins){{
     try{{var f=el.closest('form');var inp=f.querySelector('input[name="break_minutes"]');if(inp)inp.value=String(mins);}}catch(e){{}}
     return false;

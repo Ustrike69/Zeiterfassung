@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.9"
+APP_VERSION = "v4.6.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2456,8 +2456,7 @@ def index():
                    value="{yesterday_iso}" min="{first_entry_iso}" max="{yesterday_iso}"
                    onchange="kontierDtPick(this)">
           </div>
-          <button id="kontier-btn" class="btn primary" onclick="doKontieren()"
-                  style="padding:5px 10px;font-size:13px;white-space:nowrap;"
+          <button id="kontier-btn" class="btn primary btn-sm" onclick="doKontieren()"
                   {"" if kontier_has_range else "disabled"}>Kontieren</button>
         </div>
         <div id="kontier-toast" style="display:none;margin-top:8px;padding:6px 10px;
@@ -2469,7 +2468,7 @@ def index():
         <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung</div>
         <div style="font-size:15px;font-weight:600;color:var(--mu);">Deaktiviert</div>
         <div style="margin-top:8px;">
-          <a class="btn" href="/settings" style="padding:5px 12px;font-size:13px;">Einstellungen</a>
+          <a class="btn" href="/settings" >Einstellungen</a>
         </div>
       </div>"""
 
@@ -2481,14 +2480,8 @@ def index():
 </style>
 
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-      <a class="btn primary" href="/day/{today.isoformat()}"
-         style="flex:1;min-width:160px;padding:12px 16px;font-size:15px;text-align:center;">
-        Zeiterfassung heute
-      </a>
-      <a class="btn primary" href="/calendar"
-         style="padding:12px 16px;font-size:15px;white-space:nowrap;">
-        Kalender
-      </a>
+      <a class="btn primary btn-lg" href="/day/{today.isoformat()}" style="flex:1;min-width:160px;text-align:center;">Zeiterfassung heute</a>
+      <a class="btn primary btn-lg" href="/calendar">Kalender</a>
     </div>
 
     <div class="idx-grid">
@@ -2498,7 +2491,7 @@ def index():
         <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{balance_color};line-height:1.1;">{balance_str}</div>
         <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
           <span class="small">Stand heute</span>
-          <a class="btn" href="/balance" style="padding:5px 12px;font-size:13px;">Details</a>
+          <a class="btn" href="/balance" >Details</a>
         </div>
       </div>
 
@@ -2507,7 +2500,7 @@ def index():
         <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;line-height:1.1;">{vc["remaining_total"]:.1f} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
         <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
           <span class="small">von {vc["entitlement"] + vc["effective_carryover"]:.1f} verfügbar{vac_hint}</span>
-          <a class="btn" href="/settings/vacation" style="padding:5px 12px;font-size:13px;">Details</a>
+          <a class="btn" href="/settings/vacation" >Details</a>
         </div>
       </div>
 
@@ -2571,7 +2564,7 @@ def index():
       <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;">{ab_cells}</div>
       <div style="margin-top:10px;">
-        <a class="btn" href="/absences" style="padding:5px 12px;font-size:13px;">Alle Abwesenheiten</a>
+        <a class="btn" href="/absences" >Alle Abwesenheiten</a>
       </div>
     </div>
     '''
@@ -4542,7 +4535,7 @@ def day_detail(day: str):
           <div><label>Kommen</label><br><input class="tin" id="tin_add" name="time_in" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
           <div><label>Gehen</label><br><input class="tout" id="tout_add" name="time_out" type="time" list="time_suggestions" placeholder="HH:MM" required></div>
           <div><label>Pause (min)</label><br><input id="brk_day_add" class="brk" name="break_minutes" type="number" min="0" value="0" required>
-<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='30'">30</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='45'">45</button><button class="btn" type="button" style="padding:4px 8px;" onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
+<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='30'">30</button><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='45'">45</button><button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='60'">60</button></div></div>
         </div>
         <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" placeholder="optional" style="width:100%;"></div>
         <div id="block-add-err" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:13px;"></div>
@@ -4621,8 +4614,7 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:10px;">
-          <button class="btn" type="button"
-            onclick="if(history.length>1){{history.back();}}else{{location.href='/';}}">← Zurück</button>
+          <button class="btn btn-sm" type="button" onclick="goBack()">← Zurück</button>
           <h3 style="margin:0;">Tages-Editor – {day}</h3>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -4939,8 +4931,8 @@ def day_block_edit(day: str, block_id: int):
           <div><label>Kommen</label><br><input class="tin" name="time_in" type="time" list="time_suggestions" placeholder="HH:MM" value="{b['time_in']}" required></div>
           <div><label>Gehen</label><br><input class="tout" name="time_out" type="time" list="time_suggestions" placeholder="HH:MM" value="{b['time_out']}" required></div>
           <div><label>Pause (min)</label><br><input id="brk_day_edit" class="brk" name="break_minutes" type="number" min="0" value="{int(b['break_minutes'] or 0)}" required>
-<div style='margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;'><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='30'">30</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='45'">45</button><button class='btn' type='button' style='padding:4px 8px;' onclick="document.getElementById('brk_day_edit').value='60'">60</button></div></div>
-          <div class='small' style='display:flex;gap:6px;align-items:center;margin-top:6px;'><span style='color:#777;'>Schnellwahl:</span><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,30);">30</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,45);">45</a><a href="#" class="btn" style="padding:4px 8px;" onclick="return setBreak(this,60);">60</a><span style='color:#777;'>min</span></div>
+<div style='margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;'><button class='btn btn-sm' type='button'  onclick="document.getElementById('brk_day_edit').value='30'">30</button><button class='btn btn-sm' type='button'  onclick="document.getElementById('brk_day_edit').value='45'">45</button><button class='btn btn-sm' type='button'  onclick="document.getElementById('brk_day_edit').value='60'">60</button></div></div>
+          <div class='small' style='display:flex;gap:6px;align-items:center;margin-top:6px;'><span style='color:#777;'>Schnellwahl:</span><a href="#" class="btn btn-sm" onclick="return setBreak(this,30);">30</a><a href="#" class="btn btn-sm" onclick="return setBreak(this,45);">45</a><a href="#" class="btn btn-sm" onclick="return setBreak(this,60);">60</a><span style='color:#777;'>min</span></div>
         </div>
         <div style="margin-top:8px;"><label>Kommentar</label><br><input name="comment" value="{(b['comment'] or '')}" placeholder="optional" style="width:100%;"></div>
         <div id="block-edit-err" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:13px;"></div>
@@ -5701,7 +5693,7 @@ def business_trips_list():
                 f" onsubmit=\"return confirm('Dienstreise löschen?');\">"
                 f"<input type='hidden' name='trip_id' value='{t['id']}'>"
                 f"<input type='hidden' name='y' value='{year}'>"
-                f"<button class='btn danger' type='submit' style='padding:4px 8px;font-size:13px;'>Löschen</button></form></td>"
+                f"<button class='btn danger btn-sm' type='submit' >Löschen</button></form></td>"
                 f"</tr>"
             )
     else:
@@ -5918,7 +5910,7 @@ def periods_view():
                         f"<form method='post' action='/periods/unlock' style='display:inline;'>"
                         f"<input type='hidden' name='year' value='{sel_year}'>"
                         f"<input type='hidden' name='month' value='{m}'>"
-                        f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Entsperren</button></form>"
+                        f"<button class='btn danger btn-sm' >Entsperren</button></form>"
                     )
                 else:
                     action = "<span class='small' style='color:var(--mu);'>via Jahresabschluss</span>"
@@ -5928,7 +5920,7 @@ def periods_view():
                 f"<form method='post' action='/periods/lock' style='display:inline;'>"
                 f"<input type='hidden' name='year' value='{sel_year}'>"
                 f"<input type='hidden' name='month' value='{m}'>"
-                f"<button class='btn' style='padding:4px 10px;font-size:13px;'>Abschließen</button></form>"
+                f"<button class='btn btn-sm' >Abschließen</button></form>"
             )
         else:
             status_html = "<span class='small' style='color:var(--mu);'>–</span>"
@@ -5955,14 +5947,14 @@ def periods_view():
             yr_action = (
                 f"<form method='post' action='/periods/unlock' style='display:inline;'>"
                 f"<input type='hidden' name='year' value='{sel_year}'>"
-                f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Jahr entsperren</button></form>"
+                f"<button class='btn danger btn-sm' >Jahr entsperren</button></form>"
             )
     elif year_is_past:
         yr_status = "<span style='color:var(--mu);'>Offen</span>"
         yr_action = (
             f"<form method='post' action='/periods/lock' style='display:inline;'>"
             f"<input type='hidden' name='year' value='{sel_year}'>"
-            f"<button class='btn' style='padding:4px 10px;font-size:13px;'>Jahr abschließen</button></form>"
+            f"<button class='btn btn-sm' >Jahr abschließen</button></form>"
         )
     else:
         yr_status = "<span class='small' style='color:var(--mu);'>Laufendes Jahr</span>"
@@ -6479,13 +6471,13 @@ def admin_users():
             delete_btn = (
                 f'<form method="post" action="/admin/users/{r["id"]}/delete" style="display:inline;margin-left:8px;" '
                 f'onsubmit="return confirm(\'Nutzer {safe_name} und alle zugehörigen Daten unwiderruflich löschen?\')">'
-                f'<button class="btn danger" type="submit" style="padding:4px 10px;font-size:13px;">Löschen</button></form>'
+                f'<button class="btn danger btn-sm" type="submit">Löschen</button></form>'
             )
         impersonate_btn = ""
         if not r["is_admin"] and r["is_active"] and r["id"] != u["id"]:
             impersonate_btn = (
                 f'<form method="post" action="/admin/impersonate/{r["id"]}" style="display:inline;margin-left:8px;">'
-                f'<button class="btn" type="submit" style="padding:4px 10px;font-size:13px;" title="Identität annehmen">👤 Identität</button></form>'
+                f'<button class="btn btn-sm" type="submit" title="Identität annehmen">👤 Identität</button></form>'
             )
         carryover_exc_badge = ""
         if r["vacation_carryover_exception"]:
@@ -7058,11 +7050,11 @@ def admin_periods():
             f"<form method='post' action='/admin/periods/unlock' style='display:inline;'>"
             f"<input type='hidden' name='target_user_id' value='{uid}'>"
             f"<input type='hidden' name='year' value='{sel_year}'>"
-            f"<button class='btn danger' style='padding:4px 10px;font-size:13px;'>Alle entsperren</button>"
+            f"<button class='btn danger btn-sm' >Alle entsperren</button>"
             f"</form>"
         ) if ulocks else ""
 
-        detail_link = f"<a class='btn' href='/periods?y={sel_year}' style='padding:4px 10px;font-size:13px;'>Details</a>" if uid == u["id"] else ""
+        detail_link = f"<a class='btn btn-sm' href='/periods?y={sel_year}' >Details</a>" if uid == u["id"] else ""
 
         trs += f"<tr><td><b>{usr['username']}</b></td><td>{status_txt}</td><td style='white-space:nowrap;'>{detail_link} {unlock_form}</td></tr>"
 
