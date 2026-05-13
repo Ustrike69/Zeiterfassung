@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.6.2"
+APP_VERSION = "v4.6.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5688,9 +5688,9 @@ def business_trips_list():
         e = str(t["end_date"] or s)[:10]
         sy = _fmt_date_de(s, omit_year=(int(s[:4]) == year))
         if s == e:
-            return f"<a href='/day/{s}'>{sy}</a>"
+            return sy
         ey = _fmt_date_de(e, omit_year=(int(e[:4]) == year))
-        return f"<a href='/day/{s}'>{sy}</a> – <a href='/day/{e}'>{ey}</a>"
+        return f"{sy} – {ey}"
 
     rows_html = ""
     if trips:
@@ -5772,7 +5772,7 @@ def business_trips_list():
           {"<span class='btn' style='opacity:.35;cursor:not-allowed;'>◀︎ " + str(prev_year) + "</span>" if _prev_year_blocked else f"<a class='btn' href='/business_trips?y={prev_year}'>◀︎ {prev_year}</a>"}
           <a class="btn" href="/business_trips?y={today.year}">Heute</a>
           <a class="btn" href="/business_trips?y={next_year}">{next_year} ▶︎</a>
-          <a class="btn primary" href="/business_trips?y={year}&new=1">+ Neue Dienstreise</a>
+          <a class="btn primary btn-sm" href="/business_trips?y={year}&new=1">+ Neu</a>
         </div>
       </div>
       <div class="table-scroll" style="margin-top:10px;">
