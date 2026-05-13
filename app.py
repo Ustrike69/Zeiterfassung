@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.0.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -4349,14 +4349,6 @@ function toggleKontiert(iso,ev){{
           <button id="cal-tb-month" class="btn" type="button" onclick="setCalView('month')" style="font-size:13px;padding:8px 10px;">&#8862; Monat</button>
           <button id="cal-tb-list"  class="btn" type="button" onclick="setCalView('list')"  style="font-size:13px;padding:8px 10px;">&#9776; Liste</button>
         </div>
-      </div>
-
-      <div class="small" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-        <span><span style="display:inline-block;width:10px;height:10px;background:#999;border-radius:2px;margin-right:4px;vertical-align:middle;"></span>Abwesenheit</span>
-        <span style="font-weight:700;color:var(--danger);">&#9679; Feiertag</span>
-        <span style="color:var(--ok);font-weight:700;">HH:MM</span> erfasst
-        <span style="color:var(--danger);font-weight:700;">&#10005;</span> fehlend
-        <span style="color:#b45309;font-weight:700;">·</span> kontiert (Zeitangabe in Bernstein)
       </div>
 
       <div class="cal-grid-wrap">
