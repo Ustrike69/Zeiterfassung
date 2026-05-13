@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v4.5.5"
+APP_VERSION = "v4.5.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -1525,7 +1525,7 @@ def _date_input(name: str, value_iso: str = "", required: bool = False, min_targ
 
 def _time_input(name: str, value: str = "", required: bool = False) -> str:
     req = "required" if required else ""
-    return f'<input type="time" name="{name}" step="900" value="{value}" list="time_suggestions" {req}>'
+    return f'<input type="time" name="{name}" value="{value}" list="time_suggestions" {req}>'
 
 
 def flash_html():
@@ -4333,6 +4333,17 @@ function toggleKontiert(iso,ev){{
 # Tages-Editor (Zeitblöcke + Abwesenheit) – v2.9.1
 # -------------------------
 
+def _round_to_15(hhmm: str) -> str:
+    """Round HH:MM minutes to nearest 15; returns unchanged string if not HH:MM."""
+    if not hhmm or not re.match(r"^\d{2}:\d{2}$", hhmm):
+        return hhmm
+    h, m = int(hhmm[:2]), int(hhmm[3:])
+    r = round(m / 15) * 15
+    if r == 60:
+        r, h = 0, (h + 1) % 24
+    return f"{h:02d}:{r:02d}"
+
+
 def _validate_block(time_in: str, time_out: str, break_minutes: int) -> tuple[bool, str]:
     if not re.match(r"^\d{2}:\d{2}$", time_in) or not re.match(r"^\d{2}:\d{2}$", time_out):
         return False, "Bitte Zeiten im Format HH:MM angeben."
@@ -4698,10 +4709,10 @@ def day_business_trip_save(day: str):
     end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
     if end_date and end_date < start_date:
         end_date = start_date
-    departure_time     = (request.form.get("departure_time") or "").strip() or None
-    departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
-    return_time        = (request.form.get("return_time") or "").strip() or None
-    return_end_time    = (request.form.get("return_end_time") or "").strip() or None
+    departure_time     = _round_to_15((request.form.get("departure_time") or "").strip()) or None
+    departure_end_time = _round_to_15((request.form.get("departure_end_time") or "").strip()) or None
+    return_time        = _round_to_15((request.form.get("return_time") or "").strip()) or None
+    return_end_time    = _round_to_15((request.form.get("return_end_time") or "").strip()) or None
     notes              = (request.form.get("notes") or "").strip() or None
     trip_id            = (request.form.get("trip_id") or "").strip() or None
     db = connect()
@@ -4787,8 +4798,8 @@ def day_block_add(day: str):
                 else:
                     add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
                     return redirect(f"/day/{day}")
-    time_in = (request.form.get("time_in") or "").strip()
-    time_out = (request.form.get("time_out") or "").strip()
+    time_in = _round_to_15((request.form.get("time_in") or "").strip())
+    time_out = _round_to_15((request.form.get("time_out") or "").strip())
     break_minutes = int(request.form.get("break_minutes") or 0)
     comment = (request.form.get("comment") or "").strip()
 
@@ -4951,8 +4962,8 @@ def day_block_edit_post(day: str, block_id: int):
                     add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
                     return redirect(f"/day/{day}/block/{block_id}/edit")
 
-    time_in = (request.form.get("time_in") or "").strip()
-    time_out = (request.form.get("time_out") or "").strip()
+    time_in = _round_to_15((request.form.get("time_in") or "").strip())
+    time_out = _round_to_15((request.form.get("time_out") or "").strip())
     try:
         break_minutes = int(request.form.get("break_minutes") or 0)
     except Exception:
@@ -5755,10 +5766,10 @@ def business_trips_add():
     if sd_err:
         add_flash(sd_err, "error")
         return redirect(f"/business_trips?y={year}&new=1")
-    departure_time     = (request.form.get("departure_time") or "").strip() or None
-    departure_end_time = (request.form.get("departure_end_time") or "").strip() or None
-    return_time        = (request.form.get("return_time") or "").strip() or None
-    return_end_time    = (request.form.get("return_end_time") or "").strip() or None
+    departure_time     = _round_to_15((request.form.get("departure_time") or "").strip()) or None
+    departure_end_time = _round_to_15((request.form.get("departure_end_time") or "").strip()) or None
+    return_time        = _round_to_15((request.form.get("return_time") or "").strip()) or None
+    return_end_time    = _round_to_15((request.form.get("return_end_time") or "").strip()) or None
     notes              = (request.form.get("notes") or "").strip() or None
     db = connect()
     db.execute(

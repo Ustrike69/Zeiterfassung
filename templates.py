@@ -212,7 +212,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
   }}
   document.addEventListener('change',function(ev){{
     var el=ev.target;
-    if(el&&el.type==='time'&&el.getAttribute('step')==='900')snapTo15(el);
+    if(el&&el.type==='time')snapTo15(el);
   }});
   function toggleMultiday(cb){{
     try{{var wrap=cb.closest('form').querySelector('.multiday-fields');if(wrap)wrap.style.display=cb.checked?'':'none';}}catch(e){{}}
