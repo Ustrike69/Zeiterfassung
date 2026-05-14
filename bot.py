@@ -1,12 +1,20 @@
-"""Zeiterfassung Telegram Bot"""
+"""Zeiterfassung Telegram Bot v1.0.7"""
 
 import datetime
+import json
 import logging
 import os
 import sys
 
+import anthropic
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -20,17 +28,23 @@ TOKEN = "8673206171:AAEwr7EXU7a2y6frMspRATKRvWIdHlWbCeU"
 ADMIN_IDS: set[int] = {7593372353}
 AUTHORIZED_IDS: set[int] = {7593372353}  # extended via DB at runtime
 
-# ── DB helpers (reuse connect() from db.py) ──────────────────────────────────
+NLP_EXAMPLES = (
+    "❓ Das habe ich nicht verstanden. Beispiele:\n"
+    "• Heute von 7:30 bis 13:00 gearbeitet\n"
+    "• Am 15.5. von 8 bis 16 Uhr\n"
+    "• Urlaub vom 1.7. bis 15.7.\n"
+    "• Am 3.8. Flextag\n"
+    "• Krank von 10.6. bis 12.6."
+)
+
+_WEEKDAY_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 from db import connect, init_db  # noqa: E402
 
 
-def _ensure_authorized(telegram_id: int) -> bool:
-    return telegram_id in AUTHORIZED_IDS
-
-
 def _get_user_id(telegram_id: int) -> "int | None":
-    """Return app user_id for a telegram_id, or None."""
     db = connect()
     try:
         r = db.execute(
@@ -78,7 +92,7 @@ def _all_users() -> list[dict]:
         db.close()
 
 
-# ── Calculation helpers (inlined from app.py logic) ──────────────────────────
+# ── Calculation helpers ───────────────────────────────────────────────────────
 
 def _minutes_from_hhmm(hhmm: str) -> int:
     h, m = hhmm.split(":")
@@ -143,7 +157,6 @@ def _get_user_schedule_for_day(user_id: int, iso_day: str) -> "dict | None":
         ).fetchone()
         if rows:
             return dict(rows)
-        # fallback to user_schedule
         r = db.execute("SELECT * FROM user_schedule WHERE user_id=?", (user_id,)).fetchone()
         return dict(r) if r else None
     finally:
@@ -162,7 +175,7 @@ def _is_workday_for_user(iso_day: str, schedule: "dict | None") -> bool:
     if not schedule:
         return False
     d = datetime.date.fromisoformat(iso_day)
-    wd = d.weekday()  # 0=Mon
+    wd = d.weekday()
     block = int(schedule.get("block_weekends_holidays") or 1)
     if block and wd >= 5:
         return False
@@ -185,8 +198,7 @@ def _is_absence_on_day(user_id: int, iso_day: str) -> bool:
     db = connect()
     try:
         ab = db.execute(
-            """SELECT a.id FROM absences a
-               WHERE a.user_id=? AND a.date_from<=? AND a.date_to>=?""",
+            "SELECT id FROM absences WHERE user_id=? AND date_from<=? AND date_to>=?",
             (user_id, iso_day, iso_day),
         ).fetchone()
         return ab is not None
@@ -201,56 +213,32 @@ def _week_dates_from(iso_day: str) -> list:
 
 
 def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
-    """Correct weekly/daily schedule calculation - mirrors app.py logic."""
-    # Check holiday/weekend
     if _is_holiday(iso_day):
         return 0
-
     schedule = _get_user_schedule_for_day(user_id, iso_day)
     if not schedule:
         return 0
-
     d = datetime.date.fromisoformat(iso_day)
     wd = d.weekday()
-
-    # Check workdays mask
     mask = int(schedule.get("workdays_mask") or 31)
     if not _mask_allows(mask, wd):
         return 0
-
-    # Weekend block
     block = int(schedule.get("block_weekends_holidays") or 1)
     if block and wd >= 5:
         return 0
-
-    # Check absence
     if _is_absence_on_day(user_id, iso_day):
         return 0
-
     mode = (schedule.get("mode") or "weekly").strip().lower()
-
     if mode == "daily":
         col = _WEEKDAY_COLS[wd] + "_minutes"
         return int(schedule.get(col) or 0)
-
-    # Weekly mode: distribute weekly_minutes evenly across eligible days
     weekly = int(schedule.get("weekly_minutes") or 0)
-    week_days = _week_dates_from(iso_day)
-
-    eligible = []
-    for wd_day in week_days:
-        w = wd_day.weekday()
-        if not _mask_allows(mask, w):
-            continue
-        eligible.append(wd_day)
-
-    if not eligible:
+    eligible = sorted(
+        wd_day for wd_day in _week_dates_from(iso_day)
+        if _mask_allows(mask, wd_day.weekday())
+    )
+    if not eligible or d not in eligible:
         return 0
-
-    eligible = sorted(eligible)
-    if d not in eligible:
-        return 0
-
     base = weekly // len(eligible)
     rem = weekly % len(eligible)
     idx = eligible.index(d)
@@ -272,7 +260,6 @@ def _actual_minutes_for_day(user_id: int, iso_day: str) -> int:
                 pass
         if total > 0:
             return max(0, total)
-        # fallback time_entries
         r = db.execute(
             "SELECT time_in, time_out, break_minutes FROM time_entries WHERE user_id=? AND day=?",
             (user_id, iso_day),
@@ -322,12 +309,10 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
     tracking_start = _get_tracking_start(user_id)
     if tracking_start:
         year_start = max(year_start, tracking_start)
-
     start_minutes = _get_start_balance_minutes(user_id)
     running = int(start_minutes)
     today_iso = datetime.date.today().isoformat()
     flextag_ranges = _fetch_flextag_ranges(user_id)
-
     for iso in _iter_days(year_start, end_iso):
         expected = int(_expected_minutes_for_day(user_id, iso) or 0)
         actual = int(_actual_minutes_for_day(user_id, iso) or 0)
@@ -335,7 +320,6 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
         if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
             flextag_min = _scheduled_minutes_ignoring_absence(user_id, iso)
         running += int(actual - expected - flextag_min)
-
     return int(running)
 
 
@@ -346,8 +330,10 @@ def _get_vacation_year(user_id: int, year: int) -> dict:
             "SELECT entitlement_days, carryover_days FROM user_vacation_year WHERE user_id=? AND year=?",
             (user_id, year),
         ).fetchone()
-        return {"entitlement_days": float(r["entitlement_days"]) if r else 0.0,
-                "carryover_days": float(r["carryover_days"]) if r else 0.0}
+        return {
+            "entitlement_days": float(r["entitlement_days"]) if r else 0.0,
+            "carryover_days": float(r["carryover_days"]) if r else 0.0,
+        }
     except Exception:
         return {"entitlement_days": 0.0, "carryover_days": 0.0}
     finally:
@@ -367,7 +353,6 @@ def _vacation_used_days(user_id: int, year: int) -> float:
         ).fetchall()
     finally:
         db.close()
-
     total = 0.0
     for row in rows:
         if row["is_half_day"]:
@@ -396,7 +381,6 @@ def _vacation_used_days_started_by(user_id: int, year: int, deadline_iso: str) -
         ).fetchall()
     finally:
         db.close()
-
     total = 0.0
     for row in rows:
         if row["is_half_day"]:
@@ -444,22 +428,15 @@ def _vacation_calc(user_id: int, year: int) -> dict:
     deadline = datetime.date(year, 3, 31)
     deadline_iso = deadline.isoformat()
     deadline_passed = today > deadline
-
     used_total = float(_vacation_used_days(user_id, year) or 0.0)
     carryover_exception = _get_vacation_carryover_exception(user_id)
-
     if carryover_exception:
         override = _get_vacation_carryover_override(user_id, year)
         effective_carryover = float(override["carryover_days"]) if override else carryover
     else:
         carryover_started = float(_vacation_used_days_started_by(user_id, year, deadline_iso) or 0.0)
-        if deadline_passed:
-            effective_carryover = min(carryover, carryover_started)
-        else:
-            effective_carryover = carryover
-
+        effective_carryover = min(carryover, carryover_started) if deadline_passed else carryover
     remaining_total = max(0.0, entitlement + effective_carryover - used_total)
-
     return {
         "entitlement": entitlement,
         "carryover": carryover,
@@ -475,14 +452,11 @@ def _get_missing_entry_days(user_id: int, year: int) -> list[str]:
     today = datetime.date.today()
     year_start = datetime.date(year, 1, 1).isoformat()
     yesterday = (today - datetime.timedelta(days=1)).isoformat()
-
     tracking_start = _get_tracking_start(user_id)
     if tracking_start:
         year_start = max(year_start, tracking_start)
-
     if yesterday < year_start:
         return []
-
     db = connect()
     try:
         have = {
@@ -500,24 +474,16 @@ def _get_missing_entry_days(user_id: int, year: int) -> list[str]:
                 (year_start, yesterday),
             ).fetchall()
         }
-    finally:
-        db.close()
-
-    # Abwesenheiten laden
-    db = connect()
-    try:
         abs_rows = db.execute(
             "SELECT date_from, date_to FROM absences WHERE user_id=? AND date_from<=? AND date_to>=?",
             (user_id, yesterday, year_start),
         ).fetchall()
     finally:
         db.close()
-
     absent = set()
     for row in abs_rows:
         for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
             absent.add(iso)
-
     missing = []
     for iso in _iter_days(year_start, yesterday):
         if iso in have or iso in hol or iso in absent:
@@ -559,20 +525,16 @@ def _get_uncontoured_days(user_id: int, year: int) -> list[str]:
     ci = _get_contouring_info(user_id)
     if not ci["enabled"]:
         return []
-
     today = datetime.date.today()
     year_start = datetime.date(year, 1, 1).isoformat()
     yesterday = (today - datetime.timedelta(days=1)).isoformat()
-
     tracking_start = _get_tracking_start(user_id)
     if tracking_start:
         year_start = max(year_start, tracking_start)
     if ci["start_date"]:
         year_start = max(year_start, ci["start_date"])
-
     if yesterday < year_start:
         return []
-
     db = connect()
     try:
         have = {
@@ -592,26 +554,227 @@ def _get_uncontoured_days(user_id: int, year: int) -> list[str]:
         }
     finally:
         db.close()
-
     return sorted(d for d in have if d not in contoured)
 
 
-# ── Auth middleware ───────────────────────────────────────────────────────────
+# ── Write helpers ─────────────────────────────────────────────────────────────
 
-async def _check_auth(update: Update) -> "tuple[bool, int|None]":
-    """Returns (authorized, user_id). Sends error message if not authorized."""
+def _is_day_locked(user_id: int, iso_day: str) -> bool:
+    year = int(iso_day[:4])
+    month = int(iso_day[5:7])
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT id FROM period_locks WHERE user_id=? AND period_type='year' AND year=?",
+            (user_id, year),
+        ).fetchone()
+        if r:
+            return True
+        r = db.execute(
+            "SELECT id FROM period_locks WHERE user_id=? AND period_type='month' AND year=? AND month=?",
+            (user_id, year, month),
+        ).fetchone()
+        return r is not None
+    finally:
+        db.close()
+
+
+def _do_insert_time_block(user_id: int, day: str, time_in: str, time_out: str, break_minutes: int) -> str:
+    try:
+        db = connect()
+        try:
+            db.execute(
+                "INSERT INTO time_blocks(user_id, day, time_in, time_out, break_minutes, created_at) "
+                "VALUES(?,?,?,?,?,datetime('now'))",
+                (user_id, day, time_in, time_out, break_minutes),
+            )
+            db.commit()
+        finally:
+            db.close()
+        d = datetime.date.fromisoformat(day)
+        wd = _WEEKDAY_DE[d.weekday()]
+        mins = _minutes_from_hhmm(time_out) - _minutes_from_hhmm(time_in) - break_minutes
+        return f"✅ Eingetragen: {wd} {_fmt_date_de(day)}\n⏰ {time_in} – {time_out} ({_fmt_minutes(mins)} Std)"
+    except Exception as e:
+        return f"❌ Konnte nicht eingetragen werden: {e}"
+
+
+def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to: str) -> str:
+    try:
+        db = connect()
+        try:
+            overlap = db.execute(
+                "SELECT id FROM absences WHERE user_id=? AND date_from<=? AND date_to>=?",
+                (user_id, date_to, date_from),
+            ).fetchone()
+        finally:
+            db.close()
+        if overlap:
+            return (
+                f"⚠️ Es gibt bereits eine Abwesenheit im Zeitraum "
+                f"{_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}."
+            )
+        if absence_type == "Flextag":
+            lookup_name = "Sonstige"
+            comment = "Flextag"
+        else:
+            lookup_name = absence_type
+            comment = None
+        db = connect()
+        try:
+            r = db.execute(
+                "SELECT id FROM absence_types WHERE name=?", (lookup_name,)
+            ).fetchone()
+            if not r:
+                return f"❌ Abwesenheitstyp '{lookup_name}' nicht gefunden."
+            type_id = int(r["id"])
+            db.execute(
+                "INSERT INTO absences(user_id, type_id, date_from, date_to, is_half_day, comment, created_at) "
+                "VALUES(?,?,?,?,0,?,datetime('now'))",
+                (user_id, type_id, date_from, date_to, comment),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return f"✅ Eingetragen: {absence_type}\n📅 {_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}"
+    except Exception as e:
+        return f"❌ Konnte nicht eingetragen werden: {e}"
+
+
+# ── NLP parsing ───────────────────────────────────────────────────────────────
+
+def _parse_nlp(text: str) -> "list | None":
+    today = datetime.date.today().isoformat()
+    system_prompt = (
+        f"Du bist ein Parser für eine Zeiterfassungs-App. Heute ist {today}.\n"
+        "Extrahiere aus dem Text eine oder mehrere Aktionen und antworte NUR mit\n"
+        "einem JSON-Array, ohne Erklärungen, ohne Markdown-Backticks.\n\n"
+        "Mögliche Aktionen:\n"
+        '- Zeiteintrag: {"action": "time", "date": "YYYY-MM-DD", "time_in": "HH:MM", "time_out": "HH:MM", "break_minutes": 0}\n'
+        '- Urlaub: {"action": "absence", "type": "Urlaub", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n'
+        '- Krank: {"action": "absence", "type": "Krank", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n'
+        '- Flextag: {"action": "absence", "type": "Flextag", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n\n'
+        "Regeln:\n"
+        "- 'heute' = aktuelles Datum\n"
+        "- 'morgen' = nächster Tag\n"
+        "- 'gestern' = gestriger Tag\n"
+        "- Zeiten auf 15-Minuten runden (6:00, 6:15, 6:30, 6:45...)\n"
+        "- Wenn kein Bis-Datum bei Abwesenheit: date_to = date_from\n"
+        "- Antworte IMMER nur mit validem JSON-Array, nie mit Text"
+    )
+    client = anthropic.Anthropic()
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and parsed:
+            return parsed
+        return None
+    except Exception as e:
+        logger.error("NLP parse error: %s", e)
+        return None
+
+
+async def _execute_actions(
+    actions: list,
+    uid: int,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    for action in actions:
+        act = action.get("action")
+
+        if act == "time":
+            day = action.get("date", "")
+            time_in = action.get("time_in", "")
+            time_out = action.get("time_out", "")
+            break_minutes = int(action.get("break_minutes") or 0)
+
+            if not day or not time_in or not time_out:
+                await update.message.reply_text(f"❌ Konnte nicht eingetragen werden: Unvollständige Zeitangaben.")
+                continue
+
+            if _is_day_locked(uid, day):
+                d = datetime.date.fromisoformat(day)
+                await update.message.reply_text(
+                    f"❌ {_WEEKDAY_DE[d.weekday()]} {_fmt_date_de(day)} ist gesperrt."
+                )
+                continue
+
+            db = connect()
+            try:
+                existing = db.execute(
+                    "SELECT id FROM time_blocks WHERE user_id=? AND day=?",
+                    (uid, day),
+                ).fetchone()
+            finally:
+                db.close()
+
+            if existing:
+                context.user_data["pending_confirm"] = {
+                    "action": "time",
+                    "user_id": uid,
+                    "day": day,
+                    "time_in": time_in,
+                    "time_out": time_out,
+                    "break_minutes": break_minutes,
+                }
+                d = datetime.date.fromisoformat(day)
+                wd = _WEEKDAY_DE[d.weekday()]
+                await update.message.reply_text(
+                    f"⚠️ Am {wd} {_fmt_date_de(day)} gibt es bereits einen Eintrag. "
+                    f"Trotzdem eintragen? (ja/nein)"
+                )
+            else:
+                result = _do_insert_time_block(uid, day, time_in, time_out, break_minutes)
+                await update.message.reply_text(result)
+
+        elif act == "absence":
+            absence_type = action.get("type", "")
+            date_from = action.get("date_from", "")
+            date_to = action.get("date_to", "") or date_from
+
+            if not absence_type or not date_from:
+                await update.message.reply_text("❌ Konnte nicht eingetragen werden: Unvollständige Abwesenheitsangaben.")
+                continue
+
+            result = _do_insert_absence(uid, absence_type, date_from, date_to)
+            await update.message.reply_text(result)
+
+        else:
+            await update.message.reply_text(NLP_EXAMPLES)
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+async def _check_auth(
+    update: Update, context: "ContextTypes.DEFAULT_TYPE | None" = None
+) -> "tuple[bool, int|None]":
     tid = update.effective_user.id
     if tid not in AUTHORIZED_IDS:
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return False, None
-    uid = _get_user_id(tid)
-    if uid is None:
+    own_uid = _get_user_id(tid)
+    if own_uid is None:
         await update.message.reply_text(
             "Kein Benutzer verknüpft. Bitte Admin kontaktieren.\n"
             f"Deine Telegram-ID: {tid}"
         )
         return False, None
-    return True, uid
+    if context is not None and tid in ADMIN_IDS:
+        ctx_uid = context.user_data.get("context_uid")
+        if ctx_uid is not None:
+            return True, ctx_uid
+    return True, own_uid
 
 
 # ── Command handlers ──────────────────────────────────────────────────────────
@@ -621,10 +784,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if tid not in AUTHORIZED_IDS:
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
-
     is_admin = tid in ADMIN_IDS
     text = (
         "👋 *Zeiterfassung Bot*\n\n"
+        "*Freitext-Eingabe:*\n"
+        "Schreib einfach was du gemacht hast, z.B.:\n"
+        "_Heute von 8 bis 16 Uhr gearbeitet_\n"
+        "_Urlaub vom 1.7. bis 15.7._\n\n"
         "*Befehle:*\n"
         "/saldo — Aktuelles Gleitzeitkonto\n"
         "/urlaub — Urlaubsübersicht\n"
@@ -636,6 +802,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_admin:
         text += (
             "\n*Admin-Befehle:*\n"
+            "/als <username> — Kontext wechseln\n"
+            "/als ich — Eigenen Kontext wiederherstellen\n"
             "/users — Alle Benutzer\n"
             "/alssaldo <username> — Saldo eines Users\n"
             "/alsurlaub <username> — Urlaub eines Users\n"
@@ -644,25 +812,29 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ok, uid = await _check_auth(update)
+    ok, uid = await _check_auth(update, context)
     if not ok:
         return
     today = datetime.date.today().isoformat()
     mins = _calc_balance_end_at(uid, today)
     sign = "✅" if mins >= 0 else "⚠️"
+    u = _get_user_row(uid)
+    name = (u["display_name"] or u["username"]) if u else f"ID {uid}"
     await update.message.reply_text(
-        f"{sign} *Gleitzeitkonto*\n\nStand {_fmt_date_de(today)}: *{_fmt_minutes_signed(mins)}*",
+        f"{sign} *Gleitzeitkonto – {name}*\n\nStand {_fmt_date_de(today)}: *{_fmt_minutes_signed(mins)}*",
         parse_mode="Markdown",
     )
 
 
 async def cmd_urlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ok, uid = await _check_auth(update)
+    ok, uid = await _check_auth(update, context)
     if not ok:
         return
     year = datetime.date.today().year
     vc = _vacation_calc(uid, year)
-    lines = [f"🏖️ *Urlaubsübersicht {year}*\n"]
+    u = _get_user_row(uid)
+    name = (u["display_name"] or u["username"]) if u else f"ID {uid}"
+    lines = [f"🏖️ *Urlaubsübersicht {year} – {name}*\n"]
     lines.append(f"Anspruch: *{vc['entitlement']:.1f}* Tage")
     if vc["effective_carryover"] > 0:
         lines.append(f"Übertrag: *{vc['effective_carryover']:.1f}* Tage")
@@ -674,7 +846,7 @@ async def cmd_urlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_heute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ok, uid = await _check_auth(update)
+    ok, uid = await _check_auth(update, context)
     if not ok:
         return
     today = datetime.date.today().isoformat()
@@ -687,11 +859,9 @@ async def cmd_heute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ).fetchall()
     finally:
         db.close()
-
     actual = _actual_minutes_for_day(uid, today)
     expected = _expected_minutes_for_day(uid, today)
     delta = actual - expected
-
     lines = [f"📅 *Heute – {_fmt_date_de(today)}*\n"]
     if blocks:
         for b in blocks:
@@ -705,12 +875,11 @@ async def cmd_heute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("Keine Einträge für heute.")
         if expected > 0:
             lines.append(f"Soll: *{_fmt_minutes(expected)}*")
-
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_fehlend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ok, uid = await _check_auth(update)
+    ok, uid = await _check_auth(update, context)
     if not ok:
         return
     year = datetime.date.today().year
@@ -727,20 +896,18 @@ async def cmd_fehlend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_kontierung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ok, uid = await _check_auth(update)
+    ok, uid = await _check_auth(update, context)
     if not ok:
         return
     year = datetime.date.today().year
     ci = _get_contouring_info(uid)
     if not ci["enabled"]:
-        await update.message.reply_text("Kontierung ist für deinen Account deaktiviert.")
+        await update.message.reply_text("Kontierung ist für diesen Account deaktiviert.")
         return
-
     unc = _get_uncontoured_days(uid, year)
     count = len(unc)
     max_day = _get_max_contoured_day(uid)
     sign = "✅" if count == 0 else "⚠️"
-
     lines = [f"{sign} *Kontierung {year}*\n"]
     lines.append(f"Unkontierte Tage: *{count}*")
     if max_day:
@@ -755,16 +922,56 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if tid not in AUTHORIZED_IDS:
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
-    uid = _get_user_id(tid)
-    if uid is None:
+    own_uid = _get_user_id(tid)
+    if own_uid is None:
         await update.message.reply_text(f"Kein Benutzer verknüpft.\nDeine Telegram-ID: {tid}")
         return
-    u = _get_user_row(uid)
-    name = u["display_name"] or u["username"] if u else f"ID {uid}"
-    await update.message.reply_text(f"👤 Aktiver Benutzer: *{name}*", parse_mode="Markdown")
+    u = _get_user_row(own_uid)
+    own_name = (u["display_name"] or u["username"]) if u else f"ID {own_uid}"
+    if tid in ADMIN_IDS:
+        ctx_uid = context.user_data.get("context_uid")
+        if ctx_uid is not None and ctx_uid != own_uid:
+            ctx_u = _get_user_row(ctx_uid)
+            ctx_name = (ctx_u["display_name"] or ctx_u["username"]) if ctx_u else f"ID {ctx_uid}"
+            await update.message.reply_text(
+                f"👤 Eigener Account: *{own_name}*\n"
+                f"👥 Aktiver Kontext: *{ctx_name}*",
+                parse_mode="Markdown",
+            )
+            return
+    await update.message.reply_text(f"👤 Aktiver Benutzer: *{own_name}*", parse_mode="Markdown")
 
 
 # ── Admin commands ────────────────────────────────────────────────────────────
+
+async def cmd_als(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if tid not in ADMIN_IDS:
+        await update.message.reply_text("Kein Zugriff.")
+        return
+    if not context.args:
+        await update.message.reply_text("Verwendung: /als <username> oder /als ich")
+        return
+    arg = context.args[0]
+    if arg.lower() == "ich":
+        context.user_data.pop("context_uid", None)
+        own_uid = _get_user_id(tid)
+        u = _get_user_row(own_uid) if own_uid else None
+        name = (u["display_name"] or u["username"]) if u else "eigener Account"
+        await update.message.reply_text(
+            f"👤 Kontext zurückgesetzt auf: *{name}*", parse_mode="Markdown"
+        )
+        return
+    u = _get_user_by_username(arg)
+    if not u:
+        await update.message.reply_text(f"Benutzer '{arg}' nicht gefunden.")
+        return
+    context.user_data["context_uid"] = u["id"]
+    name = u["display_name"] or u["username"]
+    await update.message.reply_text(
+        f"👤 Kontext gewechselt zu: *{name}*", parse_mode="Markdown"
+    )
+
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -790,10 +997,9 @@ async def cmd_alssaldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not context.args:
         await update.message.reply_text("Verwendung: /alssaldo <username>")
         return
-    username = context.args[0]
-    u = _get_user_by_username(username)
+    u = _get_user_by_username(context.args[0])
     if not u:
-        await update.message.reply_text(f"Benutzer '{username}' nicht gefunden.")
+        await update.message.reply_text(f"Benutzer '{context.args[0]}' nicht gefunden.")
         return
     today = datetime.date.today().isoformat()
     mins = _calc_balance_end_at(u["id"], today)
@@ -813,10 +1019,9 @@ async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not context.args:
         await update.message.reply_text("Verwendung: /alsurlaub <username>")
         return
-    username = context.args[0]
-    u = _get_user_by_username(username)
+    u = _get_user_by_username(context.args[0])
     if not u:
-        await update.message.reply_text(f"Benutzer '{username}' nicht gefunden.")
+        await update.message.reply_text(f"Benutzer '{context.args[0]}' nicht gefunden.")
         return
     year = datetime.date.today().year
     vc = _vacation_calc(u["id"], year)
@@ -830,12 +1035,72 @@ async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+# ── Free-text handler ─────────────────────────────────────────────────────────
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if tid not in AUTHORIZED_IDS:
+        await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
+        return
+    own_uid = _get_user_id(tid)
+    if own_uid is None:
+        await update.message.reply_text(
+            f"Kein Benutzer verknüpft. Bitte Admin kontaktieren.\nDeine Telegram-ID: {tid}"
+        )
+        return
+
+    # Effective user (admin context override)
+    uid = own_uid
+    if tid in ADMIN_IDS:
+        ctx_uid = context.user_data.get("context_uid")
+        if ctx_uid is not None:
+            uid = ctx_uid
+
+    text = (update.message.text or "").strip()
+
+    # Handle pending ja/nein confirmation
+    pending = context.user_data.get("pending_confirm")
+    if pending:
+        if text.lower() in ("ja", "j", "yes", "y"):
+            context.user_data.pop("pending_confirm", None)
+            if pending["action"] == "time":
+                result = _do_insert_time_block(
+                    pending["user_id"],
+                    pending["day"],
+                    pending["time_in"],
+                    pending["time_out"],
+                    pending["break_minutes"],
+                )
+            else:
+                result = "❌ Unbekannte ausstehende Aktion."
+            await update.message.reply_text(result)
+        elif text.lower() in ("nein", "n", "no"):
+            context.user_data.pop("pending_confirm", None)
+            await update.message.reply_text("Abgebrochen.")
+        else:
+            # Not a yes/no – treat as new input
+            context.user_data.pop("pending_confirm", None)
+            await _process_nlp(text, uid, update, context)
+        return
+
+    await _process_nlp(text, uid, update, context)
+
+
+async def _process_nlp(
+    text: str, uid: int, update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    actions = _parse_nlp(text)
+    if not actions:
+        await update.message.reply_text(NLP_EXAMPLES)
+        return
+    await _execute_actions(actions, uid, update, context)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     init_db()
 
-    # Load all authorized Telegram IDs from DB
     try:
         db = connect()
         rows = db.execute("SELECT telegram_id FROM telegram_users").fetchall()
@@ -853,11 +1118,13 @@ def main() -> None:
     app.add_handler(CommandHandler("fehlend", cmd_fehlend))
     app.add_handler(CommandHandler("kontierung", cmd_kontierung))
     app.add_handler(CommandHandler("user", cmd_user))
+    app.add_handler(CommandHandler("als", cmd_als))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("alssaldo", cmd_alssaldo))
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling)…")
+    logger.info("Bot startet (Polling) – v1.0.7…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
