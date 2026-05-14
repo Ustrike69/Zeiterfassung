@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.1.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3217,6 +3217,7 @@ def balance_view():
             <b style="font-size:14px;min-width:66px;text-align:center;">{mob_month_label}</b>
             {mob_mo_next}
           </div>
+          <a href="/balance?y={sel_year}&m=0" class="btn" style="font-size:11px;padding:4px 8px;{'background:var(--accent);color:#fff;' if sel_month == 0 else ''}">Ganzes Jahr</a>
         </div>
         <div style="font-size:30px;font-weight:700;letter-spacing:-.02em;color:{period_end_clr};line-height:1.1;">{period_end_hhmm}</div>
         <div style="font-size:11px;color:var(--mu);margin-top:2px;">Saldo {period_label}</div>

@@ -859,6 +859,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/heute — Heutige Zeiteinträge\n"
         "/fehlend — Fehlende Einträge\n"
         "/kontierung — Kontierungsübersicht\n"
+        "/liste — Gleitzeitkonto Monatsübersicht\n"
+        "/liste jahr — Gleitzeitkonto ganzes Jahr\n"
         "/user — Aktiver Benutzer\n"
     )
     if is_admin:
@@ -978,6 +980,222 @@ async def cmd_kontierung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append("Noch keine Kontierung.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+
+
+
+def _build_liste(uid: int, year: int, month: "int | None") -> str:
+    """Erstellt Gleitzeitkonto-Liste analog zur App für Monat oder ganzes Jahr."""
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+
+    if month:
+        import calendar as cal_mod
+        last_day = cal_mod.monthrange(year, month)[1]
+        start_iso = f"{year}-{month:02d}-01"
+        end_iso = f"{year}-{month:02d}-{last_day:02d}"
+        titel = f"{_MONTH_DE[month-1]} {year}"
+    else:
+        start_iso = f"{year}-01-01"
+        end_iso = f"{year}-12-31"
+        titel = f"Jahr {year}"
+
+    tracking_start = _get_tracking_start(uid)
+    if tracking_start:
+        start_iso = max(start_iso, tracking_start)
+
+    # Nicht in die Zukunft
+    end_iso = min(end_iso, today_iso)
+
+    if start_iso > end_iso:
+        return f"Keine Daten für {titel}."
+
+    # Vorherigen Saldo berechnen (Startsaldo + alles vor start_iso)
+    year_start = f"{year}-01-01"
+    if tracking_start:
+        year_start = max(year_start, tracking_start)
+
+    start_balance = _get_start_balance_minutes(uid)
+    running = int(start_balance)
+    flextag_ranges = _fetch_flextag_ranges(uid)
+
+    # Saldo bis start_iso aufbauen
+    if year_start < start_iso:
+        for iso in _iter_days(year_start, (datetime.date.fromisoformat(start_iso) - datetime.timedelta(days=1)).isoformat()):
+            exp = int(_expected_minutes_for_day(uid, iso) or 0)
+            act = int(_actual_minutes_for_day(uid, iso) or 0)
+            ft = 0
+            if iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges):
+                ft = _scheduled_minutes_ignoring_absence(uid, iso)
+            running += act - exp - ft
+
+    lines = [f"📊 *Gleitzeitkonto – {titel}*"]
+    lines.append(f"Startsaldo: *{_fmt_minutes_signed(running)}*\n")
+
+    # Abwesenheiten laden
+    db = connect()
+    try:
+        abs_rows = db.execute(
+            """SELECT a.date_from, a.date_to, t.name as typ, a.comment
+               FROM absences a JOIN absence_types t ON t.id=a.type_id
+               WHERE a.user_id=? AND a.date_from<=? AND a.date_to>=?""",
+            (uid, end_iso, start_iso)
+        ).fetchall()
+        # Dienstreisen
+        trip_rows = db.execute(
+            "SELECT date_from, date_to, destination FROM business_trips WHERE user_id=? AND date_from<=? AND date_to>=?",
+            (uid, end_iso, start_iso)
+        ).fetchall()
+    finally:
+        db.close()
+
+    # Abwesenheits-Map
+    abs_map = {}
+    for row in abs_rows:
+        for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
+            typ = row["typ"]
+            cmt = row["comment"] or ""
+            if typ == "Sonstige" and cmt:
+                typ = cmt
+            abs_map[iso] = typ
+
+    trip_map = {}
+    for row in trip_rows:
+        for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
+            trip_map[iso] = str(row["destination"] or "")
+
+    prev_date = None
+    day_count = 0
+
+    for iso in _iter_days(start_iso, end_iso):
+        exp = int(_expected_minutes_for_day(uid, iso) or 0)
+        act = int(_actual_minutes_for_day(uid, iso) or 0)
+        ft = 0
+        if iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges):
+            ft = _scheduled_minutes_ignoring_absence(uid, iso)
+        delta = act - exp - ft
+        running += delta
+
+        d = datetime.date.fromisoformat(iso)
+        wd = d.weekday()
+        is_weekend = wd >= 5
+        is_hol = _is_holiday(iso)
+
+        # Leere Tage ohne Relevanz überspringen (Wochenende ohne Eintrag)
+        if is_weekend and act == 0 and exp == 0:
+            continue
+        if is_hol and act == 0 and exp == 0:
+            continue
+
+        day_count += 1
+        # Telegram-Nachrichten max 4096 Zeichen - nach 20 Zeilen aufteilen
+        if day_count > 60:
+            lines.append("_(Liste gekürzt – zu viele Einträge)_")
+            break
+
+        tag = _WEEKDAY_SHORT[wd]
+        datum = f"{d.day:02d}.{d.month:02d}."
+
+        bemerkung = ""
+        if iso in abs_map:
+            bemerkung = abs_map[iso]
+        elif iso in trip_map:
+            bemerkung = f"✈ {trip_map[iso]}"
+        elif is_hol:
+            bemerkung = "Feiertag"
+
+        if act > 0:
+            # Zeitblöcke laden
+            db2 = connect()
+            try:
+                blocks = db2.execute(
+                    "SELECT time_in, time_out FROM time_blocks WHERE user_id=? AND day=? ORDER BY time_in",
+                    (uid, iso)
+                ).fetchall()
+            finally:
+                db2.close()
+            if blocks:
+                zeit = f"{blocks[0]['time_in']}–{blocks[-1]['time_out']}"
+            else:
+                zeit = _fmt_minutes(act)
+        else:
+            zeit = bemerkung if bemerkung else "–"
+
+        delta_str = _fmt_minutes_signed(delta) if (exp > 0 or act > 0) else ""
+        saldo_str = _fmt_minutes_signed(running)
+
+        # Format: Tag Datum | Zeit | Delta | Saldo
+        line = f"`{tag} {datum}` {zeit}"
+        if delta_str and delta_str != "+00:00":
+            line += f" | {delta_str}"
+        line += f" | *{saldo_str}*"
+
+        lines.append(line)
+
+    lines.append(f"\n*Endsaldo: {_fmt_minutes_signed(running)}*")
+    return "\n".join(lines)
+
+
+_MONTH_DE = ["Januar","Februar","März","April","Mai","Juni",
+             "Juli","August","September","Oktober","November","Dezember"]
+_WEEKDAY_SHORT = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+
+
+async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /liste          → aktueller Monat
+    /liste jahr     → ganzes Jahr
+    /liste 5        → Mai aktuelles Jahr
+    /liste 5 2026   → Mai 2026
+    """
+    ok, uid = await _check_auth(update, context)
+    if not ok:
+        return
+
+    today = datetime.date.today()
+    year = today.year
+    month = today.month  # Default: aktueller Monat
+
+    args = context.args or []
+    if args:
+        if args[0].lower() in ("jahr", "year", "all", "alles"):
+            month = None  # ganzes Jahr
+        else:
+            try:
+                month = int(args[0])
+                if not 1 <= month <= 12:
+                    await update.message.reply_text("❌ Ungültiger Monat (1-12)")
+                    return
+            except ValueError:
+                await update.message.reply_text(
+                    "Verwendung:\n"
+                    "/liste — aktueller Monat\n"
+                    "/liste jahr — ganzes Jahr\n"
+                    "/liste 5 — Mai\n"
+                )
+                return
+        if len(args) >= 2:
+            try:
+                year = int(args[1])
+            except ValueError:
+                pass
+
+    await update.message.reply_text("⏳ Berechne...")
+    text = _build_liste(uid, year, month)
+
+    # Telegram max 4096 Zeichen → ggf. aufteilen
+    if len(text) <= 4096:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        # In Blöcke aufteilen
+        lines = text.split("\n")
+        chunk = []
+        for line in lines:
+            chunk.append(line)
+            if len("\n".join(chunk)) > 3500:
+                await update.message.reply_text("\n".join(chunk[:-1]), parse_mode="Markdown")
+                chunk = [line]
+        if chunk:
+            await update.message.reply_text("\n".join(chunk), parse_mode="Markdown")
 
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -1179,6 +1397,7 @@ def main() -> None:
     app.add_handler(CommandHandler("heute", cmd_heute))
     app.add_handler(CommandHandler("fehlend", cmd_fehlend))
     app.add_handler(CommandHandler("kontierung", cmd_kontierung))
+    app.add_handler(CommandHandler("liste", cmd_liste))
     app.add_handler(CommandHandler("user", cmd_user))
     app.add_handler(CommandHandler("als", cmd_als))
     app.add_handler(CommandHandler("users", cmd_users))
