@@ -303,7 +303,8 @@ def _fetch_flextag_ranges(user_id: int) -> list:
         rows = db.execute(
             """SELECT a.date_from, a.date_to FROM absences a
                JOIN absence_types t ON t.id=a.type_id
-               WHERE a.user_id=? AND LOWER(t.name)='flextag'""",
+               WHERE a.user_id=? AND t.name='Sonstige'
+                 AND LOWER(TRIM(COALESCE(a.comment,'')))='flextag'""",
             (user_id,),
         ).fetchall()
         return [{"date_from": str(r["date_from"])[:10], "date_to": str(r["date_to"])[:10]} for r in rows]
