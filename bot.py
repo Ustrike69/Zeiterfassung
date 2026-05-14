@@ -38,6 +38,9 @@ NLP_EXAMPLES = (
 )
 
 _WEEKDAY_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+_WEEKDAY_SHORT = _WEEKDAY_DE  # Alias
+_MONTH_DE = ["Januar","Februar","März","April","Mai","Juni",
+             "Juli","August","September","Oktober","November","Dezember"]
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
@@ -1135,9 +1138,6 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
     return "\n".join(lines)
 
 
-_MONTH_DE = ["Januar","Februar","März","April","Mai","Juni",
-             "Juli","August","September","Oktober","November","Dezember"]
-_WEEKDAY_SHORT = ["Mo","Di","Mi","Do","Fr","Sa","So"]
 
 
 async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
