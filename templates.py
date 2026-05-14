@@ -1,7 +1,7 @@
 def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "", show_back: bool = True) -> str:
     nav_html = ""
     if user:
-        items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export")]
+        items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export"), ("/help", "❓ Hilfe")]
         if user.get("is_admin"):
             items.append(("/admin", "Admin"))
         items.append(("/logout", "Logout"))

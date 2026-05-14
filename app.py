@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.1.6"
+APP_VERSION = "v1.2.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -7345,6 +7345,445 @@ def export_users_csv():
 # -------------------------
 # Admin: Benutzer
 # -------------------------
+
+@app.get("/help")
+@login_required
+def help_page():
+    u = current_user()
+    is_admin = bool(u and u.get("is_admin"))
+
+    admin_section = ""
+    if is_admin:
+        admin_section = """
+    <div class="acc help-acc">
+      <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+        <span>🛠 Admin-Bereich</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body">
+        <div class="acc-inner">
+          <div class="help-entry">
+            <b>Benutzerverwaltung</b>
+            <p>Unter <em>Admin → Benutzer</em> können neue User angelegt, bestehende bearbeitet und deaktiviert werden. Felder: Benutzername, Anzeigename, E-Mail, Admin-Recht, Arbeitsbeginn-Datum.</p>
+          </div>
+          <div class="help-entry">
+            <b>Identität annehmen (Impersonation)</b>
+            <p>Im Admin-Bereich bei einem User auf <em>Als dieser User anzeigen</em> klicken. Alle Seiten werden dann aus Sicht dieses Users gerendert. Über den gelben Banner oben zurückwechseln.</p>
+            <p>Im Telegram-Bot: <code>/als &lt;username&gt;</code> wechselt den Kontext, <code>/als ich</code> setzt zurück.</p>
+          </div>
+          <div class="help-entry">
+            <b>Zeitschema-Verwaltung</b>
+            <p>Pro User können mehrere Zeitschemata mit unterschiedlichen Gültig-ab-Daten hinterlegt werden. Das Schema mit dem neuesten Gültig-ab-Datum ≤ Arbeitstag gilt. Zum Ersetzen: neueres Schema zuerst löschen.</p>
+          </div>
+          <div class="help-entry">
+            <b>Urlaubsübertrag-Ausnahme</b>
+            <p>Unter <em>Admin → Benutzer → Bearbeiten</em> kann für einzelne User die 31.03.-Verfallsregel deaktiviert werden. Der Übertrag gilt dann unbegrenzt.</p>
+          </div>
+          <div class="help-entry">
+            <b>Abschlüsse verwalten</b>
+            <p>Unter <em>Admin → Abschlüsse</em> können gesperrte Perioden eingesehen und entsperrt werden. Nur Admins können Abschlüsse rückgängig machen.</p>
+          </div>
+          <div class="help-entry">
+            <b>Maileinstellungen</b>
+            <p>Unter <em>Admin → Maileinstellungen</em> können SMTP-Server, Port, Absender und Anmeldedaten hinterlegt werden. Über <em>Test senden</em> die Konfiguration prüfen.</p>
+          </div>
+        </div>
+      </div>
+    </div>"""
+
+    body = f"""
+<style>
+.acc{{border:1px solid var(--bd);border-radius:var(--r);margin-bottom:10px;overflow:hidden;background:var(--bg);}}
+.acc-hdr{{width:100%;display:flex;justify-content:space-between;align-items:center;
+  padding:14px 16px;background:var(--sf);border:none;cursor:pointer;
+  font-size:15px;font-weight:600;color:var(--tx);text-align:left;gap:10px;}}
+.acc-hdr:hover{{background:var(--bd);}}
+.acc-hdr.open{{border-bottom:1px solid var(--bd);}}
+.acc-arr{{font-size:12px;flex-shrink:0;color:var(--mu);}}
+.acc-body{{max-height:0;overflow:hidden;transition:max-height .3s ease;}}
+.acc-body.open{{max-height:99999px;}}
+.acc-inner{{padding:16px;display:flex;flex-direction:column;gap:0;}}
+.help-entry{{padding:12px 0;border-bottom:1px solid var(--bd);}}
+.help-entry:last-child{{border-bottom:none;padding-bottom:0;}}
+.help-entry b{{display:block;margin-bottom:4px;font-size:14px;}}
+.help-entry p{{font-size:13px;color:var(--mu);margin:3px 0;line-height:1.5;}}
+.help-entry code{{background:var(--bd);padding:1px 5px;border-radius:4px;font-size:12px;font-family:monospace;}}
+.help-entry ul{{font-size:13px;color:var(--mu);padding-left:18px;margin:4px 0;line-height:1.6;}}
+.info-box{{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;color:#1e40af;}}
+.warn-box{{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;color:#92400e;}}
+@media(prefers-color-scheme:dark){{
+  .info-box{{background:#1e3a5f;border-color:#1e40af;color:#93c5fd;}}
+  .warn-box{{background:#3d2b00;border-color:#d97706;color:#fcd34d;}}
+}}
+</style>
+<script>
+function haccToggle(btn){{
+  var body=btn.nextElementSibling;
+  var arr=btn.querySelector('.acc-arr');
+  var op=body.classList.contains('open');
+  body.classList.toggle('open',!op);
+  btn.classList.toggle('open',!op);
+  if(arr)arr.textContent=op?'▼':'▲';
+}}
+function filterHelp(q){{
+  q=q.toLowerCase().trim();
+  document.querySelectorAll('.help-acc').forEach(function(acc){{
+    var txt=acc.textContent.toLowerCase();
+    var match=!q||txt.includes(q);
+    acc.style.display=match?'':'none';
+    if(q&&match){{
+      var body=acc.querySelector('.acc-body');
+      var btn=acc.querySelector('.acc-hdr');
+      var arr=acc.querySelector('.acc-arr');
+      if(body&&!body.classList.contains('open')){{
+        body.classList.add('open');
+        if(btn)btn.classList.add('open');
+        if(arr)arr.textContent='▲';
+      }}
+    }}
+  }});
+}}
+</script>
+
+<h2 style="margin:0 0 14px 0;font-size:18px;">❓ Hilfe</h2>
+
+<div style="margin-bottom:16px;">
+  <input type="search" id="help-search" placeholder="Hilfe durchsuchen …"
+         style="width:100%;max-width:420px;"
+         oninput="filterHelp(this.value)">
+</div>
+
+<!-- 1. Übersicht -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🏠 Übersicht (Startseite)</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Gleitzeitkonto-Widget</b>
+        <p>Zeigt den aktuellen Gleitzeitsaldo: <b style="color:#16a34a;">grün</b> = Plusstunden, <b style="color:#dc2626;">rot</b> = Minusstunden. Der Saldo berechnet sich als Summe aller (Ist − Soll)-Tage seit Arbeitsbeginn im laufenden Jahr plus dem eingetragenen Startsaldo.</p>
+      </div>
+      <div class="help-entry">
+        <b>Resturlaub</b>
+        <p>Zeigt: Jahresanspruch + wirksamer Übertrag − bereits genommene Urlaubstage. Nur Arbeitstage zählen (Wochenenden und Feiertage werden nicht abgezogen).</p>
+        <div class="warn-box">⚠️ <b>Übertrag-Regel:</b> Nicht genutzter Jahresurlaub verfällt am 31.03. des Folgejahres. Voraussetzung: Der Urlaub muss bis spätestens 31.03. <em>begonnen</em> haben. Ausnahmen können vom Admin eingerichtet werden.</div>
+      </div>
+      <div class="help-entry">
+        <b>Fehlende Einträge</b>
+        <p>Arbeitstage (laut Zeitschema), für die weder ein Zeiteintrag noch eine Abwesenheit vorhanden ist und die in der Vergangenheit liegen. Der heutige Tag zählt nicht als fehlend.</p>
+      </div>
+      <div class="help-entry">
+        <b>Kontierung</b>
+        <p>Zeigt, wie viele erfasste Arbeitstage noch nicht auf Projekte/Kostenstellen gebucht (kontiert) wurden. Nur sichtbar wenn Kontierung in den Einstellungen aktiviert ist.</p>
+      </div>
+      <div class="help-entry">
+        <b>Abwesenheitskarte</b>
+        <p>Kompakte Übersicht über laufende und bevorstehende Abwesenheiten (Urlaub, Krank, Flextag, Verdi usw.) im aktuellen Zeitraum.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 2. Zeiterfassung -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>⏱ Zeiterfassung</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Tagesansicht aufrufen</b>
+        <p>Im Kalender auf einen Tag klicken. Alternativ über die Übersicht-Kachel <em>Heute</em> oder direkt über den Telegram-Bot-Befehl <code>/heute</code>.</p>
+      </div>
+      <div class="help-entry">
+        <b>Zeitblock erfassen</b>
+        <p>In der Tagesansicht: <em>Kommen</em> (Beginn), <em>Gehen</em> (Ende) und optionale <em>Pause</em> in Minuten eintragen. Mehrere Blöcke pro Tag möglich (z.B. Kernzeit + Überstunden). Jeder Block wird separat gespeichert und im Gleitzeitkonto summiert.</p>
+        <div class="info-box">ℹ️ Zeiten werden in <b>15-Minuten-Schritten</b> erfasst. Eingaben werden auf den nächsten Viertelstundenwert gerundet.</div>
+      </div>
+      <div class="help-entry">
+        <b>Mehrere Zeitblöcke pro Tag</b>
+        <p>Einfach einen weiteren Block hinzufügen. Das Delta und der Saldo im Bericht berechnen sich aus der <em>Summe aller Blöcke</em> des Tages abzüglich des Solls.</p>
+      </div>
+      <div class="help-entry">
+        <b>Zeiten bearbeiten und löschen</b>
+        <p>In der Tagesansicht neben dem Block auf das Bearbeiten-Symbol oder <em>Löschen</em> klicken. Im Kalender über das Kontextmenü (drei Punkte) des Tages.</p>
+      </div>
+      <div class="help-entry">
+        <b>Wochenende / Feiertag</b>
+        <p>Normalerweise kein Soll an Wochenenden und Feiertagen. Wenn dennoch gearbeitet wurde, kann ein Zeitblock erfasst werden – der Soll-Wert bleibt 0, das Delta entspricht den tatsächlichen Stunden.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 3. Kalender -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📅 Kalender</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Navigation</b>
+        <p>Mit den Pfeilen ‹ › zwischen Monaten wechseln. Auf den Monatsnamen klicken um direkt zu einem Monat zu springen.</p>
+      </div>
+      <div class="help-entry">
+        <b>Listenansicht</b>
+        <p>Wechsel zwischen Kachel- und Listenansicht über den Umschalter oben rechts. Die Listenansicht eignet sich besonders für lange Zeiträume.</p>
+      </div>
+      <div class="help-entry">
+        <b>Farbkodierung und Symbole</b>
+        <ul>
+          <li>🟡 <b>Bernstein-Punkt</b> = Tag ist kontiert</li>
+          <li>❌ <b>Rotes X</b> = fehlender Zeiteintrag (Arbeitstag ohne Erfassung)</li>
+          <li>🟢 <b>Grünes Badge</b> = Urlaub</li>
+          <li>✈ <b>Flugzeug</b> = Dienstreise eingetragen</li>
+          <li>🟦 <b>Blauer Hintergrund</b> = heute</li>
+        </ul>
+      </div>
+      <div class="help-entry">
+        <b>Kontextmenü (drei Punkte)</b>
+        <p>Klick auf die drei Punkte eines Tages öffnet ein Menü mit: Zeiteintrag erfassen, Abwesenheit anlegen, Dienstreise eintragen und (falls vorhanden) bestehende Einträge bearbeiten oder löschen.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 4. Gleitzeitkonto -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📊 Gleitzeitkonto</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Saldo-Berechnung</b>
+        <p>Saldo = Startsaldo + Summe aller (Ist − Soll) seit Arbeitsbeginn im laufenden Jahr. Der Saldo wird täglich fortgeschrieben. Zukünftige Tage fließen nicht ein.</p>
+      </div>
+      <div class="help-entry">
+        <b>Spalten im Bericht</b>
+        <ul>
+          <li><b>Soll</b> = vertraglich vereinbarte Arbeitszeit laut Zeitschema</li>
+          <li><b>Ist</b> = tatsächlich erfasste Zeit (Summe aller Blöcke)</li>
+          <li><b>Delta</b> = Ist − Soll für diesen Tag (grün = Plus, rot = Minus)</li>
+          <li><b>Saldo</b> = kumulierter Stand bis einschließlich dieses Tages</li>
+        </ul>
+      </div>
+      <div class="help-entry">
+        <b>Flextag-Abzug</b>
+        <p>An einem Flextag ist das Soll = 0. Dennoch wird die <em>eigentlich geplante</em> Sollzeit vom Gleitzeitkonto abgezogen – der Flextag „verbraucht" Gleitzeit. Dadurch ist ein Flextag wirtschaftlich äquivalent zu einem Urlaubstag, belastet aber das Urlaubskonto nicht.</p>
+      </div>
+      <div class="help-entry">
+        <b>Bericht als RTF-Datei</b>
+        <p>Über den Telegram-Bot-Befehl <code>/bericht</code> bzw. <code>/bericht jahr</code> wird ein RTF-Dokument mit farbiger Darstellung (grün/rot) erzeugt und zugeschickt, sobald der Bericht länger als eine Bildschirmseite wäre.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 5. Abwesenheiten -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🏖 Abwesenheiten</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Urlaub</b>
+        <p>Zählt Arbeitstage gemäß Zeitschema (ohne Wochenenden und Feiertage). Wirkt sich auf das Urlaubskonto aus. Soll = 0, kein Gleitzeitabzug.</p>
+        <div class="warn-box">⚠️ <b>Übertrag-Regel:</b> Nicht genutzter Übertrag aus dem Vorjahr verfällt am 31.03. Der Urlaub muss bis spätestens 31.03. begonnen haben.</div>
+      </div>
+      <div class="help-entry">
+        <b>Krank</b>
+        <p>Keine Auswirkung auf Gleitzeit oder Urlaubskonto. Soll = 0 für den Krankheitszeitraum.</p>
+      </div>
+      <div class="help-entry">
+        <b>Flextag</b>
+        <p>Freizeit aus dem Gleitzeitkonto. Soll = 0, aber die <em>eigentlich geplante</em> Arbeitszeit wird vom Gleitzeitkonto abgezogen. Kein Urlaubsverbrauch.</p>
+        <div class="info-box">ℹ️ Flextag im Telegram-Bot: <code>/als ich</code> → Eingabe "Am 15.5. Flextag"</div>
+      </div>
+      <div class="help-entry">
+        <b>Verdi / Sonstige</b>
+        <p>Gewerkschaftstage (Verdi) oder andere Sonderabwesenheiten. Analog zu Krank: Soll = 0, keine Gleitzeitwirkung. Der Kommentar wird als Bezeichnung angezeigt.</p>
+      </div>
+      <div class="help-entry">
+        <b>Neue Abwesenheit anlegen</b>
+        <p>Über <em>Abwesenheiten → Neu</em> oder im Kalender über das Kontextmenü (drei Punkte) eines Tages. Alternativ per Telegram-Bot-Freitext: <em>"Urlaub vom 1.7. bis 15.7."</em></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 6. Dienstreisen -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>✈ Dienstreisen</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Was ist eine Dienstreise?</b>
+        <p>Ein Informationseintrag, der anzeigt, dass du an bestimmten Tagen auf Dienstreise warst. <b>Wichtig:</b> Die Arbeitszeit wird <em>nicht</em> automatisch erfasst – Zeitblöcke müssen separat eingetragen werden.</p>
+      </div>
+      <div class="help-entry">
+        <b>Felder</b>
+        <p>Von-/Bis-Datum und Reiseziel (Freitext). Das Reiseziel erscheint im Kalender als Tooltip beim ✈-Symbol.</p>
+      </div>
+      <div class="help-entry">
+        <b>Darstellung im Kalender</b>
+        <p>Tage mit Dienstreise werden mit einem ✈-Symbol markiert. Im Gleitzeitkonto-Bericht erscheint das Ziel in der Zeitspalte.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 7. Kontierung -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📋 Kontierung</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Was bedeutet kontieren?</b>
+        <p>Kontierung = Buchung der erfassten Arbeitszeit auf Projekte oder Kostenstellen. Erst nach der Kontierung gilt ein Arbeitstag als vollständig abgeschlossen.</p>
+      </div>
+      <div class="help-entry">
+        <b>Einzeln kontieren</b>
+        <p>In der Tagesansicht den Button <em>Kontieren</em> klicken. Der Tag erhält daraufhin den 🟡 Bernstein-Punkt im Kalender.</p>
+      </div>
+      <div class="help-entry">
+        <b>Bulk-Kontierung</b>
+        <p>Unter <em>Kontierung</em> mehrere Tage gleichzeitig auswählen und gemeinsam buchen. Praktisch nach Urlaub oder längeren Abwesenheiten.</p>
+      </div>
+      <div class="help-entry">
+        <b>Aktivieren / Deaktivieren</b>
+        <p>In den Einstellungen unter <em>Kontierung</em> kann die Funktion mit einem Startdatum aktiviert werden. Tage vor dem Startdatum werden nicht zur Kontierung angezeigt.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 8. Abschlüsse -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🔒 Abschlüsse</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Monatsabschluss</b>
+        <p>Sperrt alle Zeiteinträge und Abwesenheiten des Monats. Danach sind keine Änderungen mehr möglich. Der Saldo wird eingefroren.</p>
+      </div>
+      <div class="help-entry">
+        <b>Jahresabschluss</b>
+        <p>Sperrt alle Monate des Jahres auf einmal. Sinnvoll zum Jahresende nach vollständiger Prüfung.</p>
+        <div class="info-box">ℹ️ Nur Monate ab dem eingestellten Arbeitsbeginn müssen abgeschlossen werden.</div>
+      </div>
+      <div class="help-entry">
+        <b>Entsperren</b>
+        <p>Nur Admins können gesperrte Perioden wieder öffnen. Unter <em>Admin → Abschlüsse</em> die gewünschte Periode entsperren.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 9. Einstellungen -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>⚙️ Einstellungen</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Persönliche Einstellungen</b>
+        <p><b>Anzeigename</b>: erscheint im Header und in Berichten. Leer = Benutzername wird verwendet.<br>
+        <b>E-Mail</b>: für Benachrichtigungen.<br>
+        <b>Passwort</b>: Mindestlänge 6 Zeichen, aktuelles Passwort erforderlich.<br>
+        <b>Telegram-ID</b>: Für den Bot-Zugriff (siehe Telegram-Bot-Bereich).</p>
+      </div>
+      <div class="help-entry">
+        <b>Urlaub</b>
+        <p><b>Jahresanspruch</b>: Gesamte Urlaubstage für das Jahr (auch halbe Tage möglich, z.B. 27.5).<br>
+        <b>Übertrag</b>: Resturlaub aus dem Vorjahr. Verfällt am 31.03. sofern keine Admin-Ausnahme gilt.</p>
+      </div>
+      <div class="help-entry">
+        <b>Zeitschema</b>
+        <p><b>Wochenmodus</b>: Gleiche tägliche Soll-Zeit, verteilt auf alle Arbeitstage der Woche.<br>
+        <b>Tagesmodus</b>: Unterschiedliche Soll-Zeit pro Wochentag (z.B. Mo–Do 8h, Fr 6h).<br>
+        <b>Arbeitstage</b>: Welche Wochentage als Arbeitstage zählen (Standard: Mo–Fr).<br>
+        <b>Gültig ab</b>: Mehrere Schemata mit unterschiedlichen Startdaten sind möglich – das zuletzt gültige wird je Tag angewendet.</p>
+      </div>
+      <div class="help-entry">
+        <b>Kontierung</b>
+        <p>Funktion aktivieren und ein Startdatum angeben. Tage ab diesem Datum müssen kontiert werden. Deaktivierung setzt alle unkontiertenTage zurück.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 10. Telegram-Bot -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🤖 Telegram-Bot</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Einrichtung</b>
+        <p>1. In Telegram <b>@userinfobot</b> eine beliebige Nachricht schicken → Bot antwortet mit deiner Telegram-ID (eine rein numerische Zahl).<br>
+        2. Diese ID unter <em>Einstellungen → Telegram-ID</em> eintragen.<br>
+        3. Dem Bot eine Nachricht schicken (z.B. <code>/start</code>) – ab sofort sind alle Befehle verfügbar.</p>
+      </div>
+      <div class="help-entry">
+        <b>Befehle</b>
+        <ul>
+          <li><code>/saldo</code> — aktueller Gleitzeitsaldo</li>
+          <li><code>/urlaub</code> — Urlaubsübersicht mit Anspruch, Übertrag, Verbrauch</li>
+          <li><code>/heute</code> — heutige Zeiteinträge und Tagessaldo</li>
+          <li><code>/fehlend</code> — Liste fehlender Einträge im laufenden Jahr</li>
+          <li><code>/kontierung</code> — unkontierte Tage und letzter Kontierungsstand</li>
+          <li><code>/abwesenheiten</code> — Abwesenheitsliste aktuelles Jahr</li>
+          <li><code>/abwesenheiten 2025</code> — Abwesenheitsliste für bestimmtes Jahr</li>
+          <li><code>/bericht</code> — Gleitzeitkonto aktueller Monat (kurz: Textnachricht, lang: RTF-Datei)</li>
+          <li><code>/bericht jahr</code> — Gleitzeitkonto ganzes Jahr als RTF</li>
+          <li><code>/bericht 5</code> — Gleitzeitkonto Mai (beliebiger Monat 1–12)</li>
+          <li><code>/bericht 5 2025</code> — Gleitzeitkonto Mai 2025</li>
+          <li><code>/user</code> — aktuell aktiver Benutzer (relevant für Admins)</li>
+        </ul>
+      </div>
+      <div class="help-entry">
+        <b>Freitext-Eingabe</b>
+        <p>Einfach schreiben – der Bot versteht natürlichsprachige Eingaben:</p>
+        <ul>
+          <li><em>"Heute von 7:30 bis 13 gearbeitet"</em></li>
+          <li><em>"Am 15.5. von 8 bis 16 Uhr"</em></li>
+          <li><em>"Urlaub vom 1.7. bis 15.7."</em></li>
+          <li><em>"Urlaub 1.7.-15.7."</em></li>
+          <li><em>"Am 3.8. Flextag"</em></li>
+          <li><em>"Krank von 10.6. bis 12.6."</em></li>
+        </ul>
+        <p>Zeiten werden auf 15-Minuten-Schritte gerundet. Wenn für den Tag bereits ein Eintrag vorhanden ist, fragt der Bot nach Bestätigung (ja/nein).</p>
+      </div>
+      <div class="help-entry">
+        <b>Admin-Befehle</b>
+        <ul>
+          <li><code>/als &lt;username&gt;</code> — Kontext zu anderem User wechseln (alle folgenden Befehle gelten für diesen User)</li>
+          <li><code>/als ich</code> — eigenen Kontext wiederherstellen</li>
+          <li><code>/users</code> — alle aktiven User auflisten</li>
+          <li><code>/alssaldo &lt;username&gt;</code> — Saldo eines anderen Users</li>
+          <li><code>/alsurlaub &lt;username&gt;</code> — Urlaub eines anderen Users</li>
+          <li><code>/alsabw &lt;username&gt;</code> — Abwesenheiten eines anderen Users</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+{admin_section}
+"""
+    return render_template_string(layout("Hilfe", body, u, APP_VERSION))
+
 
 @app.get("/admin/users")
 @admin_required
