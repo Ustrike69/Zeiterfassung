@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.5"""
+"""Zeiterfassung Telegram Bot v1.1.6"""
 
 import datetime
 import io
@@ -876,8 +876,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/heute — Heutige Zeiteinträge\n"
         "/fehlend — Fehlende Einträge\n"
         "/kontierung — Kontierungsübersicht\n"
-        "/liste — Gleitzeitkonto Monatsübersicht\n"
-        "/liste jahr — Gleitzeitkonto ganzes Jahr\n"
+        "/bericht — Gleitzeitkonto Monatsübersicht\n"
+        "/bericht jahr — Gleitzeitkonto ganzes Jahr\n"
         "/user — Aktiver Benutzer\n"
     )
     if is_admin:
@@ -1000,11 +1000,36 @@ async def cmd_kontierung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 
-def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) -> str:
-    """Erstellt Gleitzeitkonto-Liste für Monat oder ganzes Jahr.
-    plain=False: Markdown (für Telegram-Nachricht)
-    plain=True:  Klartext (für .txt-Datei)
-    """
+def _rtf_escape(text: str) -> str:
+    umlaut_map = {
+        '\xe4': r"\'e4", '\xf6': r"\'f6", '\xfc': r"\'fc",
+        '\xc4': r"\'c4", '\xd6': r"\'d6", '\xdc': r"\'dc",
+        '\xdf': r"\'df",
+        '\\': '\\\\', '{': '\\{', '}': '\\}',
+    }
+    result = []
+    for ch in text:
+        if ch in umlaut_map:
+            result.append(umlaut_map[ch])
+        elif ord(ch) > 127:
+            result.append(f'\\u{ord(ch)}?')
+        else:
+            result.append(ch)
+    return ''.join(result)
+
+
+def _rtf_signed(mins: int) -> str:
+    if mins > 0:
+        return '{\\cf1 +' + f'{mins // 60:02d}:{mins % 60:02d}' + '}'
+    elif mins < 0:
+        m = abs(mins)
+        return '{\\cf2 -' + f'{m // 60:02d}:{m % 60:02d}' + '}'
+    else:
+        return '+00:00'
+
+
+def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
+    """Erstellt Gleitzeitkonto-Liste. Returns (content, filename, is_rtf)."""
     today = datetime.date.today()
     today_iso = today.isoformat()
 
@@ -1026,7 +1051,7 @@ def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) 
     end_iso = min(end_iso, today_iso)
 
     if start_iso > end_iso:
-        return f"Keine Daten für {titel}."
+        return (f"Keine Daten f\xfcr {titel}.", "", False)
 
     year_start = f"{year}-01-01"
     if tracking_start:
@@ -1043,7 +1068,6 @@ def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) 
             ft = _scheduled_minutes_ignoring_absence(uid, iso) if (iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges)) else 0
             running += act - exp - ft
 
-    # Alle time_blocks für den Zeitraum vorausladen (spart N einzelne Queries)
     db = connect()
     try:
         abs_rows = db.execute(
@@ -1083,11 +1107,9 @@ def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) 
     for row in block_rows:
         blocks_by_day.setdefault(str(row["day"])[:10], []).append(row)
 
-    if plain:
-        lines = [f"Gleitzeitkonto – {titel}", f"Startsaldo: {_fmt_minutes_signed(running)}", ""]
-    else:
-        lines = [f"📊 *Gleitzeitkonto – {titel}*", f"Startsaldo: *{_fmt_minutes_signed(running)}*", ""]
+    start_running = running
 
+    day_rows = []
     for iso in _iter_days(start_iso, end_iso):
         exp = int(_expected_minutes_for_day(uid, iso) or 0)
         act = int(_actual_minutes_for_day(uid, iso) or 0)
@@ -1098,8 +1120,9 @@ def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) 
         d = datetime.date.fromisoformat(iso)
         wd = d.weekday()
         is_hol = _is_holiday(iso)
+        is_weekend = wd >= 5
 
-        if wd >= 5 and act == 0 and exp == 0:
+        if is_weekend and act == 0 and exp == 0:
             continue
         if is_hol and act == 0 and exp == 0:
             continue
@@ -1118,36 +1141,90 @@ def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) 
         else:
             zeit = bemerkung if bemerkung else "-"
 
+        day_rows.append({
+            'tag': tag, 'datum': datum, 'zeit': zeit,
+            'exp': exp, 'act': act, 'delta': delta, 'running': running,
+            'is_hol': is_hol, 'is_weekend': is_weekend,
+        })
+
+    end_running = running
+
+    # Build markdown
+    md_lines = [f"📊 *Gleitzeitkonto – {titel}*", f"Startsaldo: *{_fmt_minutes_signed(start_running)}*", ""]
+    for row in day_rows:
+        delta = row['delta']
+        exp = row['exp']
+        act = row['act']
         delta_str = _fmt_minutes_signed(delta) if (exp > 0 or act > 0) else ""
-        saldo_str = _fmt_minutes_signed(running)
+        saldo_str = _fmt_minutes_signed(row['running'])
+        line = f"`{row['tag']} {row['datum']}` {row['zeit']}"
+        if delta_str and delta_str != "+00:00":
+            line += f" | {delta_str}"
+        line += f" | *{saldo_str}*"
+        md_lines.append(line)
+    md_lines += ["", f"*Endsaldo: {_fmt_minutes_signed(end_running)}*"]
+    md_text = "\n".join(md_lines)
 
-        if plain:
-            soll_str = _fmt_minutes(exp) if exp > 0 else "     "
-            line = f"{tag} {datum} | {zeit:<13} | Soll: {soll_str} | Delta: {delta_str or '+00:00':>7} | Saldo: {saldo_str}"
+    if len(md_text) <= 3500:
+        return (md_text, "", False)
+
+    # Build RTF
+    rtf = []
+    rtf.append(r'{\rtf1\ansi\ansicpg1252\deff0')
+    rtf.append(r'{\fonttbl{\f0\fmodern\fcharset0 Courier New;}}')
+    rtf.append(r'{\colortbl;\red0\green128\blue0;\red200\green0\blue0;\red160\green160\blue160;}')
+    rtf.append(r'\f0\fs18')
+    rtf.append(r'\pard\tx2000\tx4000\tx5800\tx7400\tx9000')
+    rtf.append(_rtf_escape(f'Gleitzeitkonto – {titel}') + r'\line')
+    rtf.append('Startsaldo: ' + _rtf_signed(start_running) + r'\line')
+    rtf.append(r'\line')
+
+    for row in day_rows:
+        delta = row['delta']
+        exp = row['exp']
+        act = row['act']
+        tag_r = _rtf_escape(row['tag'])
+        datum_r = row['datum']
+        zeit_r = _rtf_escape(row['zeit'])
+        soll_str = _fmt_minutes(exp) if exp > 0 else ''
+        delta_rtf = _rtf_signed(delta) if (exp > 0 or act > 0) else '+00:00'
+        saldo_rtf = _rtf_signed(row['running'])
+
+        if row['is_weekend'] or row['is_hol']:
+            rtf_line = (
+                '{\\cf3 ' + tag_r + ' ' + datum_r + '}' + r'\tab '
+                + '{\\cf3 ' + zeit_r + '}' + r'\tab '
+                + '{\\cf3 ' + soll_str + '}' + r'\tab '
+                + delta_rtf + r'\tab '
+                + saldo_rtf + r'\line'
+            )
         else:
-            line = f"`{tag} {datum}` {zeit}"
-            if delta_str and delta_str != "+00:00":
-                line += f" | {delta_str}"
-            line += f" | *{saldo_str}*"
+            rtf_line = (
+                tag_r + ' ' + datum_r + r'\tab '
+                + zeit_r + r'\tab '
+                + soll_str + r'\tab '
+                + delta_rtf + r'\tab '
+                + saldo_rtf + r'\line'
+            )
+        rtf.append(rtf_line)
 
-        lines.append(line)
+    rtf.append(r'\line')
+    rtf.append(_rtf_escape('Endsaldo: ') + _rtf_signed(end_running))
+    rtf.append(r'\par}')
 
-    if plain:
-        lines += ["", f"Endsaldo: {_fmt_minutes_signed(running)}"]
-    else:
-        lines += ["", f"*Endsaldo: {_fmt_minutes_signed(running)}*"]
-
-    return "\n".join(lines)
-
+    rtf_content = '\n'.join(rtf)
+    fname = f"gleitzeitkonto_{month:02d}_{year}.rtf" if month else f"gleitzeitkonto_{year}.rtf"
+    return (rtf_content, fname, True)
 
 
 
-async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def cmd_bericht(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /liste          → aktueller Monat
-    /liste jahr     → ganzes Jahr
-    /liste 5        → Mai aktuelles Jahr
-    /liste 5 2026   → Mai 2026
+    /bericht          → aktueller Monat
+    /bericht jahr     → ganzes Jahr
+    /bericht 5        → Mai aktuelles Jahr
+    /bericht 5 2026   → Mai 2026
     """
     ok, uid = await _check_auth(update, context)
     if not ok:
@@ -1155,12 +1232,12 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     today = datetime.date.today()
     year = today.year
-    month = today.month  # Default: aktueller Monat
+    month = today.month
 
     args = context.args or []
     if args:
         if args[0].lower() in ("jahr", "year", "all", "alles"):
-            month = None  # ganzes Jahr
+            month = None
         else:
             try:
                 month = int(args[0])
@@ -1170,9 +1247,9 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except ValueError:
                 await update.message.reply_text(
                     "Verwendung:\n"
-                    "/liste — aktueller Monat\n"
-                    "/liste jahr — ganzes Jahr\n"
-                    "/liste 5 — Mai\n"
+                    "/bericht — aktueller Monat\n"
+                    "/bericht jahr — ganzes Jahr\n"
+                    "/bericht 5 — Mai\n"
                 )
                 return
         if len(args) >= 2:
@@ -1182,14 +1259,12 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
     await update.message.reply_text("⏳ Berechne...")
-    text = _build_liste(uid, year, month, plain=False)
+    content, fname, is_rtf = _build_liste(uid, year, month)
 
-    if len(text) <= 3500:
-        await update.message.reply_text(text, parse_mode="Markdown")
+    if not is_rtf:
+        await update.message.reply_text(content, parse_mode="Markdown")
     else:
-        txt = _build_liste(uid, year, month, plain=True)
-        buf = io.BytesIO(txt.encode("utf-8"))
-        fname = f"gleitzeitkonto_{month:02d}_{year}.txt" if month else f"gleitzeitkonto_{year}.txt"
+        buf = io.BytesIO(content.encode("latin-1", errors="replace"))
         buf.name = fname
         titel = f"{_MONTH_DE[month-1]} {year}" if month else f"Jahr {year}"
         await update.message.reply_document(document=buf, caption=f"📊 Gleitzeitkonto {titel}")
@@ -1385,7 +1460,7 @@ def main() -> None:
     app.add_handler(CommandHandler("heute", cmd_heute))
     app.add_handler(CommandHandler("fehlend", cmd_fehlend))
     app.add_handler(CommandHandler("kontierung", cmd_kontierung))
-    app.add_handler(CommandHandler("liste", cmd_liste))
+    app.add_handler(CommandHandler("bericht", cmd_bericht))
     app.add_handler(CommandHandler("user", cmd_user))
     app.add_handler(CommandHandler("als", cmd_als))
     app.add_handler(CommandHandler("users", cmd_users))
@@ -1393,7 +1468,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.5…")
+    logger.info("Bot startet (Polling) – v1.1.6…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
