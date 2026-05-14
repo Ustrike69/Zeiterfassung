@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.8"""
+"""Zeiterfassung Telegram Bot v1.1.9"""
 
 import datetime
 import io
@@ -878,6 +878,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/kontierung — Kontierungsübersicht\n"
         "/bericht — Gleitzeitkonto Monatsübersicht\n"
         "/bericht jahr — Gleitzeitkonto ganzes Jahr\n"
+        "/abwesenheiten — Abwesenheitsliste aktuelles Jahr\n"
         "/user — Aktiver Benutzer\n"
     )
     if is_admin:
@@ -888,6 +889,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/users — Alle Benutzer\n"
             "/alssaldo <username> — Saldo eines Users\n"
             "/alsurlaub <username> — Urlaub eines Users\n"
+            "/alsabw <username> — Abwesenheiten eines Users\n"
         )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -1026,6 +1028,92 @@ def _rtf_signed(mins: int) -> str:
         return '{\\cf2 -' + f'{m // 60:02d}:{m % 60:02d}' + '}'
     else:
         return '+00:00'
+
+
+def _count_working_days(uid: int, date_from: str, date_to: str, is_half_day: bool) -> float:
+    if is_half_day:
+        return 0.5
+    total = 0.0
+    for iso in _iter_days(date_from, date_to):
+        if _is_holiday(iso):
+            continue
+        schedule = _get_user_schedule_for_day(uid, iso)
+        if _is_workday_for_user(iso, schedule):
+            total += 1.0
+    return total
+
+
+def _fmt_days(d: float) -> str:
+    if d == 1.0:
+        return "1 Tag"
+    elif d == int(d):
+        return f"{int(d)} Tage"
+    else:
+        return f"{d:.1f} Tage"
+
+
+def _get_abwesenheiten_liste(uid: int, year: int) -> str:
+    db = connect()
+    try:
+        rows = db.execute(
+            """SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS typ
+               FROM absences a
+               JOIN absence_types t ON t.id = a.type_id
+               WHERE a.user_id = ? AND SUBSTR(a.date_from, 1, 4) = ?
+               ORDER BY a.date_from ASC""",
+            (uid, str(year))
+        ).fetchall()
+    finally:
+        db.close()
+
+    if not rows:
+        return f"Keine Abwesenheiten f\xfcr {year}."
+
+    groups: dict[str, list] = {}
+    for row in rows:
+        typ = row["typ"]
+        cmt = (row["comment"] or "").strip()
+        if "urlaub" in typ.lower():
+            grp = "Urlaub"
+        elif "krank" in typ.lower():
+            grp = "Krank"
+        elif typ == "Sonstige" and cmt.lower() == "flextag":
+            grp = "Flextag"
+        elif typ == "Sonstige" and cmt:
+            grp = cmt
+        else:
+            grp = typ
+        date_from = str(row["date_from"])[:10]
+        date_to = str(row["date_to"])[:10]
+        days = _count_working_days(uid, date_from, date_to, bool(row["is_half_day"]))
+        groups.setdefault(grp, []).append({
+            "date_from": date_from, "date_to": date_to,
+            "is_half_day": bool(row["is_half_day"]), "days": days,
+        })
+
+    lines = []
+    totals: dict[str, float] = {}
+    for grp, entries in groups.items():
+        total = sum(e["days"] for e in entries)
+        totals[grp] = total
+        lines.append(f"\n*{grp.upper()}* ({_fmt_days(total)})")
+        for e in entries:
+            df = datetime.date.fromisoformat(e["date_from"])
+            dt = datetime.date.fromisoformat(e["date_to"])
+            df_s = f"{df.day:02d}.{df.month:02d}."
+            dt_s = f"{dt.day:02d}.{dt.month:02d}."
+            if e["is_half_day"]:
+                lines.append(f"  {df_s} | halber Tag")
+            elif e["date_from"] == e["date_to"]:
+                lines.append(f"  {df_s} | {_fmt_days(e['days'])}")
+            else:
+                lines.append(f"  {df_s} - {dt_s} | {_fmt_days(e['days'])}")
+
+    summary = " | ".join(
+        f"{grp} {int(v) if v == int(v) else f'{v:.1f}'}" for grp, v in totals.items()
+    )
+    lines.append(f"\n*Gesamt:* {summary}")
+    return "\n".join(lines)
 
 
 def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
@@ -1298,6 +1386,25 @@ async def cmd_bericht(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             caption=f"📊 Gleitzeitkonto {titel}",
         )
 
+async def cmd_abwesenheiten(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ok, uid = await _check_auth(update, context)
+    if not ok:
+        return
+    year = datetime.date.today().year
+    args = context.args or []
+    if args:
+        try:
+            year = int(args[0])
+        except ValueError:
+            await update.message.reply_text("Verwendung: /abwesenheiten [Jahr]")
+            return
+    u = _get_user_row(uid)
+    name = (u["display_name"] or u["username"]) if u else f"ID {uid}"
+    header = f"📋 *Abwesenheiten {year} – {name}*"
+    body = _get_abwesenheiten_liste(uid, year)
+    await update.message.reply_text(f"{header}\n{body}", parse_mode="Markdown")
+
+
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
     if not _is_authorized(tid):
@@ -1416,6 +1523,30 @@ async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_alsabw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if tid not in ADMIN_IDS:
+        await update.message.reply_text("Kein Zugriff.")
+        return
+    if not context.args:
+        await update.message.reply_text("Verwendung: /alsabw <username> [Jahr]")
+        return
+    u = _get_user_by_username(context.args[0])
+    if not u:
+        await update.message.reply_text(f"Benutzer '{context.args[0]}' nicht gefunden.")
+        return
+    year = datetime.date.today().year
+    if len(context.args) >= 2:
+        try:
+            year = int(context.args[1])
+        except ValueError:
+            pass
+    name = u["display_name"] or u["username"]
+    header = f"📋 *Abwesenheiten {year} – {name}*"
+    body = _get_abwesenheiten_liste(u["id"], year)
+    await update.message.reply_text(f"{header}\n{body}", parse_mode="Markdown")
+
+
 # ── Free-text handler ─────────────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1490,14 +1621,16 @@ def main() -> None:
     app.add_handler(CommandHandler("fehlend", cmd_fehlend))
     app.add_handler(CommandHandler("kontierung", cmd_kontierung))
     app.add_handler(CommandHandler("bericht", cmd_bericht))
+    app.add_handler(CommandHandler("abwesenheiten", cmd_abwesenheiten))
     app.add_handler(CommandHandler("user", cmd_user))
     app.add_handler(CommandHandler("als", cmd_als))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("alssaldo", cmd_alssaldo))
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
+    app.add_handler(CommandHandler("alsabw", cmd_alsabw))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.8…")
+    logger.info("Bot startet (Polling) – v1.1.9…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
