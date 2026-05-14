@@ -1,6 +1,7 @@
 """Zeiterfassung Telegram Bot v1.1.3"""
 
 import datetime
+import io
 import json
 import logging
 import os
@@ -986,8 +987,11 @@ async def cmd_kontierung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 
-def _build_liste(uid: int, year: int, month: "int | None") -> str:
-    """Erstellt Gleitzeitkonto-Liste analog zur App für Monat oder ganzes Jahr."""
+def _build_liste(uid: int, year: int, month: "int | None", plain: bool = False) -> str:
+    """Erstellt Gleitzeitkonto-Liste für Monat oder ganzes Jahr.
+    plain=False: Markdown (für Telegram-Nachricht)
+    plain=True:  Klartext (für .txt-Datei)
+    """
     today = datetime.date.today()
     today_iso = today.isoformat()
 
@@ -1006,13 +1010,11 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
     if tracking_start:
         start_iso = max(start_iso, tracking_start)
 
-    # Nicht in die Zukunft
     end_iso = min(end_iso, today_iso)
 
     if start_iso > end_iso:
         return f"Keine Daten für {titel}."
 
-    # Vorherigen Saldo berechnen (Startsaldo + alles vor start_iso)
     year_start = f"{year}-01-01"
     if tracking_start:
         year_start = max(year_start, tracking_start)
@@ -1021,20 +1023,14 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
     running = int(start_balance)
     flextag_ranges = _fetch_flextag_ranges(uid)
 
-    # Saldo bis start_iso aufbauen
     if year_start < start_iso:
         for iso in _iter_days(year_start, (datetime.date.fromisoformat(start_iso) - datetime.timedelta(days=1)).isoformat()):
             exp = int(_expected_minutes_for_day(uid, iso) or 0)
             act = int(_actual_minutes_for_day(uid, iso) or 0)
-            ft = 0
-            if iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges):
-                ft = _scheduled_minutes_ignoring_absence(uid, iso)
+            ft = _scheduled_minutes_ignoring_absence(uid, iso) if (iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges)) else 0
             running += act - exp - ft
 
-    lines = [f"📊 *Gleitzeitkonto – {titel}*"]
-    lines.append(f"Startsaldo: *{_fmt_minutes_signed(running)}*\n")
-
-    # Abwesenheiten laden
+    # Alle time_blocks für den Zeitraum vorausladen (spart N einzelne Queries)
     db = connect()
     try:
         abs_rows = db.execute(
@@ -1043,100 +1039,91 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
                WHERE a.user_id=? AND a.date_from<=? AND a.date_to>=?""",
             (uid, end_iso, start_iso)
         ).fetchall()
-        # Dienstreisen
         trip_rows = db.execute(
-            "SELECT start_date, end_date, destination FROM business_trips WHERE user_id=? AND start_date<=? AND COALESCE(end_date,start_date)>=?",
+            "SELECT start_date, end_date, destination FROM business_trips "
+            "WHERE user_id=? AND start_date<=? AND COALESCE(end_date,start_date)>=?",
             (uid, end_iso, start_iso)
+        ).fetchall()
+        block_rows = db.execute(
+            "SELECT day, time_in, time_out, break_minutes FROM time_blocks "
+            "WHERE user_id=? AND day BETWEEN ? AND ? ORDER BY day, time_in",
+            (uid, start_iso, end_iso)
         ).fetchall()
     finally:
         db.close()
 
-    # Abwesenheits-Map
-    abs_map = {}
+    abs_map: dict[str, str] = {}
     for row in abs_rows:
         for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
             typ = row["typ"]
             cmt = row["comment"] or ""
-            if typ == "Sonstige" and cmt:
-                typ = cmt
-            abs_map[iso] = typ
+            abs_map[iso] = cmt if (typ == "Sonstige" and cmt) else typ
 
-    trip_map = {}
+    trip_map: dict[str, str] = {}
     for row in trip_rows:
         t_start = str(row["start_date"])[:10]
         t_end = str(row["end_date"])[:10] if row["end_date"] else t_start
         for iso in _iter_days(t_start, t_end):
             trip_map[iso] = str(row["destination"] or "")
 
-    prev_date = None
-    day_count = 0
+    blocks_by_day: dict[str, list] = {}
+    for row in block_rows:
+        blocks_by_day.setdefault(str(row["day"])[:10], []).append(row)
+
+    if plain:
+        lines = [f"Gleitzeitkonto – {titel}", f"Startsaldo: {_fmt_minutes_signed(running)}", ""]
+    else:
+        lines = [f"📊 *Gleitzeitkonto – {titel}*", f"Startsaldo: *{_fmt_minutes_signed(running)}*", ""]
 
     for iso in _iter_days(start_iso, end_iso):
         exp = int(_expected_minutes_for_day(uid, iso) or 0)
         act = int(_actual_minutes_for_day(uid, iso) or 0)
-        ft = 0
-        if iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges):
-            ft = _scheduled_minutes_ignoring_absence(uid, iso)
+        ft = _scheduled_minutes_ignoring_absence(uid, iso) if (iso < today_iso and exp == 0 and _is_flextag(iso, flextag_ranges)) else 0
         delta = act - exp - ft
         running += delta
 
         d = datetime.date.fromisoformat(iso)
         wd = d.weekday()
-        is_weekend = wd >= 5
         is_hol = _is_holiday(iso)
 
-        # Leere Tage ohne Relevanz überspringen (Wochenende ohne Eintrag)
-        if is_weekend and act == 0 and exp == 0:
+        if wd >= 5 and act == 0 and exp == 0:
             continue
         if is_hol and act == 0 and exp == 0:
             continue
 
-        day_count += 1
-        # Telegram-Nachrichten max 4096 Zeichen - nach 20 Zeilen aufteilen
-        if day_count > 60:
-            lines.append("_(Liste gekürzt – zu viele Einträge)_")
-            break
-
         tag = _WEEKDAY_SHORT[wd]
         datum = f"{d.day:02d}.{d.month:02d}."
 
-        bemerkung = ""
-        if iso in abs_map:
-            bemerkung = abs_map[iso]
-        elif iso in trip_map:
-            bemerkung = f"✈ {trip_map[iso]}"
-        elif is_hol:
-            bemerkung = "Feiertag"
+        bemerkung = abs_map.get(iso) or (f"✈ {trip_map[iso]}" if iso in trip_map else ("Feiertag" if is_hol else ""))
 
         if act > 0:
-            # Zeitblöcke laden
-            db2 = connect()
-            try:
-                blocks = db2.execute(
-                    "SELECT time_in, time_out FROM time_blocks WHERE user_id=? AND day=? ORDER BY time_in",
-                    (uid, iso)
-                ).fetchall()
-            finally:
-                db2.close()
-            if blocks:
-                zeit = f"{blocks[0]['time_in']}–{blocks[-1]['time_out']}"
+            day_blocks = blocks_by_day.get(iso, [])
+            if day_blocks:
+                zeit = f"{day_blocks[0]['time_in']}-{day_blocks[-1]['time_out']}"
             else:
                 zeit = _fmt_minutes(act)
         else:
-            zeit = bemerkung if bemerkung else "–"
+            zeit = bemerkung if bemerkung else "-"
 
         delta_str = _fmt_minutes_signed(delta) if (exp > 0 or act > 0) else ""
         saldo_str = _fmt_minutes_signed(running)
 
-        # Format: Tag Datum | Zeit | Delta | Saldo
-        line = f"`{tag} {datum}` {zeit}"
-        if delta_str and delta_str != "+00:00":
-            line += f" | {delta_str}"
-        line += f" | *{saldo_str}*"
+        if plain:
+            soll_str = _fmt_minutes(exp) if exp > 0 else "     "
+            line = f"{tag} {datum} | {zeit:<13} | Soll: {soll_str} | Delta: {delta_str or '+00:00':>7} | Saldo: {saldo_str}"
+        else:
+            line = f"`{tag} {datum}` {zeit}"
+            if delta_str and delta_str != "+00:00":
+                line += f" | {delta_str}"
+            line += f" | *{saldo_str}*"
 
         lines.append(line)
 
-    lines.append(f"\n*Endsaldo: {_fmt_minutes_signed(running)}*")
+    if plain:
+        lines += ["", f"Endsaldo: {_fmt_minutes_signed(running)}"]
+    else:
+        lines += ["", f"*Endsaldo: {_fmt_minutes_signed(running)}*"]
+
     return "\n".join(lines)
 
 
@@ -1182,22 +1169,17 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
 
     await update.message.reply_text("⏳ Berechne...")
-    text = _build_liste(uid, year, month)
+    text = _build_liste(uid, year, month, plain=False)
 
-    # Telegram max 4096 Zeichen → ggf. aufteilen
-    if len(text) <= 4096:
+    if len(text) <= 3500:
         await update.message.reply_text(text, parse_mode="Markdown")
     else:
-        # In Blöcke aufteilen
-        lines = text.split("\n")
-        chunk = []
-        for line in lines:
-            chunk.append(line)
-            if len("\n".join(chunk)) > 3500:
-                await update.message.reply_text("\n".join(chunk[:-1]), parse_mode="Markdown")
-                chunk = [line]
-        if chunk:
-            await update.message.reply_text("\n".join(chunk), parse_mode="Markdown")
+        txt = _build_liste(uid, year, month, plain=True)
+        buf = io.BytesIO(txt.encode("utf-8"))
+        fname = f"gleitzeitkonto_{month:02d}_{year}.txt" if month else f"gleitzeitkonto_{year}.txt"
+        buf.name = fname
+        titel = f"{_MONTH_DE[month-1]} {year}" if month else f"Jahr {year}"
+        await update.message.reply_document(document=buf, caption=f"📊 Gleitzeitkonto {titel}")
 
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
