@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.6"""
+"""Zeiterfassung Telegram Bot v1.1.7"""
 
 import datetime
 import io
@@ -1265,9 +1265,12 @@ async def cmd_bericht(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(content, parse_mode="Markdown")
     else:
         buf = io.BytesIO(content.encode("latin-1", errors="replace"))
-        buf.name = fname
         titel = f"{_MONTH_DE[month-1]} {year}" if month else f"Jahr {year}"
-        await update.message.reply_document(document=buf, caption=f"📊 Gleitzeitkonto {titel}")
+        await update.message.reply_document(
+            document=buf,
+            filename=fname,
+            caption=f"📊 Gleitzeitkonto {titel}",
+        )
 
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -1468,7 +1471,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.6…")
+    logger.info("Bot startet (Polling) – v1.1.7…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
