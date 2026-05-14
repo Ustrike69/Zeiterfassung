@@ -148,17 +148,40 @@ def _get_start_balance_minutes(user_id: int) -> int:
         db.close()
 
 
-def _get_user_schedule_for_day(user_id: int, iso_day: str) -> "dict | None":
+def _normalize_schedule(s: "dict | None") -> dict:
+    """Stellt sicher dass alle Keys vorhanden sind (identisch zu app.py)."""
+    if not s:
+        return {}
+    # weekly_minutes Fallback aus weekly_hours
+    if not s.get("weekly_minutes"):
+        wh = s.get("weekly_hours")
+        try:
+            s["weekly_minutes"] = int(float(wh) * 60) if wh else 0
+        except Exception:
+            s["weekly_minutes"] = 0
+    if not s.get("mode"):
+        s["mode"] = "weekly"
+    if s.get("workdays_mask") is None:
+        s["workdays_mask"] = 31
+    if s.get("block_weekends_holidays") is None:
+        s["block_weekends_holidays"] = 1
+    for k in ["mon_minutes","tue_minutes","wed_minutes","thu_minutes","fri_minutes","sat_minutes","sun_minutes"]:
+        if s.get(k) is None:
+            s[k] = 0
+    return s
+
+
+def _get_user_schedule_for_day(user_id: int, iso_day: str) -> dict:
     db = connect()
     try:
-        rows = db.execute(
+        row = db.execute(
             "SELECT * FROM user_schedules WHERE user_id=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1",
             (user_id, iso_day),
         ).fetchone()
-        if rows:
-            return dict(rows)
+        if row:
+            return _normalize_schedule(dict(row))
         r = db.execute("SELECT * FROM user_schedule WHERE user_id=?", (user_id,)).fetchone()
-        return dict(r) if r else None
+        return _normalize_schedule(dict(r) if r else None)
     finally:
         db.close()
 
