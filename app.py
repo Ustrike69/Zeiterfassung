@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.0.9"
+APP_VERSION = "v1.1.0"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5634,6 +5634,14 @@ def settings_view():
 
     profile_dn = u.get("display_name") or ""
     profile_em = u.get("email") or ""
+    _tg_db = connect()
+    try:
+        _tg_row = _tg_db.execute(
+            "SELECT telegram_id FROM telegram_users WHERE user_id=?", (u["id"],)
+        ).fetchone()
+        profile_tg = str(_tg_row["telegram_id"]) if _tg_row else ""
+    finally:
+        _tg_db.close()
 
     ci = _get_contouring_info(u["id"])
     today_iso_s = datetime.date.today().isoformat()
@@ -5710,6 +5718,18 @@ function accToggle(id){{
             </div>
             <div><button class="btn" type="submit">Profil speichern</button></div>
           </form>
+
+          <div class="acc-sub">
+            <b style="font-size:14px;">Telegram</b>
+            <form method="post" action="/settings/telegram" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
+              <div>
+                <label>Telegram-ID</label><br>
+                <input type="text" name="telegram_id" value="{profile_tg}" placeholder="z.B. 123456789" pattern="[0-9]*" inputmode="numeric" style="width:200px;">
+                <div class="small" style="color:var(--mu);margin-top:3px;">Deine Telegram-ID findest du indem du @userinfobot in Telegram eine Nachricht schickst.</div>
+              </div>
+              <div><button class="btn" type="submit">Telegram-ID speichern</button></div>
+            </form>
+          </div>
 
           <div class="acc-sub">
             <b style="font-size:14px;">Passwort ändern</b>
@@ -5864,6 +5884,46 @@ def settings_profile_save():
     db.commit()
     db.close()
     add_flash("Profil gespeichert.", "success")
+    return redirect("/settings")
+
+
+@app.post("/settings/telegram")
+@login_required
+def settings_telegram_save():
+    bootstrap()
+    u = current_user()
+    raw = (request.form.get("telegram_id") or "").strip()
+
+    if raw == "":
+        db = connect()
+        db.execute("DELETE FROM telegram_users WHERE user_id=?", (u["id"],))
+        db.commit()
+        db.close()
+        add_flash("Telegram-ID entfernt.", "success")
+        return redirect("/settings")
+
+    if not raw.isdigit() or not (5 <= len(raw) <= 15):
+        add_flash("Ungültige Telegram-ID (nur Zahlen, 5–15 Stellen).", "error")
+        return redirect("/settings")
+
+    tg_id = int(raw)
+    db = connect()
+    try:
+        conflict = db.execute(
+            "SELECT user_id FROM telegram_users WHERE telegram_id=? AND user_id!=?",
+            (tg_id, u["id"]),
+        ).fetchone()
+        if conflict:
+            add_flash("Diese Telegram-ID ist bereits vergeben.", "error")
+            return redirect("/settings")
+        db.execute(
+            "INSERT OR REPLACE INTO telegram_users(telegram_id, user_id, created_at) VALUES(?,?,datetime('now'))",
+            (tg_id, u["id"]),
+        )
+        db.commit()
+    finally:
+        db.close()
+    add_flash("Telegram-ID gespeichert.", "success")
     return redirect("/settings")
 
 
