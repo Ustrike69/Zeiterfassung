@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.1.3"
+APP_VERSION = "v1.1.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
