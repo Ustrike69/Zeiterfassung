@@ -181,34 +181,80 @@ def _is_holiday(iso_day: str) -> bool:
         db.close()
 
 
-def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
-    """Simplified version: schedule minutes for workday, 0 otherwise."""
-    # Check absence
+def _is_absence_on_day(user_id: int, iso_day: str) -> bool:
     db = connect()
     try:
         ab = db.execute(
             """SELECT a.id FROM absences a
-               JOIN absence_types t ON t.id=a.type_id
                WHERE a.user_id=? AND a.date_from<=? AND a.date_to>=?""",
             (user_id, iso_day, iso_day),
         ).fetchone()
+        return ab is not None
     finally:
         db.close()
-    if ab:
-        return 0
 
+
+def _week_dates_from(iso_day: str) -> list:
+    d = datetime.date.fromisoformat(iso_day)
+    monday = d - datetime.timedelta(days=d.weekday())
+    return [monday + datetime.timedelta(days=i) for i in range(7)]
+
+
+def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
+    """Correct weekly/daily schedule calculation - mirrors app.py logic."""
+    # Check holiday/weekend
     if _is_holiday(iso_day):
         return 0
 
     schedule = _get_user_schedule_for_day(user_id, iso_day)
     if not schedule:
         return 0
-    if not _is_workday_for_user(iso_day, schedule):
-        return 0
 
     d = datetime.date.fromisoformat(iso_day)
-    col = _WEEKDAY_COLS[d.weekday()] + "_minutes"
-    return int(schedule.get(col) or 0)
+    wd = d.weekday()
+
+    # Check workdays mask
+    mask = int(schedule.get("workdays_mask") or 31)
+    if not _mask_allows(mask, wd):
+        return 0
+
+    # Weekend block
+    block = int(schedule.get("block_weekends_holidays") or 1)
+    if block and wd >= 5:
+        return 0
+
+    # Check absence
+    if _is_absence_on_day(user_id, iso_day):
+        return 0
+
+    mode = (schedule.get("mode") or "weekly").strip().lower()
+
+    if mode == "daily":
+        col = _WEEKDAY_COLS[wd] + "_minutes"
+        return int(schedule.get(col) or 0)
+
+    # Weekly mode: distribute weekly_minutes evenly across eligible days
+    weekly = int(schedule.get("weekly_minutes") or 0)
+    week_days = _week_dates_from(iso_day)
+
+    eligible = []
+    for wd_day in week_days:
+        w = wd_day.weekday()
+        if not _mask_allows(mask, w):
+            continue
+        eligible.append(wd_day)
+
+    if not eligible:
+        return 0
+
+    eligible = sorted(eligible)
+    if d not in eligible:
+        return 0
+
+    base = weekly // len(eligible)
+    rem = weekly % len(eligible)
+    idx = eligible.index(d)
+    return base + (1 if idx < rem else 0)
 
 
 def _actual_minutes_for_day(user_id: int, iso_day: str) -> int:
@@ -457,9 +503,24 @@ def _get_missing_entry_days(user_id: int, year: int) -> list[str]:
     finally:
         db.close()
 
+    # Abwesenheiten laden
+    db = connect()
+    try:
+        abs_rows = db.execute(
+            "SELECT date_from, date_to FROM absences WHERE user_id=? AND date_from<=? AND date_to>=?",
+            (user_id, yesterday, year_start),
+        ).fetchall()
+    finally:
+        db.close()
+
+    absent = set()
+    for row in abs_rows:
+        for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
+            absent.add(iso)
+
     missing = []
     for iso in _iter_days(year_start, yesterday):
-        if iso in have or iso in hol:
+        if iso in have or iso in hol or iso in absent:
             continue
         schedule = _get_user_schedule_for_day(user_id, iso)
         if _is_workday_for_user(iso, schedule):
