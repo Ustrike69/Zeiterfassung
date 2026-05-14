@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.3"""
+"""Zeiterfassung Telegram Bot v1.1.5"""
 
 import datetime
 import io
@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 TOKEN = "8673206171:AAEwr7EXU7a2y6frMspRATKRvWIdHlWbCeU"
 ADMIN_IDS: set[int] = {7593372353}
-AUTHORIZED_IDS: set[int] = {7593372353}  # extended via DB at runtime
 
 NLP_EXAMPLES = (
     "❓ Das habe ich nicht verstanden. Beispiele:\n"
@@ -822,11 +821,25 @@ async def _execute_actions(
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
+def _is_authorized(telegram_id: int) -> bool:
+    if telegram_id in ADMIN_IDS:
+        return True
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT id FROM telegram_users WHERE telegram_id=?",
+            (telegram_id,)
+        ).fetchone()
+        return r is not None
+    finally:
+        db.close()
+
+
 async def _check_auth(
     update: Update, context: "ContextTypes.DEFAULT_TYPE | None" = None
 ) -> "tuple[bool, int|None]":
     tid = update.effective_user.id
-    if tid not in AUTHORIZED_IDS:
+    if not _is_authorized(tid):
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return False, None
     own_uid = _get_user_id(tid)
@@ -847,7 +860,7 @@ async def _check_auth(
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in AUTHORIZED_IDS:
+    if not _is_authorized(tid):
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
     is_admin = tid in ADMIN_IDS
@@ -1183,7 +1196,7 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in AUTHORIZED_IDS:
+    if not _is_authorized(tid):
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
     own_uid = _get_user_id(tid)
@@ -1303,7 +1316,7 @@ async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in AUTHORIZED_IDS:
+    if not _is_authorized(tid):
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
     own_uid = _get_user_id(tid)
@@ -1365,15 +1378,6 @@ async def _process_nlp(
 def main() -> None:
     init_db()
 
-    try:
-        db = connect()
-        rows = db.execute("SELECT telegram_id FROM telegram_users").fetchall()
-        db.close()
-        for r in rows:
-            AUTHORIZED_IDS.add(int(r["telegram_id"]))
-    except Exception as e:
-        logger.warning("Konnte telegram_users nicht laden: %s", e)
-
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("saldo", cmd_saldo))
@@ -1389,7 +1393,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.3…")
+    logger.info("Bot startet (Polling) – v1.1.5…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
