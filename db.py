@@ -300,7 +300,15 @@ def init_db():
             (_key,),
         )
 
-
+    # --- Telegram Bot user mapping ---
+    db.execute("""CREATE TABLE IF NOT EXISTS telegram_users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_telegram_users_telegram_id ON telegram_users(telegram_id)")
 
 
 
