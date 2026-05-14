@@ -643,25 +643,56 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
 
 # ── NLP parsing ───────────────────────────────────────────────────────────────
 
+def _clean_json(raw: str) -> str:
+    """Entferne Markdown-Backticks und führende/nachfolgende Leerzeichen."""
+    raw = raw.strip()
+    # Entferne ```json ... ``` oder ``` ... ```
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        # erste Zeile (```json oder ```) und letzte Zeile (```) entfernen
+        inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+        raw = "\n".join(inner).strip()
+    return raw
+
+
 def _parse_nlp(text: str) -> "list | None":
-    today = datetime.date.today().isoformat()
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+    tomorrow_iso = (today + datetime.timedelta(days=1)).isoformat()
+    yesterday_iso = (today - datetime.timedelta(days=1)).isoformat()
+
     system_prompt = (
-        f"Du bist ein Parser für eine Zeiterfassungs-App. Heute ist {today}.\n"
-        "Extrahiere aus dem Text eine oder mehrere Aktionen und antworte NUR mit\n"
-        "einem JSON-Array, ohne Erklärungen, ohne Markdown-Backticks.\n\n"
-        "Mögliche Aktionen:\n"
-        '- Zeiteintrag: {"action": "time", "date": "YYYY-MM-DD", "time_in": "HH:MM", "time_out": "HH:MM", "break_minutes": 0}\n'
-        '- Urlaub: {"action": "absence", "type": "Urlaub", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n'
-        '- Krank: {"action": "absence", "type": "Krank", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n'
-        '- Flextag: {"action": "absence", "type": "Flextag", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n\n'
-        "Regeln:\n"
-        "- 'heute' = aktuelles Datum\n"
-        "- 'morgen' = nächster Tag\n"
-        "- 'gestern' = gestriger Tag\n"
-        "- Zeiten auf 15-Minuten runden (6:00, 6:15, 6:30, 6:45...)\n"
-        "- Wenn kein Bis-Datum bei Abwesenheit: date_to = date_from\n"
-        "- Antworte IMMER nur mit validem JSON-Array, nie mit Text"
+        f"Du bist ein Parser für eine Zeiterfassungs-App.\n"
+        f"Heute ist {today_iso} ({today.strftime('%A')}).\n"
+        f"Morgen ist {tomorrow_iso}, gestern war {yesterday_iso}.\n\n"
+        "Extrahiere aus dem Text ALLE Aktionen und antworte NUR mit einem JSON-Array.\n"
+        "KEINE Erklärungen, KEINE Markdown-Backticks, NUR das JSON-Array.\n\n"
+        "Aktionstypen:\n"
+        "[1] Zeiteintrag:\n"
+        '  {"action": "time", "date": "YYYY-MM-DD", "time_in": "HH:MM", "time_out": "HH:MM", "break_minutes": 0}\n'
+        "[2] Abwesenheit (Urlaub / Krank / Flextag):\n"
+        '  {"action": "absence", "type": "Urlaub", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"}\n\n'
+        "Parsing-Regeln:\n"
+        "- 'heute', 'jetzt' → " + today_iso + "\n"
+        "- 'morgen' → " + tomorrow_iso + "\n"
+        "- 'gestern' → " + yesterday_iso + "\n"
+        "- Trennzeichen zwischen Daten: 'bis', '-', '–', 'bis zum'\n"
+        "- Uhrzeiten auf 15 Minuten runden: 6→06:00, 6:10→06:15, 7:30→07:30, 12→12:00\n"
+        "- 'bis 12' oder 'bis 12 Uhr' → time_out: '12:00'\n"
+        "- Fehlendes Bis-Datum bei Abwesenheit → date_to = date_from\n"
+        "- Typ 'Flextag' → type: 'Flextag'\n"
+        "- Datumsformat im Text: TT.MM. oder TT.MM.JJJJ → in YYYY-MM-DD umwandeln\n"
+        "- Jahr fehlt → aktuelles Jahr annehmen\n"
+        "- Wenn Text nicht verständlich → leeres Array []\n\n"
+        "Beispiele (ersetze DATUM durch " + today_iso + "):\n"
+        "- Heute von 6 bis 10 gearbeitet\n"
+        "- Am 6.5. von 7:30 bis 12\n"
+        "- Urlaub vom 7.6. bis 20.6.\n"
+        "- Urlaub 7.6.-20.6.\n"
+        "- Am 3.8. Flextag\n"
+        "- Krank von 10.6. bis 12.6."
     )
+
     client = anthropic.Anthropic()
     try:
         response = client.messages.create(
@@ -671,16 +702,23 @@ def _parse_nlp(text: str) -> "list | None":
             messages=[{"role": "user", "content": text}],
         )
         raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        logger.info("NLP raw response: %s", raw)
+        raw = _clean_json(raw)
         parsed = json.loads(raw)
-        if isinstance(parsed, list) and parsed:
+        if isinstance(parsed, list):
+            # Leeres Array = nicht verstanden
+            if not parsed:
+                return None
             return parsed
+        # Einzelnes Objekt in Liste wrappen
+        if isinstance(parsed, dict):
+            return [parsed]
+        return None
+    except json.JSONDecodeError as e:
+        logger.error("NLP JSON parse error: %s | raw: %s", e, raw)
         return None
     except Exception as e:
-        logger.error("NLP parse error: %s", e)
+        logger.error("NLP error: %s", e)
         return None
 
 
