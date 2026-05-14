@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.7"""
+"""Zeiterfassung Telegram Bot v1.1.8"""
 
 import datetime
 import io
@@ -1109,6 +1109,7 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
 
     start_running = running
 
+    # Collect rows: one entry per time block (multiple per day if needed)
     day_rows = []
     for iso in _iter_days(start_iso, end_iso):
         exp = int(_expected_minutes_for_day(uid, iso) or 0)
@@ -1129,29 +1130,45 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
 
         tag = _WEEKDAY_SHORT[wd]
         datum = f"{d.day:02d}.{d.month:02d}."
-
         bemerkung = abs_map.get(iso) or (f"✈ {trip_map[iso]}" if iso in trip_map else ("Feiertag" if is_hol else ""))
+        day_blocks = blocks_by_day.get(iso, [])
 
-        if act > 0:
-            day_blocks = blocks_by_day.get(iso, [])
-            if day_blocks:
-                zeit = f"{day_blocks[0]['time_in']}-{day_blocks[-1]['time_out']}"
-            else:
-                zeit = _fmt_minutes(act)
+        if act > 0 and day_blocks:
+            for i, blk in enumerate(day_blocks):
+                zeit = f"{blk['time_in']}-{blk['time_out']}"
+                if i == 0:
+                    day_rows.append({
+                        'tag': tag, 'datum': datum, 'zeit': zeit,
+                        'exp': exp, 'act': act, 'delta': delta, 'running': running,
+                        'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
+                    })
+                else:
+                    day_rows.append({
+                        'tag': '', 'datum': '', 'zeit': zeit,
+                        'exp': 0, 'act': 0, 'delta': None, 'running': None,
+                        'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': False,
+                    })
+        elif act > 0:
+            day_rows.append({
+                'tag': tag, 'datum': datum, 'zeit': _fmt_minutes(act),
+                'exp': exp, 'act': act, 'delta': delta, 'running': running,
+                'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
+            })
         else:
-            zeit = bemerkung if bemerkung else "-"
-
-        day_rows.append({
-            'tag': tag, 'datum': datum, 'zeit': zeit,
-            'exp': exp, 'act': act, 'delta': delta, 'running': running,
-            'is_hol': is_hol, 'is_weekend': is_weekend,
-        })
+            day_rows.append({
+                'tag': tag, 'datum': datum, 'zeit': bemerkung if bemerkung else "-",
+                'exp': exp, 'act': act, 'delta': delta, 'running': running,
+                'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
+            })
 
     end_running = running
 
     # Build markdown
     md_lines = [f"📊 *Gleitzeitkonto – {titel}*", f"Startsaldo: *{_fmt_minutes_signed(start_running)}*", ""]
     for row in day_rows:
+        if not row['is_first']:
+            md_lines.append(f"`         ` {row['zeit']}")
+            continue
         delta = row['delta']
         exp = row['exp']
         act = row['act']
@@ -1180,12 +1197,21 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
     rtf.append(r'\line')
 
     for row in day_rows:
+        zeit_r = _rtf_escape(row['zeit'])
+        if not row['is_first']:
+            # Subsequent block: only time column filled
+            if row['is_weekend'] or row['is_hol']:
+                rtf_line = r'\tab ' + '{\\cf3 ' + zeit_r + '}' + r'\tab \tab \tab \tab \line'
+            else:
+                rtf_line = r'\tab ' + zeit_r + r'\tab \tab \tab \tab \line'
+            rtf.append(rtf_line)
+            continue
+
         delta = row['delta']
         exp = row['exp']
         act = row['act']
         tag_r = _rtf_escape(row['tag'])
         datum_r = row['datum']
-        zeit_r = _rtf_escape(row['zeit'])
         soll_str = _fmt_minutes(exp) if exp > 0 else ''
         delta_rtf = _rtf_signed(delta) if (exp > 0 or act > 0) else '+00:00'
         saldo_rtf = _rtf_signed(row['running'])
@@ -1471,7 +1497,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.7…")
+    logger.info("Bot startet (Polling) – v1.1.8…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
