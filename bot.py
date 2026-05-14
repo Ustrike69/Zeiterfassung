@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.0.7"""
+"""Zeiterfassung Telegram Bot v1.1.3"""
 
 import datetime
 import json
@@ -1045,7 +1045,7 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
         ).fetchall()
         # Dienstreisen
         trip_rows = db.execute(
-            "SELECT date_from, date_to, destination FROM business_trips WHERE user_id=? AND date_from<=? AND date_to>=?",
+            "SELECT start_date, end_date, destination FROM business_trips WHERE user_id=? AND start_date<=? AND COALESCE(end_date,start_date)>=?",
             (uid, end_iso, start_iso)
         ).fetchall()
     finally:
@@ -1063,7 +1063,9 @@ def _build_liste(uid: int, year: int, month: "int | None") -> str:
 
     trip_map = {}
     for row in trip_rows:
-        for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
+        t_start = str(row["start_date"])[:10]
+        t_end = str(row["end_date"])[:10] if row["end_date"] else t_start
+        for iso in _iter_days(t_start, t_end):
             trip_map[iso] = str(row["destination"] or "")
 
     prev_date = None
@@ -1405,7 +1407,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.0.7…")
+    logger.info("Bot startet (Polling) – v1.1.3…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
