@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.2.2"
+APP_VERSION = "v1.2.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5638,9 +5638,12 @@ def settings_view():
     _tg_db = connect()
     try:
         _tg_row = _tg_db.execute(
-            "SELECT telegram_id FROM telegram_users WHERE user_id=?", (u["id"],)
+            "SELECT telegram_id, wizard_enabled, reminder_time FROM telegram_users WHERE user_id=?",
+            (u["id"],),
         ).fetchone()
         profile_tg = str(_tg_row["telegram_id"]) if _tg_row else ""
+        wiz_enabled = bool(int(_tg_row["wizard_enabled"] or 1)) if _tg_row else False
+        wiz_time = (_tg_row["reminder_time"] or "20:00") if _tg_row else "20:00"
     finally:
         _tg_db.close()
 
@@ -5696,6 +5699,20 @@ function accToggle(id){{
   h.classList.toggle('open',!op);
   if(a)a.textContent=op?'▼':'▲';
 }}
+function wizToggle(cb){{
+  var row=document.getElementById('wiz-time-row');
+  var inp=document.getElementById('wiz-time');
+  if(cb.checked){{row.style.opacity='1';inp.disabled=false;}}
+  else{{row.style.opacity='0.5';inp.disabled=true;}}
+}}
+function wizValidate(e){{
+  var t=document.getElementById('wiz-time');
+  if(t&&!t.disabled){{
+    var parts=t.value.split(':');
+    var h=parseInt(parts[0]||0,10);
+    if(h<15||h>23){{e.preventDefault();alert('Bitte eine Uhrzeit zwischen 15:00 und 23:00 wählen.');return false;}}
+  }}
+}}
 </script>
 
     <h2 style="margin:0 0 14px 0;font-size:18px;">Einstellungen</h2>
@@ -5729,6 +5746,31 @@ function accToggle(id){{
                 <div class="small" style="color:var(--mu);margin-top:3px;">Deine Telegram-ID findest du indem du @userinfobot in Telegram eine Nachricht schickst.</div>
               </div>
               <div><button class="btn" type="submit">Telegram-ID speichern</button></div>
+            </form>
+          </div>
+
+          <div class="acc-sub">
+            <b style="font-size:14px;">📱 Telegram Erinnerung</b>
+            {'<div class="small" style="color:var(--mu);margin-top:8px;margin-bottom:4px;">Bitte zuerst eine Telegram-ID hinterlegen um Erinnerungen zu aktivieren.</div>' if not profile_tg else ''}
+            <form method="post" action="/settings/reminder" onsubmit="wizValidate(event)" style="display:flex;flex-direction:column;gap:12px;max-width:400px;margin-top:10px;">
+              <div style="{'opacity:0.5;' if not profile_tg else ''}">
+                <label style="display:flex;align-items:center;gap:8px;cursor:{'pointer' if profile_tg else 'default'};">
+                  <input type="checkbox" name="wizard_enabled" value="1" id="wiz-toggle"
+                    {"checked" if (profile_tg and wiz_enabled) else ""}
+                    {"" if profile_tg else "disabled"}
+                    onchange="wizToggle(this)">
+                  <span>Abend-Erinnerung aktiv</span>
+                  <span title="Der Bot fragt dich abends ob du deine Zeiten erfasst hast" style="cursor:help;color:var(--mu);font-size:13px;">ⓘ</span>
+                </label>
+              </div>
+              <div id="wiz-time-row" style="{'opacity:1;' if (profile_tg and wiz_enabled) else 'opacity:0.5;'}">
+                <label>Uhrzeit</label><br>
+                <input type="time" name="reminder_time" id="wiz-time"
+                  value="{wiz_time}" step="900" style="width:140px;"
+                  {"" if (profile_tg and wiz_enabled) else "disabled"}>
+                <div class="small" style="color:var(--mu);margin-top:3px;">Erlaubter Bereich: 15:00 – 23:00 Uhr</div>
+              </div>
+              <div><button class="btn" type="submit" {"" if profile_tg else "disabled"}>Erinnerung speichern</button></div>
             </form>
           </div>
 
@@ -5925,6 +5967,42 @@ def settings_telegram_save():
     finally:
         db.close()
     add_flash("Telegram-ID gespeichert.", "success")
+    return redirect("/settings")
+
+
+@app.post("/settings/reminder")
+@login_required
+def settings_reminder_save():
+    bootstrap()
+    u = current_user()
+    wizard_enabled = 1 if request.form.get("wizard_enabled") == "1" else 0
+    reminder_time = (request.form.get("reminder_time") or "20:00").strip()
+
+    m = re.match(r"^(\d{2}):(\d{2})$", reminder_time)
+    if not m:
+        add_flash("Ungültige Uhrzeit. Bitte im Format HH:MM angeben, z.B. 19:30", "error")
+        return redirect("/settings")
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (15 <= h <= 23) or not (0 <= mi <= 59):
+        add_flash("Ungültige Uhrzeit. Erlaubter Bereich: 15:00 – 23:00.", "error")
+        return redirect("/settings")
+
+    db = connect()
+    try:
+        tg_row = db.execute(
+            "SELECT telegram_id FROM telegram_users WHERE user_id=?", (u["id"],)
+        ).fetchone()
+        if not tg_row:
+            add_flash("Keine Telegram-ID hinterlegt. Bitte zuerst eine Telegram-ID speichern.", "error")
+            return redirect("/settings")
+        db.execute(
+            "UPDATE telegram_users SET wizard_enabled=?, reminder_time=? WHERE user_id=?",
+            (wizard_enabled, reminder_time, u["id"]),
+        )
+        db.commit()
+    finally:
+        db.close()
+    add_flash("Erinnerungseinstellungen gespeichert.", "success")
     return redirect("/settings")
 
 
