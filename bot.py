@@ -1,11 +1,13 @@
-"""Zeiterfassung Telegram Bot v1.2.1"""
+"""Zeiterfassung Telegram Bot v1.2.2"""
 
 import datetime
 import io
 import json
 import logging
 import os
+import re
 import sys
+from zoneinfo import ZoneInfo
 
 import anthropic
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -107,27 +109,54 @@ def _all_users() -> list[dict]:
         db.close()
 
 
-def _get_wizard_users() -> list[dict]:
+def _get_reminder_settings(telegram_id: int) -> dict:
     db = connect()
     try:
-        rows = db.execute(
-            "SELECT telegram_id, user_id FROM telegram_users WHERE wizard_enabled=1"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        r = db.execute(
+            "SELECT wizard_enabled, reminder_time FROM telegram_users WHERE telegram_id=?",
+            (telegram_id,),
+        ).fetchone()
+        if r:
+            return {
+                "enabled": bool(int(r["wizard_enabled"] or 1)),
+                "time": r["reminder_time"] or "20:00",
+            }
+        return {"enabled": True, "time": "20:00"}
     finally:
         db.close()
 
 
-def _set_wizard_enabled(telegram_id: int, enabled: bool) -> None:
+def _set_reminder_settings(telegram_id: int, enabled: bool, reminder_time: str) -> None:
     db = connect()
     try:
         db.execute(
-            "UPDATE telegram_users SET wizard_enabled=? WHERE telegram_id=?",
-            (1 if enabled else 0, telegram_id),
+            "UPDATE telegram_users SET wizard_enabled=?, reminder_time=? WHERE telegram_id=?",
+            (1 if enabled else 0, reminder_time, telegram_id),
         )
         db.commit()
     finally:
         db.close()
+
+
+def _get_telegram_id_for_user(user_id: int) -> "int | None":
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT telegram_id FROM telegram_users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return int(r["telegram_id"]) if r else None
+    finally:
+        db.close()
+
+
+def _parse_reminder_time(s: str) -> "str | None":
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s.strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (15 <= h <= 23) or not (0 <= mi <= 59):
+        return None
+    return f"{h:02d}:{mi:02d}"
 
 
 # ── Calculation helpers ───────────────────────────────────────────────────────
@@ -953,7 +982,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/abwesenheiten — Abwesenheitsliste aktuelles Jahr\n"
         "/user — Aktiver Benutzer\n"
         "\n*Abend-Erinnerung:*\n"
-        "Schreib _erinnerung aus_ oder _erinnerung an_\n"
+        "Schreib _erinnerung_ (Status), _erinnerung an_, _erinnerung aus_ oder _erinnerung 19:30_\n"
     )
     if is_admin:
         text += (
@@ -964,6 +993,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/alssaldo <username> — Saldo eines Users\n"
             "/alsurlaub <username> — Urlaub eines Users\n"
             "/alsabw <username> — Abwesenheiten eines Users\n"
+            "/testwizard [username] — Wizard sofort testen\n"
         )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -1674,51 +1704,67 @@ async def _wizard_send_step1(bot, telegram_id: int, today_iso: str) -> None:
     await bot.send_message(chat_id=telegram_id, text=text, reply_markup=_wizard_kb_yesno())
 
 
-async def check_missing_entries(app) -> None:
-    today = datetime.date.today()
-    today_iso = today.isoformat()
+async def trigger_wizard(
+    bot, telegram_id: int, user_id: int, today_iso: str, *, force: bool = False
+) -> bool:
+    """Send wizard if conditions are met. Returns True when wizard was sent."""
+    if not force:
+        if telegram_id in already_asked.get(today_iso, set()):
+            return False
+        if telegram_id in wizard_state:
+            return False
+        tracking_start = _get_tracking_start(user_id)
+        if tracking_start and tracking_start > today_iso:
+            return False
+        schedule = _get_user_schedule_for_day(user_id, today_iso)
+        if not _is_workday_for_user(today_iso, schedule):
+            return False
+        if _is_holiday(today_iso):
+            return False
+        if _has_entry_today(user_id, today_iso):
+            return False
+        if _is_absence_on_day(user_id, today_iso):
+            return False
+        if _is_day_locked(user_id, today_iso):
+            return False
+    try:
+        await _wizard_send_step1(bot, telegram_id, today_iso)
+        already_asked.setdefault(today_iso, set()).add(telegram_id)
+        return True
+    except Exception as e:
+        logger.error("Wizard send failed for %d: %s", telegram_id, e)
+        return False
+
+
+async def check_reminders(app) -> None:
+    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    current_time = now.strftime("%H:%M")
+    today_iso = now.date().isoformat()
 
     for old in list(already_asked.keys()):
         if old != today_iso:
             del already_asked[old]
-    asked_today = already_asked.setdefault(today_iso, set())
 
-    for u in _get_wizard_users():
-        tid = int(u["telegram_id"])
-        uid = int(u["user_id"])
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT telegram_id, user_id FROM telegram_users "
+            "WHERE wizard_enabled=1 AND reminder_time=?",
+            (current_time,),
+        ).fetchall()
+    finally:
+        db.close()
 
-        if tid in asked_today or tid in wizard_state:
-            continue
-
-        tracking_start = _get_tracking_start(uid)
-        if tracking_start and tracking_start > today_iso:
-            continue
-
-        schedule = _get_user_schedule_for_day(uid, today_iso)
-        if not _is_workday_for_user(today_iso, schedule):
-            continue
-        if _is_holiday(today_iso):
-            continue
-        if _has_entry_today(uid, today_iso):
-            continue
-        if _is_absence_on_day(uid, today_iso):
-            continue
-        if _is_day_locked(uid, today_iso):
-            continue
-
-        try:
-            await _wizard_send_step1(app.bot, tid, today_iso)
-            asked_today.add(tid)
-        except Exception as e:
-            logger.error("Wizard send failed for %d: %s", tid, e)
+    for row in rows:
+        await trigger_wizard(app.bot, int(row["telegram_id"]), int(row["user_id"]), today_iso)
 
 
 async def _on_startup(application: Application) -> None:
     scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
-    scheduler.add_job(check_missing_entries, "cron", hour=20, minute=0, args=[application])
+    scheduler.add_job(check_reminders, "cron", minute="*", args=[application])
     scheduler.start()
     application.bot_data["scheduler"] = scheduler
-    logger.info("Abend-Wizard Scheduler gestartet (täglich 20:00 Europe/Berlin)")
+    logger.info("Abend-Wizard Scheduler gestartet (minütliche Prüfung, individuelle Uhrzeiten)")
 
 
 async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1800,6 +1846,104 @@ async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 
+async def _handle_erinnerung(telegram_id: int, text: str, update: Update) -> None:
+    parts = text.split()
+    settings = _get_reminder_settings(telegram_id)
+
+    if len(parts) == 1:
+        if settings["enabled"]:
+            await update.message.reply_text(
+                f"Erinnerung: ✅ aktiv um {settings['time']} Uhr"
+            )
+        else:
+            await update.message.reply_text("Erinnerung: 🔕 deaktiviert")
+        return
+
+    cmd = parts[1].lower()
+
+    if cmd == "aus":
+        _set_reminder_settings(telegram_id, False, settings["time"])
+        await update.message.reply_text(
+            "Erinnerung deaktiviert. Du erhältst keine Abfragen mehr."
+        )
+        return
+
+    if cmd == "an":
+        if len(parts) >= 3:
+            t = _parse_reminder_time(parts[2])
+            if t is None:
+                await update.message.reply_text(
+                    "Ungültige Uhrzeit. Bitte im Format HH:MM angeben, z.B. 19:30\n"
+                    "Erlaubter Bereich: 15:00 – 23:00"
+                )
+                return
+            _set_reminder_settings(telegram_id, True, t)
+            await update.message.reply_text(f"Erinnerung aktiviert um {t} Uhr.")
+        else:
+            _set_reminder_settings(telegram_id, True, "20:00")
+            await update.message.reply_text("Erinnerung aktiviert um 20:00 Uhr.")
+        return
+
+    t = _parse_reminder_time(parts[1])
+    if t is not None:
+        _set_reminder_settings(telegram_id, True, t)
+        await update.message.reply_text(f"Erinnerung auf {t} Uhr gesetzt.")
+        return
+
+    await update.message.reply_text(
+        "Verwendung:\n"
+        "• _erinnerung_ — Status anzeigen\n"
+        "• _erinnerung an_ — aktivieren (20:00)\n"
+        "• _erinnerung aus_ — deaktivieren\n"
+        "• _erinnerung 19:30_ — Uhrzeit setzen\n"
+        "• _erinnerung an 18:00_ — aktivieren mit Uhrzeit",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_testwizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if tid not in ADMIN_IDS:
+        await update.message.reply_text("Kein Zugriff.")
+        return
+
+    today_iso = datetime.date.today().isoformat()
+
+    if not context.args:
+        own_uid = _get_user_id(tid)
+        if own_uid is None:
+            await update.message.reply_text("Kein Benutzer verknüpft.")
+            return
+        sent = await trigger_wizard(context.bot, tid, own_uid, today_iso, force=True)
+        if sent:
+            await update.message.reply_text("Wizard für dich gesendet.")
+        else:
+            await update.message.reply_text("Wizard konnte nicht gesendet werden.")
+        return
+
+    u = _get_user_by_username(context.args[0])
+    if not u:
+        await update.message.reply_text(f"Benutzer '{context.args[0]}' nicht gefunden.")
+        return
+
+    target_tid = _get_telegram_id_for_user(u["id"])
+    if target_tid is None:
+        name = u["display_name"] or u["username"]
+        await update.message.reply_text(
+            f"User {name} hat keine Telegram-ID hinterlegt."
+        )
+        return
+
+    sent = await trigger_wizard(context.bot, target_tid, u["id"], today_iso, force=True)
+    name = u["display_name"] or u["username"]
+    if sent:
+        await update.message.reply_text(
+            f"Wizard für {name} (Telegram-ID: {target_tid}) gesendet."
+        )
+    else:
+        await update.message.reply_text(f"Wizard konnte nicht gesendet werden.")
+
+
 # ── Free-text handler ─────────────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1824,12 +1968,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = (update.message.text or "").strip()
     text_lower = text.lower()
 
-    # Handle "erinnerung" toggle
-    if text_lower in ("erinnerung aus", "erinnerung an"):
-        enabled = text_lower == "erinnerung an"
-        _set_wizard_enabled(tid, enabled)
-        status = "aktiviert ✅" if enabled else "deaktiviert 🔕"
-        await update.message.reply_text(f"Abend-Erinnerung {status}.")
+    # Handle "erinnerung" command
+    if text_lower == "erinnerung" or text_lower.startswith("erinnerung "):
+        await _handle_erinnerung(tid, text, update)
         return
 
     # Handle wizard states
@@ -1919,10 +2060,11 @@ def main() -> None:
     app.add_handler(CommandHandler("alssaldo", cmd_alssaldo))
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(CommandHandler("alsabw", cmd_alsabw))
+    app.add_handler(CommandHandler("testwizard", cmd_testwizard))
     app.add_handler(CallbackQueryHandler(handle_wizard_callback, pattern="^wizard_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.2.1…")
+    logger.info("Bot startet (Polling) – v1.2.2…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
