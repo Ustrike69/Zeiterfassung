@@ -275,6 +275,12 @@ def init_db():
     if not _col_exists(db, "users", "contouring_start_date"):
         db.execute("ALTER TABLE users ADD COLUMN contouring_start_date TEXT")
 
+    if not _col_exists(db, "users", "birth_date"):
+        db.execute("ALTER TABLE users ADD COLUMN birth_date TEXT")
+
+    if not _col_exists(db, "users", "retirement_age"):
+        db.execute("ALTER TABLE users ADD COLUMN retirement_age INTEGER NOT NULL DEFAULT 67")
+
     db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,

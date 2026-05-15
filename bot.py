@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.2.2"""
+"""Zeiterfassung Telegram Bot v1.2.6"""
 
 import datetime
 import io
@@ -2040,6 +2040,84 @@ async def _process_nlp(
     await _execute_actions(actions, uid, update, context)
 
 
+async def cmd_rente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    uid = _get_user_id(tid)
+    if uid is None:
+        await update.message.reply_text("Kein Benutzer verknüpft. Bitte zuerst /start.")
+        return
+    db = connect()
+    try:
+        row = db.execute("SELECT birth_date, retirement_age FROM users WHERE id=?", (uid,)).fetchone()
+    finally:
+        db.close()
+    if not row or not row["birth_date"]:
+        await update.message.reply_text(
+            "Kein Geburtsdatum hinterlegt. Bitte in den Einstellungen (Persönliche Einstellungen) eintragen."
+        )
+        return
+    try:
+        bd = datetime.date.fromisoformat(row["birth_date"])
+    except (ValueError, TypeError):
+        await update.message.reply_text("Ungültiges Geburtsdatum in den Einstellungen.")
+        return
+    age = int(row["retirement_age"] or 67)
+    try:
+        ret_date = bd.replace(year=bd.year + age)
+    except ValueError:
+        ret_date = bd.replace(year=bd.year + age, day=28)
+    today = datetime.date.today()
+    delta = ret_date - today
+    cal_days = delta.days
+    if cal_days <= 0:
+        ret_de = ret_date.strftime("%d.%m.%Y")
+        await update.message.reply_text(f"🎉 Du bist seit {ret_de} im Rentenalter!")
+        return
+    weeks = cal_days // 7
+    years = 0
+    months = 0
+    d = today
+    while True:
+        try:
+            nxt = d.replace(year=d.year + 1)
+        except ValueError:
+            nxt = d.replace(year=d.year + 1, day=28)
+        if nxt > ret_date:
+            break
+        years += 1
+        d = nxt
+    while True:
+        m = d.month + 1
+        y = d.year + (1 if m > 12 else 0)
+        m = m if m <= 12 else 1
+        try:
+            nxt = d.replace(year=y, month=m)
+        except ValueError:
+            nxt = d.replace(year=y, month=m, day=28)
+        if nxt > ret_date:
+            break
+        months += 1
+        d = nxt
+    rem_days = (ret_date - d).days
+    full_weeks = cal_days // 7
+    extra = cal_days % 7
+    start_dow = today.weekday()
+    net_workdays = full_weeks * 5
+    for i in range(extra):
+        if (start_dow + i) % 7 < 5:
+            net_workdays += 1
+    ret_de = ret_date.strftime("%d.%m.%Y")
+    msg = (
+        f"🧓 *Rentencountdown* (Alter {age})\n\n"
+        f"Renteneintritt: *{ret_de}*\n"
+        f"Noch *{years} J. {months} Mon. {rem_days} Tage*\n\n"
+        f"Kalendertage: {cal_days:,}\n"
+        f"Arbeitstage (netto): {net_workdays:,}\n"
+        f"Wochen: {weeks:,}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -2061,10 +2139,11 @@ def main() -> None:
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(CommandHandler("alsabw", cmd_alsabw))
     app.add_handler(CommandHandler("testwizard", cmd_testwizard))
+    app.add_handler(CommandHandler("rente", cmd_rente))
     app.add_handler(CallbackQueryHandler(handle_wizard_callback, pattern="^wizard_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.2.2…")
+    logger.info("Bot startet (Polling) – v1.2.6…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

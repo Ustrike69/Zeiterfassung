@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.2.5"
+APP_VERSION = "v1.2.6"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2356,6 +2356,75 @@ def api_remove_exception():
     return redirect(f"/day/{day}")
 
 
+def _calc_retirement(user_id: int):
+    db = connect()
+    try:
+        row = db.execute("SELECT birth_date, retirement_age FROM users WHERE id=?", (user_id,)).fetchone()
+    finally:
+        db.close()
+    if not row or not row["birth_date"]:
+        return None
+    try:
+        bd = datetime.date.fromisoformat(row["birth_date"])
+    except (ValueError, TypeError):
+        return None
+    age = int(row["retirement_age"] or 67)
+    try:
+        ret_date = bd.replace(year=bd.year + age)
+    except ValueError:
+        ret_date = bd.replace(year=bd.year + age, day=28)
+    today = datetime.date.today()
+    delta = ret_date - today
+    cal_days = delta.days
+    if cal_days <= 0:
+        return {"retired": True, "retirement_date": ret_date.isoformat(), "age": age}
+    weeks = cal_days // 7
+    # count remaining full years and months
+    years = 0
+    months = 0
+    d = today
+    while True:
+        try:
+            nxt = d.replace(year=d.year + 1)
+        except ValueError:
+            nxt = d.replace(year=d.year + 1, day=28)
+        if nxt > ret_date:
+            break
+        years += 1
+        d = nxt
+    while True:
+        m = d.month + 1
+        y = d.year + (1 if m > 12 else 0)
+        m = m if m <= 12 else 1
+        try:
+            nxt = d.replace(year=y, month=m)
+        except ValueError:
+            nxt = d.replace(year=y, month=m, day=28)
+        if nxt > ret_date:
+            break
+        months += 1
+        d = nxt
+    remaining_days = (ret_date - d).days
+    full_weeks = cal_days // 7
+    extra = cal_days % 7
+    start_dow = today.weekday()
+    net_workdays = full_weeks * 5
+    for i in range(extra):
+        if (start_dow + i) % 7 < 5:
+            net_workdays += 1
+    return {
+        "retired": False,
+        "retirement_date": ret_date.isoformat(),
+        "age": age,
+        "cal_days": cal_days,
+        "weeks": weeks,
+        "years": years,
+        "months": months,
+        "days": remaining_days,
+        "net_workdays": net_workdays,
+    }
+
+
 @app.get("/")
 @login_required
 def index():
@@ -2488,6 +2557,24 @@ def index():
         </div>
       </div>"""
 
+    retirement = _calc_retirement(u["id"])
+    if retirement and not retirement["retired"]:
+        _ret_de = _fmt_date_de(retirement["retirement_date"])
+        _ret_widget = f"""
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Rentencountdown (Alter {retirement['age']})</div>
+      <div style="font-size:1.6rem;font-weight:700;letter-spacing:-.02em;line-height:1.15;">{retirement['years']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">J.</span> {retirement['months']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">Mon.</span> {retirement['days']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">Tage</span></div>
+      <div class="small" style="margin-top:6px;color:var(--mu);">Eintritt: <b style="color:var(--tx);">{_ret_de}</b> &nbsp;·&nbsp; {retirement['cal_days']:,} Kalendertage &nbsp;·&nbsp; {retirement['net_workdays']:,} Arbeitstage &nbsp;·&nbsp; {retirement['weeks']:,} Wochen</div>
+    </div>"""
+    elif retirement and retirement["retired"]:
+        _ret_widget = """
+    <div class="card" style="margin-bottom:12px;">
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Rentencountdown</div>
+      <div style="font-size:1.1rem;font-weight:600;">Du bist bereits im Rentenalter! 🎉</div>
+    </div>"""
+    else:
+        _ret_widget = ""
+
     body = f'''
     {flash_html()}
 <style>
@@ -2583,6 +2670,8 @@ def index():
         <a class="btn" href="/absences" >Alle Abwesenheiten</a>
       </div>
     </div>
+
+    {_ret_widget}
     '''
     return render_template_string(layout("Übersicht", body, u, APP_VERSION, show_back=False))
 
@@ -5651,6 +5740,15 @@ def settings_view():
 
     profile_dn = u.get("display_name") or ""
     profile_em = u.get("email") or ""
+    _prof_db = connect()
+    try:
+        _prof_row = _prof_db.execute(
+            "SELECT birth_date, retirement_age FROM users WHERE id=?", (u["id"],)
+        ).fetchone()
+        profile_bd = (_prof_row["birth_date"] or "") if _prof_row else ""
+        profile_ra = str(_prof_row["retirement_age"] or 67) if _prof_row else "67"
+    finally:
+        _prof_db.close()
     _tg_db = connect()
     try:
         _tg_row = _tg_db.execute(
@@ -5749,6 +5847,16 @@ function wizValidate(e){{
             <div>
               <label>E-Mail</label><br>
               <input type="email" name="email" value="{profile_em}" placeholder="max@example.com">
+            </div>
+            <div>
+              <label>Geburtsdatum</label><br>
+              <input type="date" name="birth_date" value="{profile_bd}" style="width:180px;">
+              <div class="small" style="color:var(--mu);margin-top:3px;">Wird für den Rentencountdown auf der Übersicht verwendet.</div>
+            </div>
+            <div>
+              <label>Renteneintrittsalter</label><br>
+              <input type="number" name="retirement_age" value="{profile_ra}" min="60" max="72" step="1" style="width:100px;">
+              <div class="small" style="color:var(--mu);margin-top:3px;">Standard: 67 Jahre. Erlaubter Bereich: 60–72.</div>
             </div>
             <div><button class="btn" type="submit">Profil speichern</button></div>
           </form>
@@ -5935,10 +6043,19 @@ def settings_profile_save():
     u = current_user()
     display_name = (request.form.get("display_name") or "").strip() or None
     email = (request.form.get("email") or "").strip() or None
+    birth_date_raw = (request.form.get("birth_date") or "").strip()
+    try:
+        birth_date = datetime.date.fromisoformat(birth_date_raw).isoformat() if birth_date_raw else None
+    except ValueError:
+        birth_date = None
+    try:
+        retirement_age = max(60, min(72, int(request.form.get("retirement_age") or 67)))
+    except (ValueError, TypeError):
+        retirement_age = 67
     db = connect()
     db.execute(
-        "UPDATE users SET display_name=?, email=?, updated_at=datetime('now') WHERE id=?",
-        (display_name, email, u["id"]),
+        "UPDATE users SET display_name=?, email=?, birth_date=?, retirement_age=?, updated_at=datetime('now') WHERE id=?",
+        (display_name, email, birth_date, retirement_age, u["id"]),
     )
     db.commit()
     db.close()
@@ -7574,6 +7691,10 @@ function filterHelp(q){{
         <b>Abwesenheitskarte</b>
         <p>Kompakte Übersicht über laufende und bevorstehende Abwesenheiten (Urlaub, Krank, Flextag, Verdi usw.) im aktuellen Zeitraum.</p>
       </div>
+      <div class="help-entry">
+        <b>Rentencountdown</b>
+        <p>Zeigt die verbleibende Zeit bis zum Renteneintritt (Jahre, Monate, Tage, Arbeitstage). Nur sichtbar wenn ein Geburtsdatum in den Einstellungen hinterlegt ist. Das Eintrittsalter ist in <em>Einstellungen → Persönliche Einstellungen</em> konfigurierbar (Standard: 67).</p>
+      </div>
     </div>
   </div>
 </div>
@@ -7793,6 +7914,8 @@ function filterHelp(q){{
         <b>Persönliche Einstellungen</b>
         <p><b>Anzeigename</b>: erscheint im Header und in Berichten. Leer = Benutzername wird verwendet.<br>
         <b>E-Mail</b>: für Benachrichtigungen.<br>
+        <b>Geburtsdatum</b>: Wenn hinterlegt, wird auf der Übersicht ein Rentencountdown angezeigt.<br>
+        <b>Renteneintrittsalter</b>: Standard 67 Jahre. Bereich 60–72. Bestimmt das Zieldatum des Countdowns.<br>
         <b>Passwort</b>: Mindestlänge 6 Zeichen, aktuelles Passwort erforderlich.<br>
         <b>Telegram-ID</b>: Für den Bot-Zugriff (siehe Telegram-Bot-Bereich).</p>
       </div>
