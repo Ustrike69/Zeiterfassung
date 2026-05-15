@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.2.4"
+APP_VERSION = "v1.2.5"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -2945,7 +2945,12 @@ def balance_view():
         # Build status badge HTML (absence + flextag)
         _status_html = ""
         for _label, _color in _statuses[:2]:
-            _bg = (_color + "22") if _color.startswith("#") else "rgba(0,0,0,.07)"
+            if _color.startswith("#"):
+                _bg = _color + "22"
+            elif _color == "var(--danger)":
+                _bg = "rgba(220,38,38,.15)"
+            else:
+                _bg = "rgba(0,0,0,.07)"
             _status_html += (
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:4px;"
                 f"background:{_bg};color:{_color};white-space:nowrap;font-weight:600;'>"
@@ -2963,6 +2968,9 @@ def balance_view():
             _base_d = "background:rgba(220,38,38,.08);"
         elif _is_today_d:
             _base_d = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
+        elif _is_holiday_d:
+            # Color-dim only: badge keeps its explicit color (var(--danger) overrides inherited color)
+            _base_d = "color:var(--mu);"
         elif _is_off_d:
             _base_d = "opacity:.38;"
         else:
@@ -3049,6 +3057,9 @@ def balance_view():
             _base_style = "background:rgba(220,38,38,.08);"
         elif _is_today_m:
             _base_style = "background:rgba(37,99,235,.09);border-left:3px solid var(--ac);"
+        elif _is_holiday_m:
+            # Color-dim only: badge keeps its explicit color (var(--danger) overrides inherited color)
+            _base_style = "color:var(--mu);"
         elif _is_off_m:
             _base_style = "opacity:.38;"
         else:
@@ -3058,7 +3069,12 @@ def balance_view():
         if _stat_m:
             _abs_label = _stat_m[0][0]
             _abs_color = _stat_m[0][1]
-            _abs_bg    = (_abs_color + "22") if _abs_color.startswith("#") else "rgba(0,0,0,.07)"
+            if _abs_color.startswith("#"):
+                _abs_bg = _abs_color + "22"
+            elif _abs_color == "var(--danger)":
+                _abs_bg = "rgba(220,38,38,.15)"
+            else:
+                _abs_bg = "rgba(0,0,0,.07)"
             mob_trs += (
                 f"<tr style='cursor:pointer;border-bottom:1px solid var(--bd);{_base_style}'"
                 f" onclick=\"location.href='/day/{r['day']}'\">"
