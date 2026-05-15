@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.2.3"
+APP_VERSION = "v1.2.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -7842,6 +7842,41 @@ function filterHelp(q){{
           <li><em>"Krank von 10.6. bis 12.6."</em></li>
         </ul>
         <p>Zeiten werden auf 15-Minuten-Schritte gerundet. Wenn für den Tag bereits ein Eintrag vorhanden ist, fragt der Bot nach Bestätigung (ja/nein).</p>
+      </div>
+      <div class="help-entry">
+        <b>Abend-Erinnerung</b>
+        <p>Der Bot schickt abends automatisch eine Nachricht, wenn für den heutigen Arbeitstag noch kein Zeiteintrag und keine Abwesenheit vorhanden ist.</p>
+        <ul>
+          <li><b>Voraussetzung:</b> Telegram-ID unter <em>Einstellungen → Telegram-ID</em> hinterlegt</li>
+          <li><b>Aktivieren:</b> <em>Einstellungen → Persönliche Einstellungen → 📱 Telegram Erinnerung</em> → Toggle einschalten</li>
+          <li><b>Uhrzeit:</b> Individuell einstellbar zwischen 15:00 und 23:00 Uhr (Standard: 20:00)</li>
+          <li><b>Nur an echten Arbeitstagen</b> – keine Erinnerung an Wochenenden, Feiertagen oder gesperrten Perioden</li>
+          <li><b>Kein Wizard</b> wenn bereits Zeiten oder eine Abwesenheit für heute eingetragen sind</li>
+        </ul>
+      </div>
+      <div class="help-entry">
+        <b>Wizard-Ablauf (Abend-Erinnerung)</b>
+        <p>Nach Erhalt der Erinnerung läuft ein geführter Dialog:</p>
+        <ul>
+          <li>Bot fragt: <em>"Heute gearbeitet?"</em> → Buttons <b>✅ Ja, gearbeitet</b> oder <b>🏠 Nein</b></li>
+          <li><b>Bei Ja:</b> Zeiten per Freitext eingeben, z.B. <em>"7:30 bis 16:00"</em> oder <em>"8 bis 13 Pause 30"</em> – genau wie die normale Bot-Eingabe</li>
+          <li><b>Bei Nein:</b> Abwesenheitstyp auswählen:<br>
+            🏖 Urlaub · 🤒 Krank · 💆 Flextag · 🔧 Verdi · ✈ Dienstreise · ❌ Abbrechen</li>
+          <li><b>Bei Dienstreise:</b> Zielort als Freitext eingeben – wird in den Dienstreisen eingetragen</li>
+          <li>Der Dialog läuft <b>2 Stunden</b>, danach kann direkt per Freitext eingetragen werden</li>
+        </ul>
+      </div>
+      <div class="help-entry">
+        <b>Erinnerung per Bot-Befehl steuern</b>
+        <p>Alternativ zur App-Einstellung direkt im Bot-Chat:</p>
+        <ul>
+          <li><code>erinnerung</code> — aktuellen Status anzeigen</li>
+          <li><code>erinnerung an</code> — aktivieren mit Standard 20:00 Uhr</li>
+          <li><code>erinnerung aus</code> — deaktivieren</li>
+          <li><code>erinnerung 19:30</code> — Uhrzeit ändern (und aktivieren)</li>
+          <li><code>erinnerung an 18:00</code> — aktivieren mit individueller Uhrzeit</li>
+        </ul>
+        <div class="info-box">ℹ️ Uhrzeit-Änderungen gelten sofort – die Einstellung wird in der App unter <em>Einstellungen → Telegram Erinnerung</em> angezeigt.</div>
       </div>
       <div class="help-entry">
         <b>Admin-Befehle</b>
