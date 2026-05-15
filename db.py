@@ -309,6 +309,8 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
     db.execute("CREATE INDEX IF NOT EXISTS idx_telegram_users_telegram_id ON telegram_users(telegram_id)")
+    if not _col_exists(db, "telegram_users", "wizard_enabled"):
+        db.execute("ALTER TABLE telegram_users ADD COLUMN wizard_enabled INTEGER NOT NULL DEFAULT 1")
 
 
 

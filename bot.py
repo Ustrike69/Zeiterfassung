@@ -1,4 +1,4 @@
-"""Zeiterfassung Telegram Bot v1.1.9"""
+"""Zeiterfassung Telegram Bot v1.2.1"""
 
 import datetime
 import io
@@ -8,9 +8,11 @@ import os
 import sys
 
 import anthropic
-from telegram import Update
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -27,6 +29,16 @@ logger = logging.getLogger(__name__)
 
 TOKEN = "8673206171:AAEwr7EXU7a2y6frMspRATKRvWIdHlWbCeU"
 ADMIN_IDS: set[int] = {7593372353}
+
+# ── Wizard state ──────────────────────────────────────────────────────────────
+WAITING_HOURS = 1
+WAITING_ABSENCE_CONFIRM = 2
+WAITING_TRIP_DESTINATION = 3
+
+# {telegram_id: {"state": int|None, "date": iso, "absence_type": str|None, "expires": datetime}}
+wizard_state: dict = {}
+# {date_iso: set(telegram_ids)} – reset daily
+already_asked: dict = {}
 
 NLP_EXAMPLES = (
     "❓ Das habe ich nicht verstanden. Beispiele:\n"
@@ -91,6 +103,29 @@ def _all_users() -> list[dict]:
                 "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY username"
             ).fetchall()
         ]
+    finally:
+        db.close()
+
+
+def _get_wizard_users() -> list[dict]:
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT telegram_id, user_id FROM telegram_users WHERE wizard_enabled=1"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+def _set_wizard_enabled(telegram_id: int, enabled: bool) -> None:
+    db = connect()
+    try:
+        db.execute(
+            "UPDATE telegram_users SET wizard_enabled=? WHERE telegram_id=?",
+            (1 if enabled else 0, telegram_id),
+        )
+        db.commit()
     finally:
         db.close()
 
@@ -228,6 +263,24 @@ def _is_absence_on_day(user_id: int, iso_day: str) -> bool:
             (user_id, iso_day, iso_day),
         ).fetchone()
         return ab is not None
+    finally:
+        db.close()
+
+
+def _has_entry_today(user_id: int, iso_day: str) -> bool:
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT id FROM time_blocks WHERE user_id=? AND day=? LIMIT 1",
+            (user_id, iso_day),
+        ).fetchone()
+        if r:
+            return True
+        r = db.execute(
+            "SELECT id FROM time_entries WHERE user_id=? AND day=? LIMIT 1",
+            (user_id, iso_day),
+        ).fetchone()
+        return r is not None
     finally:
         db.close()
 
@@ -641,9 +694,10 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
                 f"⚠️ Es gibt bereits eine Abwesenheit im Zeitraum "
                 f"{_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}."
             )
-        if absence_type == "Flextag":
+        _sonstige = {"Flextag", "Verdi"}
+        if absence_type in _sonstige:
             lookup_name = "Sonstige"
-            comment = "Flextag"
+            comment = absence_type
         else:
             lookup_name = absence_type
             comment = None
@@ -664,6 +718,24 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
         finally:
             db.close()
         return f"✅ Eingetragen: {absence_type}\n📅 {_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}"
+    except Exception as e:
+        return f"❌ Konnte nicht eingetragen werden: {e}"
+
+
+def _do_insert_business_trip(user_id: int, day: str, destination: str) -> str:
+    try:
+        db = connect()
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO business_trips"
+                "(user_id, start_date, end_date, destination, created_at) "
+                "VALUES(?,?,?,?,datetime('now'))",
+                (user_id, day, day, destination),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return f"✅ Dienstreise eingetragen: {_fmt_date_de(day)}\n📍 {destination}"
     except Exception as e:
         return f"❌ Konnte nicht eingetragen werden: {e}"
 
@@ -880,6 +952,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/bericht jahr — Gleitzeitkonto ganzes Jahr\n"
         "/abwesenheiten — Abwesenheitsliste aktuelles Jahr\n"
         "/user — Aktiver Benutzer\n"
+        "\n*Abend-Erinnerung:*\n"
+        "Schreib _erinnerung aus_ oder _erinnerung an_\n"
     )
     if is_admin:
         text += (
@@ -1547,6 +1621,185 @@ async def cmd_alsabw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"{header}\n{body}", parse_mode="Markdown")
 
 
+# ── Wizard helpers ────────────────────────────────────────────────────────────
+
+def _wizard_kb_yesno() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ja, gearbeitet", callback_data="wizard_yes"),
+        InlineKeyboardButton("🏠 Nein", callback_data="wizard_no"),
+    ]])
+
+
+def _wizard_kb_absence() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🏖 Urlaub", callback_data="wizard_abs_urlaub"),
+            InlineKeyboardButton("🤒 Krank", callback_data="wizard_abs_krank"),
+        ],
+        [
+            InlineKeyboardButton("💆 Flextag", callback_data="wizard_abs_flextag"),
+            InlineKeyboardButton("🔧 Verdi", callback_data="wizard_abs_verdi"),
+        ],
+        [
+            InlineKeyboardButton("✈ Dienstreise", callback_data="wizard_abs_trip"),
+            InlineKeyboardButton("❌ Abbrechen", callback_data="wizard_cancel"),
+        ],
+    ])
+
+
+def _wizard_kb_confirm(typ: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ja, eintragen", callback_data=f"wizard_confirm_{typ}"),
+        InlineKeyboardButton("◀ Zurück", callback_data="wizard_back"),
+    ]])
+
+
+def _wizard_expires() -> datetime.datetime:
+    return datetime.datetime.now() + datetime.timedelta(hours=2)
+
+
+async def _wizard_send_step1(bot, telegram_id: int, today_iso: str) -> None:
+    d = datetime.date.fromisoformat(today_iso)
+    text = (
+        f"Guten Abend! 👋\n"
+        f"Für heute ({_WEEKDAY_DE[d.weekday()]} {_fmt_date_de(today_iso)}) fehlt noch ein Eintrag.\n\n"
+        f"Heute gearbeitet?"
+    )
+    wizard_state[telegram_id] = {
+        "state": None,
+        "date": today_iso,
+        "absence_type": None,
+        "expires": _wizard_expires(),
+    }
+    await bot.send_message(chat_id=telegram_id, text=text, reply_markup=_wizard_kb_yesno())
+
+
+async def check_missing_entries(app) -> None:
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+
+    for old in list(already_asked.keys()):
+        if old != today_iso:
+            del already_asked[old]
+    asked_today = already_asked.setdefault(today_iso, set())
+
+    for u in _get_wizard_users():
+        tid = int(u["telegram_id"])
+        uid = int(u["user_id"])
+
+        if tid in asked_today or tid in wizard_state:
+            continue
+
+        tracking_start = _get_tracking_start(uid)
+        if tracking_start and tracking_start > today_iso:
+            continue
+
+        schedule = _get_user_schedule_for_day(uid, today_iso)
+        if not _is_workday_for_user(today_iso, schedule):
+            continue
+        if _is_holiday(today_iso):
+            continue
+        if _has_entry_today(uid, today_iso):
+            continue
+        if _is_absence_on_day(uid, today_iso):
+            continue
+        if _is_day_locked(uid, today_iso):
+            continue
+
+        try:
+            await _wizard_send_step1(app.bot, tid, today_iso)
+            asked_today.add(tid)
+        except Exception as e:
+            logger.error("Wizard send failed for %d: %s", tid, e)
+
+
+async def _on_startup(application: Application) -> None:
+    scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
+    scheduler.add_job(check_missing_entries, "cron", hour=20, minute=0, args=[application])
+    scheduler.start()
+    application.bot_data["scheduler"] = scheduler
+    logger.info("Abend-Wizard Scheduler gestartet (täglich 20:00 Europe/Berlin)")
+
+
+async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    tid = query.from_user.id
+    data = query.data
+
+    if not data.startswith("wizard_"):
+        return
+
+    own_uid = _get_user_id(tid)
+    if own_uid is None:
+        await query.edit_message_text("Kein Benutzer verknüpft.")
+        return
+
+    ws = wizard_state.get(tid, {})
+    today_iso = ws.get("date", datetime.date.today().isoformat())
+    d = datetime.date.fromisoformat(today_iso)
+    datum_de = _fmt_date_de(today_iso)
+
+    expires = ws.get("expires")
+    if expires and datetime.datetime.now() > expires:
+        wizard_state.pop(tid, None)
+        await query.edit_message_text("⏰ Zeit abgelaufen. Einfach direkt eintippen.")
+        return
+
+    if data == "wizard_yes":
+        wizard_state[tid] = {**ws, "state": WAITING_HOURS, "expires": _wizard_expires()}
+        await query.edit_message_text(
+            "Super! Von wann bis wann hast du heute gearbeitet?\n\n"
+            "Einfach schreiben, z.B.:\n"
+            "• 7:30 bis 16:00\n"
+            "• 8 bis 13:30\n"
+            "• 7 bis 12 Pause 30"
+        )
+
+    elif data == "wizard_no":
+        wizard_state[tid] = {**ws, "state": None, "expires": _wizard_expires()}
+        await query.edit_message_text(
+            "Kein Problem! Was war der Grund?",
+            reply_markup=_wizard_kb_absence(),
+        )
+
+    elif data == "wizard_abs_trip":
+        wizard_state[tid] = {**ws, "state": WAITING_TRIP_DESTINATION, "expires": _wizard_expires()}
+        await query.edit_message_text("Wohin war die Dienstreise?")
+
+    elif data.startswith("wizard_abs_"):
+        typ_key = data[len("wizard_abs_"):]
+        labels = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag", "verdi": "Verdi"}
+        label = labels.get(typ_key, typ_key.capitalize())
+        wizard_state[tid] = {
+            **ws, "state": WAITING_ABSENCE_CONFIRM,
+            "absence_type": typ_key, "expires": _wizard_expires(),
+        }
+        await query.edit_message_text(
+            f"{label} für heute ({datum_de}) eintragen?",
+            reply_markup=_wizard_kb_confirm(typ_key),
+        )
+
+    elif data.startswith("wizard_confirm_"):
+        typ_key = data[len("wizard_confirm_"):]
+        type_map = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag", "verdi": "Verdi"}
+        absence_type = type_map.get(typ_key, typ_key.capitalize())
+        wizard_state.pop(tid, None)
+        result = _do_insert_absence(own_uid, absence_type, today_iso, today_iso)
+        await query.edit_message_text(result)
+
+    elif data == "wizard_cancel":
+        wizard_state.pop(tid, None)
+        await query.edit_message_text("Abgebrochen. Du kannst es jederzeit manuell eintragen.")
+
+    elif data == "wizard_back":
+        wizard_state[tid] = {**ws, "state": None, "absence_type": None, "expires": _wizard_expires()}
+        await query.edit_message_text(
+            "Kein Problem! Was war der Grund?",
+            reply_markup=_wizard_kb_absence(),
+        )
+
+
 # ── Free-text handler ─────────────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1569,6 +1822,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             uid = ctx_uid
 
     text = (update.message.text or "").strip()
+    text_lower = text.lower()
+
+    # Handle "erinnerung" toggle
+    if text_lower in ("erinnerung aus", "erinnerung an"):
+        enabled = text_lower == "erinnerung an"
+        _set_wizard_enabled(tid, enabled)
+        status = "aktiviert ✅" if enabled else "deaktiviert 🔕"
+        await update.message.reply_text(f"Abend-Erinnerung {status}.")
+        return
+
+    # Handle wizard states
+    ws = wizard_state.get(tid)
+    if ws:
+        expires = ws.get("expires")
+        if expires and datetime.datetime.now() > expires:
+            wizard_state.pop(tid, None)
+        elif ws.get("state") == WAITING_HOURS:
+            today_iso = ws["date"]
+            wizard_state.pop(tid, None)
+            nlp_text = text if any(w in text_lower for w in ("bis", "uhr", ":")) else f"Heute von {text}"
+            actions = _parse_nlp(nlp_text)
+            if actions:
+                for action in actions:
+                    if action.get("action") == "time":
+                        action["date"] = today_iso
+                await _execute_actions(actions, uid, update, context)
+            else:
+                await update.message.reply_text(
+                    "❓ Das habe ich nicht verstanden.\n"
+                    "Beispiele:\n• 7:30 bis 16:00\n• 8 bis 13:30\n• 7 bis 12 Pause 30"
+                )
+            return
+        elif ws.get("state") == WAITING_TRIP_DESTINATION:
+            today_iso = ws["date"]
+            wizard_state.pop(tid, None)
+            result = _do_insert_business_trip(uid, today_iso, text.strip())
+            await update.message.reply_text(result)
+            return
 
     # Handle pending ja/nein confirmation
     pending = context.user_data.get("pending_confirm")
@@ -1613,7 +1904,7 @@ async def _process_nlp(
 def main() -> None:
     init_db()
 
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(_on_startup).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("saldo", cmd_saldo))
     app.add_handler(CommandHandler("urlaub", cmd_urlaub))
@@ -1628,9 +1919,10 @@ def main() -> None:
     app.add_handler(CommandHandler("alssaldo", cmd_alssaldo))
     app.add_handler(CommandHandler("alsurlaub", cmd_alsurlaub))
     app.add_handler(CommandHandler("alsabw", cmd_alsabw))
+    app.add_handler(CallbackQueryHandler(handle_wizard_callback, pattern="^wizard_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot startet (Polling) – v1.1.9…")
+    logger.info("Bot startet (Polling) – v1.2.1…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
