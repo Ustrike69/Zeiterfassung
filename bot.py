@@ -707,13 +707,12 @@ def _calc_auto_break(user_id: int, time_in_str: str, time_out_str: str) -> int:
     except Exception:
         return 0
     if not enabled:
+        logger.debug("auto_break: user_id=%s auto_breaks disabled", user_id)
         return 0
     span = _minutes_from_hhmm(time_out_str) - _minutes_from_hhmm(time_in_str)
-    if span > 9 * 60 + 30:
-        return 45
-    if span > 6 * 60:
-        return 30
-    return 0
+    brk = 45 if span > 9 * 60 + 30 else (30 if span > 6 * 60 else 0)
+    logger.info("auto_break: user_id=%s span=%dmin → %dmin Pause", user_id, span, brk)
+    return brk
 
 
 def _do_insert_time_block(
