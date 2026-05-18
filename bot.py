@@ -1881,8 +1881,9 @@ async def _handle_erinnerung(telegram_id: int, text: str, update: Update) -> Non
             _set_reminder_settings(telegram_id, True, t)
             await update.message.reply_text(f"Erinnerung aktiviert um {t} Uhr.")
         else:
-            _set_reminder_settings(telegram_id, True, "20:00")
-            await update.message.reply_text("Erinnerung aktiviert um 20:00 Uhr.")
+            keep_time = settings["time"]
+            _set_reminder_settings(telegram_id, True, keep_time)
+            await update.message.reply_text(f"Erinnerung aktiviert um {keep_time} Uhr.")
         return
 
     t = _parse_reminder_time(parts[1])
