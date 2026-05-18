@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.2.6"
+APP_VERSION = "v1.2.7"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -5756,7 +5756,7 @@ def settings_view():
             (u["id"],),
         ).fetchone()
         profile_tg = str(_tg_row["telegram_id"]) if _tg_row else ""
-        wiz_enabled = bool(int(_tg_row["wizard_enabled"] or 1)) if _tg_row else False
+        wiz_enabled = bool(int(_tg_row["wizard_enabled"] or 0)) if _tg_row else False
         wiz_time = (_tg_row["reminder_time"] or "20:00") if _tg_row else "20:00"
     finally:
         _tg_db.close()
@@ -6108,7 +6108,7 @@ def settings_telegram_save():
 def settings_reminder_save():
     bootstrap()
     u = current_user()
-    wizard_enabled = 1 if request.form.get("wizard_enabled") == "1" else 0
+    wizard_enabled = 1 if request.form.get("wizard_enabled") else 0
     reminder_time = (request.form.get("reminder_time") or "20:00").strip()
 
     m = re.match(r"^(\d{2}):(\d{2})$", reminder_time)

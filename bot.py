@@ -118,7 +118,7 @@ def _get_reminder_settings(telegram_id: int) -> dict:
         ).fetchone()
         if r:
             return {
-                "enabled": bool(int(r["wizard_enabled"] or 1)),
+                "enabled": bool(int(r["wizard_enabled"] or 0)),
                 "time": r["reminder_time"] or "20:00",
             }
         return {"enabled": True, "time": "20:00"}
@@ -134,6 +134,7 @@ def _set_reminder_settings(telegram_id: int, enabled: bool, reminder_time: str) 
             (1 if enabled else 0, reminder_time, telegram_id),
         )
         db.commit()
+        logger.info("reminder_settings updated: telegram_id=%s enabled=%s time=%s", telegram_id, enabled, reminder_time)
     finally:
         db.close()
 
