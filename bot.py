@@ -689,7 +689,36 @@ def _is_day_locked(user_id: int, iso_day: str) -> bool:
         db.close()
 
 
-def _do_insert_time_block(user_id: int, day: str, time_in: str, time_out: str, break_minutes: int) -> str:
+def _calc_auto_break(user_id: int, time_in_str: str, time_out_str: str) -> int:
+    """Return auto-break minutes based on user preference and span (mirrors app.py logic).
+
+    Rules (only when auto_breaks pref enabled):
+    - span > 9h30 → 45 min
+    - span > 6h   → 30 min
+    - otherwise   → 0
+    """
+    try:
+        db = connect()
+        try:
+            r = db.execute("SELECT auto_breaks FROM user_prefs WHERE user_id=?", (user_id,)).fetchone()
+            enabled = bool(int(r["auto_breaks"])) if r else False
+        finally:
+            db.close()
+    except Exception:
+        return 0
+    if not enabled:
+        return 0
+    span = _minutes_from_hhmm(time_out_str) - _minutes_from_hhmm(time_in_str)
+    if span > 9 * 60 + 30:
+        return 45
+    if span > 6 * 60:
+        return 30
+    return 0
+
+
+def _do_insert_time_block(
+    user_id: int, day: str, time_in: str, time_out: str, break_minutes: int, break_auto: bool = False
+) -> str:
     try:
         db = connect()
         try:
@@ -704,7 +733,11 @@ def _do_insert_time_block(user_id: int, day: str, time_in: str, time_out: str, b
         d = datetime.date.fromisoformat(day)
         wd = _WEEKDAY_DE[d.weekday()]
         mins = _minutes_from_hhmm(time_out) - _minutes_from_hhmm(time_in) - break_minutes
-        return f"✅ Eingetragen: {wd} {_fmt_date_de(day)}\n⏰ {time_in} – {time_out} ({_fmt_minutes(mins)} Std)"
+        pause_line = ""
+        if break_minutes:
+            label = "(automatisch)" if break_auto else "(manuell)"
+            pause_line = f"\n☕ Pause: {break_minutes} Min {label}"
+        return f"✅ Eingetragen: {wd} {_fmt_date_de(day)}\n⏰ {time_in} – {time_out} ({_fmt_minutes(mins)} Std){pause_line}"
     except Exception as e:
         return f"❌ Konnte nicht eingetragen werden: {e}"
 
@@ -865,6 +898,13 @@ async def _execute_actions(
             time_in = action.get("time_in", "")
             time_out = action.get("time_out", "")
             break_minutes = int(action.get("break_minutes") or 0)
+            explicit_break = break_minutes > 0
+            break_auto = False
+            if not explicit_break:
+                auto_brk = _calc_auto_break(uid, time_in, time_out)
+                if auto_brk:
+                    break_minutes = auto_brk
+                    break_auto = True
 
             if not day or not time_in or not time_out:
                 await update.message.reply_text(f"❌ Konnte nicht eingetragen werden: Unvollständige Zeitangaben.")
@@ -894,6 +934,7 @@ async def _execute_actions(
                     "time_in": time_in,
                     "time_out": time_out,
                     "break_minutes": break_minutes,
+                    "break_auto": break_auto,
                 }
                 d = datetime.date.fromisoformat(day)
                 wd = _WEEKDAY_DE[d.weekday()]
@@ -902,7 +943,7 @@ async def _execute_actions(
                     f"Trotzdem eintragen? (ja/nein)"
                 )
             else:
-                result = _do_insert_time_block(uid, day, time_in, time_out, break_minutes)
+                result = _do_insert_time_block(uid, day, time_in, time_out, break_minutes, break_auto)
                 await update.message.reply_text(result)
 
         elif act == "absence":
@@ -2016,6 +2057,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     pending["time_in"],
                     pending["time_out"],
                     pending["break_minutes"],
+                    pending.get("break_auto", False),
                 )
             else:
                 result = "❌ Unbekannte ausstehende Aktion."
