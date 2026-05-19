@@ -1815,12 +1815,53 @@ async def check_reminders(app) -> None:
         await trigger_wizard(app.bot, int(row["telegram_id"]), int(row["user_id"]), today_iso)
 
 
+_auto_backup_done_today: "str | None" = None
+
+
+async def check_auto_backup() -> None:
+    global _auto_backup_done_today
+    today = datetime.date.today().isoformat()
+    if _auto_backup_done_today == today:
+        return
+    db = connect()
+    try:
+        rows = db.execute("SELECT key, value FROM backup_config").fetchall()
+    except Exception:
+        return
+    finally:
+        db.close()
+    cfg = {r["key"]: r["value"] for r in rows}
+    if cfg.get("auto_backup_enabled", "0") != "1":
+        return
+    backup_time = cfg.get("auto_backup_time", "02:00")
+    if datetime.datetime.now().strftime("%H:%M") != backup_time:
+        return
+    _auto_backup_done_today = today
+    try:
+        sys.path.insert(0, "/opt/zeiterfassung")
+        from backup import create_backup_gz, prune_backups, BACKUPS_DIR
+        dest = str(BACKUPS_DIR / f"zeiterfassung_{today}_{backup_time.replace(':','-')}.db.gz")
+        create_backup_gz(dest_path=dest)
+        prune_backups(keep=7)
+        db2 = connect()
+        try:
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            db2.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('last_backup_time',?,datetime('now'))", (now_str,))
+            db2.commit()
+        finally:
+            db2.close()
+        logger.info(f"Auto-Backup erstellt: {dest}")
+    except Exception as e:
+        logger.error(f"Auto-Backup Fehler: {e}")
+
+
 async def _on_startup(application: Application) -> None:
     scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
     scheduler.add_job(check_reminders, "cron", minute="*", args=[application])
+    scheduler.add_job(check_auto_backup, "cron", minute="*")
     scheduler.start()
     application.bot_data["scheduler"] = scheduler
-    logger.info("Abend-Wizard Scheduler gestartet (minütliche Prüfung, individuelle Uhrzeiten)")
+    logger.info("Abend-Wizard + Auto-Backup Scheduler gestartet (minütliche Prüfung)")
 
 
 async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

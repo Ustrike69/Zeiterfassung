@@ -306,6 +306,21 @@ def init_db():
             (_key,),
         )
 
+    db.execute("""CREATE TABLE IF NOT EXISTS backup_config(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    for _key, _default in (
+        ("auto_backup_enabled", "0"),
+        ("auto_backup_time", "02:00"),
+        ("last_backup_time", ""),
+    ):
+        db.execute(
+            "INSERT OR IGNORE INTO backup_config(key, value) VALUES(?, ?)",
+            (_key, _default),
+        )
+
     # --- Telegram Bot user mapping ---
     db.execute("""CREATE TABLE IF NOT EXISTS telegram_users(
         id INTEGER PRIMARY KEY AUTOINCREMENT,

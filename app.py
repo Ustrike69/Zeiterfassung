@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, session, render_template_string, abort, jsonify
+from flask import Flask, request, redirect, url_for, session, render_template_string, abort, jsonify, send_file
 import datetime
 import calendar
 import sqlite3
@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.3"
+APP_VERSION = "v1.3.4"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -6396,6 +6396,47 @@ def _save_mail_config(server: str, port: str, username: str, password: str, from
 _MAIL_PW_PLACEHOLDER = "••••••••"
 
 
+# ── Backup helpers ─────────────────────────────────────────────────────────────
+
+def _get_backup_config() -> dict:
+    db = connect()
+    try:
+        rows = db.execute("SELECT key, value FROM backup_config").fetchall()
+    except Exception:
+        rows = []
+    finally:
+        db.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def _save_backup_config(enabled: bool, backup_time: str) -> None:
+    db = connect()
+    try:
+        db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_backup_enabled',?,datetime('now'))", ("1" if enabled else "0",))
+        db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_backup_time',?,datetime('now'))", (backup_time,))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _record_last_backup() -> None:
+    db = connect()
+    try:
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('last_backup_time',?,datetime('now'))", (now,))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _fmt_backup_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n/1024:.1f} KB"
+    return f"{n/1024/1024:.1f} MB"
+
+
 def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, attachment_bytes: bytes) -> None:
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -9068,8 +9109,203 @@ window.addEventListener('DOMContentLoaded',function(){{
         </div>
       </div>
     </div>
+
+    <!-- Section 6: Backup & Restore -->
+    {_render_backup_section()}
     """
     return render_template_string(layout("Admin", body, u, APP_VERSION))
+
+
+def _render_backup_section() -> str:
+    from backup import list_local_backups
+    cfg = _get_backup_config()
+    last_ts = cfg.get("last_backup_time") or ""
+    auto_on = cfg.get("auto_backup_enabled", "0") == "1"
+    auto_time = cfg.get("auto_backup_time") or "02:00"
+
+    # Local backups list
+    backups = list_local_backups()
+    backup_rows = ""
+    for b in backups:
+        safe = b["name"].replace("'", "\\'")
+        mtime_str = b["mtime"].strftime("%d.%m.%Y %H:%M")
+        size_str = _fmt_backup_size(b["size"])
+        backup_rows += (
+            f"<tr>"
+            f"<td style='font-size:12px;'>{mtime_str}</td>"
+            f"<td style='font-size:12px;'>{size_str}</td>"
+            f"<td style='font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mu);'>{b['name']}</td>"
+            f"<td style='white-space:nowrap;'>"
+            f"<a class='btn btn-sm' href='/admin/backup/local/{b['name']}'>&#11123;</a>"
+            f"<form method='post' action='/admin/backup/delete/{b['name']}' style='display:inline;margin-left:4px;'"
+            f" onsubmit=\"return confirm('Backup {safe} löschen?')\">"
+            f"<button class='btn danger btn-sm' type='submit'>✕</button></form>"
+            f"</td>"
+            f"</tr>"
+        )
+    if not backup_rows:
+        backup_rows = "<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>Keine lokalen Backups vorhanden.</td></tr>"
+
+    auto_checked = "checked" if auto_on else ""
+
+    return f"""
+    <div class="acc" id="acc-backup">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-backup-body')">
+        <span>💾 Backup &amp; Restore</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-backup-body">
+        <div class="acc-inner">
+
+          <!-- Backup erstellen -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Backup erstellen</div>
+          <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px;">
+            <a class="btn primary btn-sm" href="/admin/backup/download">&#11015; Jetzt sichern &amp; herunterladen</a>
+            <div class="small" style="color:var(--mu);padding-top:5px;">
+              {"Letztes Backup: <b>" + last_ts + "</b>" if last_ts else "Noch kein Backup erstellt."}
+            </div>
+          </div>
+          <form method="post" action="/admin/backup/auto-config" style="margin-bottom:20px;">
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" name="auto_enabled" value="1" {auto_checked}> Automatisches Backup aktivieren
+              </label>
+              <div>
+                <label style="font-size:12px;">Uhrzeit</label>
+                <input type="time" name="auto_time" value="{auto_time}" style="font-size:13px;padding:4px 8px;width:110px;">
+              </div>
+              <button class="btn btn-sm" type="submit">Speichern</button>
+            </div>
+            <p class="small" style="margin-top:6px;color:var(--mu);">Backups werden lokal unter /opt/zeiterfassung/backups/ gespeichert. Maximal 7 Backups werden behalten.</p>
+          </form>
+
+          <hr style="margin:12px 0;">
+
+          <!-- Restore -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Backup wiederherstellen</div>
+          <form method="post" action="/admin/backup/restore" enctype="multipart/form-data"
+                onsubmit="return confirm('Datenbank wirklich wiederherstellen?\\n\\nAlle Daten werden durch den Stand der Backup-Datei ersetzt.\\nDer aktuelle Stand wird vorher automatisch gesichert.');">
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
+              <div>
+                <label style="font-size:12px;">Backup-Datei (.db oder .db.gz)</label>
+                <input type="file" name="backup_file" accept=".db,.db.gz,.gz" required style="font-size:13px;">
+              </div>
+              <button class="btn danger btn-sm" type="submit">&#11014; Wiederherstellen</button>
+            </div>
+          </form>
+          <p class="small" style="color:var(--mu);">Der aktuelle Stand wird vor dem Restore automatisch gesichert. Nach dem Restore wird der Service neu gestartet.</p>
+
+          <hr style="margin:12px 0;">
+
+          <!-- Lokale Backups -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Lokale Backups ({len(backups)})</div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Datum</th><th>Größe</th><th>Dateiname</th><th></th></tr></thead>
+              <tbody>{backup_rows}</tbody>
+            </table>
+          </div>
+
+        </div>
+      </div>
+    </div>"""
+
+
+@app.get("/admin/backup/download")
+@admin_required
+def admin_backup_download():
+    bootstrap()
+    from backup import create_backup_gz
+    import io as _io
+    buf, fname = create_backup_gz()
+    _record_last_backup()
+    return send_file(
+        buf,
+        mimetype="application/gzip",
+        as_attachment=True,
+        download_name=fname,
+    )
+
+
+@app.post("/admin/backup/restore")
+@admin_required
+def admin_backup_restore():
+    bootstrap()
+    from backup import restore_from_bytes
+    import threading
+
+    f = request.files.get("backup_file")
+    if not f or not f.filename:
+        add_flash("Keine Datei ausgewählt.", "error")
+        return redirect("/admin#acc-backup")
+
+    fname = f.filename.lower()
+    if not (fname.endswith(".db") or fname.endswith(".db.gz") or fname.endswith(".gz")):
+        add_flash("Nur .db oder .db.gz Dateien erlaubt.", "error")
+        return redirect("/admin#acc-backup")
+
+    is_gz = fname.endswith(".gz")
+    data = f.read()
+
+    try:
+        pre_path = restore_from_bytes(data, is_gz)
+    except Exception as e:
+        add_flash(f"Restore fehlgeschlagen: {e}", "error")
+        return redirect("/admin#acc-backup")
+
+    add_flash("Datenbank wiederhergestellt. Service wird neu gestartet …", "success")
+
+    def _restart():
+        import time, os
+        time.sleep(1.5)
+        os.system("systemctl restart zeiterfassung")
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return redirect("/admin#acc-backup")
+
+
+@app.post("/admin/backup/auto-config")
+@admin_required
+def admin_backup_auto_config():
+    bootstrap()
+    enabled = bool(request.form.get("auto_enabled"))
+    t = (request.form.get("auto_time") or "02:00").strip()
+    import re as _re
+    if not _re.match(r"^\d{2}:\d{2}$", t):
+        t = "02:00"
+    _save_backup_config(enabled, t)
+    add_flash("Backup-Einstellungen gespeichert.", "success")
+    return redirect("/admin#acc-backup")
+
+
+@app.get("/admin/backup/local/<filename>")
+@admin_required
+def admin_backup_download_local(filename: str):
+    bootstrap()
+    from backup import BACKUPS_DIR
+    import re as _re
+    if not _re.match(r'^[\w\-\.]+\.db\.gz$', filename):
+        abort(400)
+    path = BACKUPS_DIR / filename
+    if not path.exists():
+        abort(404)
+    return send_file(str(path), mimetype="application/gzip", as_attachment=True, download_name=filename)
+
+
+@app.post("/admin/backup/delete/<filename>")
+@admin_required
+def admin_backup_delete(filename: str):
+    bootstrap()
+    from backup import BACKUPS_DIR
+    import re as _re
+    if not _re.match(r'^[\w\-\.]+\.db\.gz$', filename):
+        abort(400)
+    path = BACKUPS_DIR / filename
+    if path.exists():
+        path.unlink()
+        add_flash(f"Backup {filename} gelöscht.", "success")
+    else:
+        add_flash("Datei nicht gefunden.", "error")
+    return redirect("/admin#acc-backup")
 
 
 @app.get("/admin/mail-settings")
