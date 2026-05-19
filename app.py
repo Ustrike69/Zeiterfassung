@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.4.2"
+APP_VERSION = "v1.4.3"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -6735,6 +6735,30 @@ def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, atta
         s.sendmail(username, [to], msg.as_string())
 
 
+def _send_mail_simple(to: str, subject: str, body_text: str) -> None:
+    import smtplib
+    from email.mime.text import MIMEText as _MIMEText
+    cfg = _get_mail_config()
+    server    = cfg.get("mail_server", "")
+    port      = int(cfg.get("mail_port") or "587")
+    username  = cfg.get("mail_username", "")
+    password  = cfg.get("mail_password", "")
+    from_addr = cfg.get("mail_from") or username
+    if not server or not username:
+        raise RuntimeError("SMTP nicht konfiguriert.")
+    if not password:
+        raise RuntimeError("SMTP-Passwort nicht konfiguriert.")
+    msg = _MIMEText(body_text, "plain", "utf-8")
+    msg["From"]    = from_addr
+    msg["To"]      = to
+    msg["Subject"] = subject
+    with smtplib.SMTP(server, port, timeout=10) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(username, password)
+        s.sendmail(from_addr, [to], msg.as_string())
+
+
 def _build_rich_day_export(user_id: int, date_from: str, date_to: str):
     """Build day-by-day export matching balance view: Wochentag|Datum|Beginn|Ende|Pause|Soll|Delta|Bemerkung."""
     _WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -9211,10 +9235,13 @@ function toggleNewUser(){{
 }}
 window.addEventListener('DOMContentLoaded',function(){{
   var h=window.location.hash;
-  if(h){{
-    var el=document.querySelector(h+' .acc-body');
-    var hd=document.querySelector(h+' .acc-hdr');
-    var ar=document.querySelector(h+' .acc-arr');
+  var ss=sessionStorage.getItem('openAcc');
+  if(ss)sessionStorage.removeItem('openAcc');
+  var toOpen=h||(ss?'#'+ss:null);
+  if(toOpen){{
+    var el=document.querySelector(toOpen+' .acc-body');
+    var hd=document.querySelector(toOpen+' .acc-hdr');
+    var ar=document.querySelector(toOpen+' .acc-arr');
     if(el){{el.classList.add('open');if(hd)hd.classList.add('open');if(ar)ar.textContent='▲';}}
   }}
 }});
@@ -9373,7 +9400,10 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 6: Urlaubsübersicht -->
     {_render_admin_absences_section()}
 
-    <!-- Section 7: Erscheinungsbild -->
+    <!-- Section 7: Gleitzeitkonto Übersicht -->
+    {_render_admin_overtime_section()}
+
+    <!-- Section 8: Erscheinungsbild -->
     {_render_appearance_section()}
 
     <!-- Section 7: Backup & Restore -->
@@ -10324,7 +10354,7 @@ def _render_admin_absences_section() -> str:
         <div class="acc-inner">
 
           <!-- Urlaubsstatus alle User -->
-          <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px;flex-wrap:wrap;">
+          <form method="get" action="/admin" onsubmit="sessionStorage.setItem('openAcc','acc-absoverview')" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px;flex-wrap:wrap;">
             <input type="hidden" name="abs_uid" value="{_html.escape(sel_uid_str)}">
             <input type="hidden" name="abs_from" value="{_html.escape(abs_from)}">
             <input type="hidden" name="abs_to" value="{_html.escape(abs_to)}">
@@ -10352,7 +10382,7 @@ def _render_admin_absences_section() -> str:
 
           <!-- Abwesenheiten je User -->
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Abwesenheiten je Benutzer</div>
-          <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
+          <form method="get" action="/admin" onsubmit="sessionStorage.setItem('openAcc','acc-absoverview')" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
             <input type="hidden" name="abs_year" value="{abs_year}">
             <div><label style="font-size:12px;">Benutzer</label><br>
               <select name="abs_uid" style="font-size:13px;padding:4px 8px;">{user_opts}</select>
@@ -10399,6 +10429,353 @@ def _render_admin_absences_section() -> str:
         </div>
       </div>
     </div>"""
+
+
+def _render_admin_overtime_section() -> str:
+    today_iso = datetime.date.today().isoformat()
+
+    cfg = _get_app_config()
+    def_plus_h  = cfg.get("overtime_default_limit_plus") or ""
+    def_minus_h = cfg.get("overtime_default_limit_minus") or ""
+
+    db = connect()
+    active_users = db.execute(
+        "SELECT id, username, display_name, email, supervisor_email, "
+        "overtime_limit_plus, overtime_limit_minus, "
+        "overtime_notify_enabled, overtime_notify_interval, overtime_last_notified "
+        "FROM users WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    db.close()
+
+    def _mins_to_h(m) -> str:
+        if m is None:
+            return ""
+        m = int(m)
+        sign = "-" if m < 0 else ""
+        m = abs(m)
+        return f"{sign}{m // 60}" if m % 60 == 0 else f"{sign}{m / 60:.2f}".rstrip("0").rstrip(".")
+
+    def _h_to_mins(s: str):
+        s = s.strip()
+        if not s:
+            return None
+        try:
+            return int(float(s) * 60)
+        except ValueError:
+            return None
+
+    # Balances
+    balances: dict[int, int] = {}
+    for u_row in active_users:
+        balances[u_row["id"]] = _calc_balance_end_at(u_row["id"], today_iso)
+
+    # --- Table rows ---
+    def_plus_mins  = _h_to_mins(def_plus_h)
+    def_minus_mins = _h_to_mins(def_minus_h)
+
+    saldo_rows = ""
+    for u_row in active_users:
+        uid  = u_row["id"]
+        name = _html.escape(u_row["display_name"] or u_row["username"])
+        saldo = balances[uid]
+        saldo_str = _fmt_minutes_signed(saldo)
+
+        lp = u_row["overtime_limit_plus"]
+        lm = u_row["overtime_limit_minus"]
+        eff_lp = lp if lp is not None else def_plus_mins
+        eff_lm = lm if lm is not None else def_minus_mins
+
+        if eff_lp is not None and saldo > eff_lp:
+            status = "<span style='color:var(--danger);font-weight:600;'>⛔ Plus-Limit</span>"
+            row_bg = "background:rgba(220,38,38,.04);"
+        elif eff_lm is not None and saldo < -(eff_lm):
+            status = "<span style='color:var(--danger);font-weight:600;'>⛔ Minus-Limit</span>"
+            row_bg = "background:rgba(220,38,38,.04);"
+        elif eff_lp is not None and saldo > eff_lp * 0.9:
+            status = "<span style='color:#d97706;'>⚠️ Nahe Plus-Limit</span>"
+            row_bg = "background:rgba(251,191,36,.05);"
+        elif eff_lm is not None and saldo < -(eff_lm) * 0.9:
+            status = "<span style='color:#d97706;'>⚠️ Nahe Minus-Limit</span>"
+            row_bg = "background:rgba(251,191,36,.05);"
+        else:
+            status = "<span style='color:var(--ok);'>✓ OK</span>"
+            row_bg = ""
+
+        lp_str = _mins_to_h(eff_lp) + (" h" if eff_lp is not None else "")
+        lm_str = _mins_to_h(eff_lm) + (" h" if eff_lm is not None else "")
+        saldo_color = "var(--ok)" if saldo >= 0 else "var(--danger)"
+
+        saldo_rows += (
+            f"<tr style='{row_bg}'>"
+            f"<td style='font-size:12px;'>{name}</td>"
+            f"<td style='text-align:center;font-weight:600;color:{saldo_color};font-size:12px;'>{saldo_str}</td>"
+            f"<td style='text-align:center;font-size:12px;color:var(--mu);'>{'+' + lp_str if eff_lp is not None else '–'}</td>"
+            f"<td style='text-align:center;font-size:12px;color:var(--mu);'>{'-' + lm_str if eff_lm is not None else '–'}</td>"
+            f"<td style='font-size:12px;'>{status}</td>"
+            f"</tr>"
+        )
+
+    # --- Limits + Notify form rows ---
+    form_rows = ""
+    for u_row in active_users:
+        uid  = u_row["id"]
+        name = _html.escape(u_row["display_name"] or u_row["username"])
+        lp   = _mins_to_h(u_row["overtime_limit_plus"])
+        lm   = _mins_to_h(u_row["overtime_limit_minus"])
+        sup  = _html.escape(u_row["supervisor_email"] or "")
+        en   = "checked" if int(u_row["overtime_notify_enabled"] or 0) else ""
+        iv   = u_row["overtime_notify_interval"] or "once"
+
+        def _iv_sel(val):
+            opts = [("once","Einmalig"),("daily","Täglich"),("weekly","Wöchentlich")]
+            return "".join(
+                f'<option value="{v}" {"selected" if v==val else ""}>{l}</option>'
+                for v, l in opts
+            )
+
+        form_rows += f"""
+        <tr>
+          <td style="font-size:12px;">{name}</td>
+          <td><input type="number" name="lp_{uid}" value="{lp}" placeholder="–" step="0.5"
+            style="width:70px;font-size:12px;padding:3px 6px;" title="Stunden, leer = kein Limit"></td>
+          <td><input type="number" name="lm_{uid}" value="{lm}" placeholder="–" step="0.5"
+            style="width:70px;font-size:12px;padding:3px 6px;" title="Stunden, leer = kein Limit"></td>
+          <td style="text-align:center;"><input type="checkbox" name="en_{uid}" value="1" {en}></td>
+          <td><select name="iv_{uid}" style="font-size:12px;padding:3px 5px;">{_iv_sel(iv)}</select></td>
+          <td><input type="email" name="sup_{uid}" value="{sup}" placeholder="Vorgesetzter E-Mail"
+            style="font-size:12px;padding:3px 6px;width:200px;"></td>
+        </tr>"""
+
+    return f"""
+    <div class="acc" id="acc-overtime">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-body')">
+        <span>⏱ Gleitzeitkonto Übersicht</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-overtime-body">
+        <div class="acc-inner">
+
+          <!-- Salden alle User -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Aktuelle Salden – Stand heute</div>
+          <div class="table-scroll" style="margin-bottom:16px;">
+            <table>
+              <thead><tr>
+                <th>Name</th>
+                <th style="text-align:center;">Saldo</th>
+                <th style="text-align:center;">Limit+</th>
+                <th style="text-align:center;">Limit−</th>
+                <th>Status</th>
+              </tr></thead>
+              <tbody>{saldo_rows or "<tr><td colspan='5' style='color:var(--mu);'>Keine Benutzer.</td></tr>"}</tbody>
+            </table>
+          </div>
+
+          <hr style="margin:14px 0;">
+
+          <!-- Limits + Benachrichtigungen konfigurieren -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">Limits &amp; Benachrichtigungen</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">Limits in Stunden (z.B. 40 = 40h). Leer = kein Limit. Individuell überschreibt den globalen Default.</p>
+
+          <form method="post" action="/admin/overtime/save" onsubmit="sessionStorage.setItem('openAcc','acc-overtime')">
+            <div style="margin-bottom:10px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+              <div>
+                <label style="font-size:12px;">Globaler Default Plus-Limit (h)</label>
+                <input type="number" name="def_plus" value="{_html.escape(def_plus_h)}" placeholder="–" step="0.5"
+                  style="width:80px;font-size:13px;padding:4px 8px;">
+              </div>
+              <div>
+                <label style="font-size:12px;">Globaler Default Minus-Limit (h)</label>
+                <input type="number" name="def_minus" value="{_html.escape(def_minus_h)}" placeholder="–" step="0.5"
+                  style="width:80px;font-size:13px;padding:4px 8px;">
+              </div>
+            </div>
+
+            <div class="table-scroll" style="margin-bottom:12px;">
+              <table>
+                <thead><tr>
+                  <th>Name</th>
+                  <th style="text-align:center;">Plus-Limit (h)</th>
+                  <th style="text-align:center;">Minus-Limit (h)</th>
+                  <th style="text-align:center;">Benachrichtigen</th>
+                  <th>Intervall</th>
+                  <th>Vorgesetzter E-Mail</th>
+                </tr></thead>
+                <tbody>{form_rows}</tbody>
+              </table>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary btn-sm" type="submit">Speichern</button>
+              <button class="btn btn-sm" type="submit" formaction="/admin/overtime/check"
+                onclick="sessionStorage.setItem('openAcc','acc-overtime')">
+                Jetzt prüfen &amp; benachrichtigen
+              </button>
+            </div>
+          </form>
+
+        </div>
+      </div>
+    </div>"""
+
+
+@app.post("/admin/overtime/save")
+@admin_required
+def admin_overtime_save():
+    bootstrap()
+    db = connect()
+    try:
+        active_users = db.execute(
+            "SELECT id FROM users WHERE is_active=1"
+        ).fetchall()
+
+        def_plus_h  = (request.form.get("def_plus") or "").strip()
+        def_minus_h = (request.form.get("def_minus") or "").strip()
+
+        def _h_to_mins(s: str):
+            s = s.strip()
+            if not s:
+                return None
+            try:
+                return int(float(s) * 60)
+            except ValueError:
+                return None
+
+        for key, val in [
+            ("overtime_default_limit_plus",  str(_h_to_mins(def_plus_h)  or "") ),
+            ("overtime_default_limit_minus", str(_h_to_mins(def_minus_h) or "") ),
+        ]:
+            db.execute(
+                "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+                (key, val),
+            )
+
+        for u_row in active_users:
+            uid = u_row["id"]
+            lp  = _h_to_mins(request.form.get(f"lp_{uid}") or "")
+            lm  = _h_to_mins(request.form.get(f"lm_{uid}") or "")
+            en  = 1 if request.form.get(f"en_{uid}") == "1" else 0
+            iv  = request.form.get(f"iv_{uid}") or "once"
+            if iv not in ("once", "daily", "weekly"):
+                iv = "once"
+            sup = (request.form.get(f"sup_{uid}") or "").strip()
+            db.execute(
+                "UPDATE users SET overtime_limit_plus=?, overtime_limit_minus=?, "
+                "supervisor_email=?, overtime_notify_enabled=?, overtime_notify_interval=? "
+                "WHERE id=?",
+                (lp, lm, sup or None, en, iv, uid),
+            )
+
+        db.commit()
+    finally:
+        db.close()
+    add_flash("Gleitzeitkonto-Limits gespeichert.", "success")
+    return redirect("/admin#acc-overtime")
+
+
+@app.post("/admin/overtime/check")
+@admin_required
+def admin_overtime_check():
+    bootstrap()
+    sent, errors = _run_overtime_notifications()
+    if sent:
+        add_flash(f"Benachrichtigungen gesendet: {sent}.", "success")
+    if errors:
+        add_flash(f"Fehler bei {errors} Empfänger(n). Maileinstellungen prüfen.", "error")
+    if not sent and not errors:
+        add_flash("Keine Limit-Überschreitungen gefunden oder kein Benachrichtigungsintervall erreicht.", "success")
+    return redirect("/admin#acc-overtime")
+
+
+def _run_overtime_notifications() -> tuple[int, int]:
+    """Run overtime limit checks and send notifications. Returns (sent, errors)."""
+    today_iso = datetime.date.today().isoformat()
+    cfg = _get_app_config()
+
+    def _h_to_mins(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return int(float(s) * 60)
+        except ValueError:
+            return None
+
+    def_plus  = _h_to_mins(cfg.get("overtime_default_limit_plus"))
+    def_minus = _h_to_mins(cfg.get("overtime_default_limit_minus"))
+
+    db = connect()
+    users = db.execute(
+        "SELECT id, username, display_name, email, supervisor_email, "
+        "overtime_limit_plus, overtime_limit_minus, overtime_notify_enabled, "
+        "overtime_notify_interval, overtime_last_notified "
+        "FROM users WHERE is_active=1 AND overtime_notify_enabled=1"
+    ).fetchall()
+    db.close()
+
+    sent = 0
+    errors = 0
+    for u_row in users:
+        uid   = u_row["id"]
+        lp    = u_row["overtime_limit_plus"] if u_row["overtime_limit_plus"] is not None else def_plus
+        lm    = u_row["overtime_limit_minus"] if u_row["overtime_limit_minus"] is not None else def_minus
+        if lp is None and lm is None:
+            continue
+
+        saldo = _calc_balance_end_at(uid, today_iso)
+        over_plus  = lp is not None and saldo > lp
+        over_minus = lm is not None and saldo < -(lm)
+        if not over_plus and not over_minus:
+            continue
+
+        interval      = u_row["overtime_notify_interval"] or "once"
+        last_notified = u_row["overtime_last_notified"]
+        should = False
+        if interval == "once" and not last_notified:
+            should = True
+        elif interval == "daily":
+            should = not last_notified or last_notified < today_iso
+        elif interval == "weekly":
+            if not last_notified:
+                should = True
+            else:
+                diff = (datetime.date.today() - datetime.date.fromisoformat(last_notified)).days
+                should = diff >= 7
+        if not should:
+            continue
+
+        name = u_row["display_name"] or u_row["username"]
+        saldo_str = _fmt_minutes_signed(saldo)
+        if over_plus and lp:
+            limit_str = f"+{lp // 60:02d}:{lp % 60:02d}"
+            reason = "Plus-Limit (Überstunden)"
+        else:
+            limit_str = f"-{abs(lm) // 60:02d}:{abs(lm) % 60:02d}"
+            reason = "Minus-Limit (Minderstunden)"
+
+        body = (
+            f"Hallo {name},\n\n"
+            f"dein Gleitzeitkonto hat das eingestellte Limit überschritten.\n\n"
+            f"Aktueller Saldo: {saldo_str}\n"
+            f"Limit ({reason}): {limit_str}\n\n"
+            f"Bitte stimme das weitere Vorgehen mit deinem Vorgesetzten ab.\n"
+        )
+        subject = f"Gleitzeitkonto Hinweis – {name}"
+
+        recipients = [r for r in [u_row["email"] or "", u_row["supervisor_email"] or ""] if r]
+        for recipient in recipients:
+            try:
+                _send_mail_simple(recipient, subject, body)
+                sent += 1
+            except Exception:
+                errors += 1
+
+        db2 = connect()
+        db2.execute(
+            "UPDATE users SET overtime_last_notified=? WHERE id=?",
+            (today_iso, uid),
+        )
+        db2.commit()
+        db2.close()
+
+    return sent, errors
 
 
 def _render_appearance_section() -> str:

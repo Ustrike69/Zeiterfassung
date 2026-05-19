@@ -282,6 +282,19 @@ def init_db():
     if not _col_exists(db, "users", "retirement_age"):
         db.execute("ALTER TABLE users ADD COLUMN retirement_age INTEGER NOT NULL DEFAULT 67")
 
+    if not _col_exists(db, "users", "overtime_limit_plus"):
+        db.execute("ALTER TABLE users ADD COLUMN overtime_limit_plus INTEGER")
+    if not _col_exists(db, "users", "overtime_limit_minus"):
+        db.execute("ALTER TABLE users ADD COLUMN overtime_limit_minus INTEGER")
+    if not _col_exists(db, "users", "supervisor_email"):
+        db.execute("ALTER TABLE users ADD COLUMN supervisor_email TEXT")
+    if not _col_exists(db, "users", "overtime_notify_enabled"):
+        db.execute("ALTER TABLE users ADD COLUMN overtime_notify_enabled INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "overtime_notify_interval"):
+        db.execute("ALTER TABLE users ADD COLUMN overtime_notify_interval TEXT NOT NULL DEFAULT 'once'")
+    if not _col_exists(db, "users", "overtime_last_notified"):
+        db.execute("ALTER TABLE users ADD COLUMN overtime_last_notified TEXT")
+
     db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -328,6 +341,8 @@ def init_db():
         ("nav_color", ""),
         ("app_label", ""),
         ("app_label_color", "#f59e0b"),
+        ("overtime_default_limit_plus", ""),
+        ("overtime_default_limit_minus", ""),
     ):
         db.execute(
             "INSERT OR IGNORE INTO app_config(key, value) VALUES(?, ?)",

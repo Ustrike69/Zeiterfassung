@@ -1900,13 +1900,166 @@ async def check_auto_backup() -> None:
         logger.error(f"Auto-Backup Fehler: {e}")
 
 
+def _send_overtime_mail(to: str, subject: str, body_text: str) -> None:
+    import smtplib
+    from email.mime.text import MIMEText as _MIMEText
+    db = connect()
+    try:
+        rows = db.execute("SELECT key, value FROM mail_config").fetchall()
+    finally:
+        db.close()
+    cfg = {r["key"]: (r["value"] or "") for r in rows}
+    server    = cfg.get("mail_server", "")
+    port      = int(cfg.get("mail_port") or "587")
+    username  = cfg.get("mail_username", "")
+    password  = cfg.get("mail_password", "")
+    from_addr = cfg.get("mail_from") or username
+    if not server or not username or not password:
+        raise RuntimeError("SMTP nicht konfiguriert.")
+    msg = _MIMEText(body_text, "plain", "utf-8")
+    msg["From"]    = from_addr
+    msg["To"]      = to
+    msg["Subject"] = subject
+    with smtplib.SMTP(server, port, timeout=10) as s:
+        s.ehlo(); s.starttls(); s.login(username, password)
+        s.sendmail(from_addr, [to], msg.as_string())
+
+
+_overtime_checked_today: "str | None" = None
+
+
+async def check_overtime_limits(app) -> None:
+    global _overtime_checked_today
+    now = datetime.datetime.now(tz=ZoneInfo("Europe/Berlin"))
+    if now.strftime("%H:%M") != "08:00":
+        return
+    today_iso = now.date().isoformat()
+    if _overtime_checked_today == today_iso:
+        return
+    _overtime_checked_today = today_iso
+
+    db = connect()
+    try:
+        cfg_rows = db.execute("SELECT key, value FROM app_config").fetchall()
+    except Exception:
+        cfg_rows = []
+    finally:
+        db.close()
+    cfg = {r["key"]: r["value"] for r in cfg_rows}
+
+    def _h_to_mins(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return int(float(s) * 60)
+        except ValueError:
+            return None
+
+    def_plus  = _h_to_mins(cfg.get("overtime_default_limit_plus"))
+    def_minus = _h_to_mins(cfg.get("overtime_default_limit_minus"))
+
+    db = connect()
+    users = db.execute(
+        "SELECT u.id, u.username, u.display_name, u.email, u.supervisor_email, "
+        "u.overtime_limit_plus, u.overtime_limit_minus, u.overtime_notify_enabled, "
+        "u.overtime_notify_interval, u.overtime_last_notified "
+        "FROM users u WHERE u.is_active=1 AND u.overtime_notify_enabled=1"
+    ).fetchall()
+    db.close()
+
+    for u_row in users:
+        uid  = u_row["id"]
+        lp   = u_row["overtime_limit_plus"] if u_row["overtime_limit_plus"] is not None else def_plus
+        lm   = u_row["overtime_limit_minus"] if u_row["overtime_limit_minus"] is not None else def_minus
+        if lp is None and lm is None:
+            continue
+
+        saldo = _calc_balance_end_at(uid, today_iso)
+        over_plus  = lp is not None and saldo > lp
+        over_minus = lm is not None and saldo < -(lm)
+        if not over_plus and not over_minus:
+            continue
+
+        interval      = u_row["overtime_notify_interval"] or "once"
+        last_notified = u_row["overtime_last_notified"]
+        should = False
+        if interval == "once" and not last_notified:
+            should = True
+        elif interval == "daily":
+            should = not last_notified or last_notified < today_iso
+        elif interval == "weekly":
+            if not last_notified:
+                should = True
+            else:
+                diff = (datetime.date.today() - datetime.date.fromisoformat(last_notified)).days
+                should = diff >= 7
+        if not should:
+            continue
+
+        name      = u_row["display_name"] or u_row["username"]
+        saldo_str = _fmt_minutes_signed(saldo)
+        if over_plus and lp:
+            limit_str = f"+{lp // 60:02d}:{lp % 60:02d}"
+            reason    = "Plus-Limit (Überstunden)"
+        else:
+            limit_str = f"-{abs(lm) // 60:02d}:{abs(lm) % 60:02d}"
+            reason    = "Minus-Limit (Minderstunden)"
+
+        body = (
+            f"Hallo {name},\n\n"
+            f"dein Gleitzeitkonto hat das eingestellte Limit überschritten.\n\n"
+            f"Aktueller Saldo: {saldo_str}\n"
+            f"Limit ({reason}): {limit_str}\n\n"
+            f"Bitte stimme das weitere Vorgehen mit deinem Vorgesetzten ab.\n"
+        )
+        subject = f"Gleitzeitkonto Hinweis – {name}"
+
+        for recipient in [r for r in [u_row["email"] or "", u_row["supervisor_email"] or ""] if r]:
+            try:
+                _send_overtime_mail(recipient, subject, body)
+            except Exception as e:
+                logger.error("Overtime mail error for %s: %s", name, e)
+
+        # Telegram notification
+        db2 = connect()
+        try:
+            tg_row = db2.execute(
+                "SELECT telegram_id FROM telegram_users WHERE user_id=?", (uid,)
+            ).fetchone()
+        finally:
+            db2.close()
+        if tg_row:
+            try:
+                tg_text = (
+                    f"⚠️ *Gleitzeitkonto Hinweis*\n\n"
+                    f"Dein Saldo ({saldo_str}) hat das {reason} überschritten.\n"
+                    f"Limit: {limit_str}"
+                )
+                await app.bot.send_message(
+                    chat_id=int(tg_row["telegram_id"]),
+                    text=tg_text,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error("Overtime telegram error for %s: %s", name, e)
+
+        db3 = connect()
+        try:
+            db3.execute("UPDATE users SET overtime_last_notified=? WHERE id=?", (today_iso, uid))
+            db3.commit()
+        finally:
+            db3.close()
+
+
 async def _on_startup(application: Application) -> None:
     scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
     scheduler.add_job(check_reminders, "cron", minute="*", args=[application])
     scheduler.add_job(check_auto_backup, "cron", minute="*")
+    scheduler.add_job(check_overtime_limits, "cron", minute="*", args=[application])
     scheduler.start()
     application.bot_data["scheduler"] = scheduler
-    logger.info("Abend-Wizard + Auto-Backup Scheduler gestartet (minütliche Prüfung)")
+    logger.info("Abend-Wizard + Auto-Backup + Overtime-Check Scheduler gestartet")
 
 
 async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
