@@ -9341,8 +9341,13 @@ function switchTab(tab){{
 }}
 window.addEventListener('DOMContentLoaded',function(){{
   var h=(window.location.hash||'').replace('#','');
-  var tab=sessionStorage.getItem('adminTab')||_DEFAULT_TAB;
-  if(h&&_USER_ACCS.indexOf(h)>=0)tab='users';
+  var tab;
+  if(_DEFAULT_TAB==='users'){{
+    tab='users';
+  }}else{{
+    tab=sessionStorage.getItem('adminTab')||_DEFAULT_TAB;
+    if(h&&_USER_ACCS.indexOf(h)>=0)tab='users';
+  }}
   switchTab(tab);
   var ss=sessionStorage.getItem('openAcc');
   if(ss)sessionStorage.removeItem('openAcc');
