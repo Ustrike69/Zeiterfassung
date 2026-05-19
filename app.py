@@ -4,13 +4,14 @@ import calendar
 import sqlite3
 import re
 import html as _html
+import os
 from db import init_db, seed_defaults, db_path, connect
 from calendar_seed import seed_calendar_2026_nrw
 from auth import has_users, create_user, authenticate, current_user, login_required, admin_required, set_password, set_flags
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.6"
+APP_VERSION = "v1.3.7"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
