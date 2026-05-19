@@ -1367,29 +1367,38 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
         day_blocks = blocks_by_day.get(iso, [])
 
         if act > 0 and day_blocks:
+            total_brk = sum(int(blk["break_minutes"] or 0) for blk in day_blocks)
+            first_in = str(day_blocks[0]["time_in"] or "")[:5]
+            last_out = str(day_blocks[-1]["time_out"] or "")[:5]
             for i, blk in enumerate(day_blocks):
-                zeit = f"{blk['time_in']}-{blk['time_out']}"
+                zeit = f"{str(blk['time_in'] or '')[:5]}-{str(blk['time_out'] or '')[:5]}"
                 if i == 0:
                     day_rows.append({
-                        'tag': tag, 'datum': datum, 'zeit': zeit,
+                        'tag': tag, 'datum': datum,
+                        'zeit': f"{first_in}-{last_out}",
+                        'pause': str(total_brk) if total_brk else '',
+                        'ist': _fmt_minutes(act),
                         'exp': exp, 'act': act, 'delta': delta, 'running': running,
                         'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
                     })
                 else:
                     day_rows.append({
                         'tag': '', 'datum': '', 'zeit': zeit,
+                        'pause': '', 'ist': '',
                         'exp': 0, 'act': 0, 'delta': None, 'running': None,
                         'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': False,
                     })
         elif act > 0:
             day_rows.append({
                 'tag': tag, 'datum': datum, 'zeit': _fmt_minutes(act),
+                'pause': '', 'ist': _fmt_minutes(act),
                 'exp': exp, 'act': act, 'delta': delta, 'running': running,
                 'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
             })
         else:
             day_rows.append({
                 'tag': tag, 'datum': datum, 'zeit': bemerkung if bemerkung else "-",
+                'pause': '', 'ist': '',
                 'exp': exp, 'act': act, 'delta': delta, 'running': running,
                 'is_hol': is_hol, 'is_weekend': is_weekend, 'is_first': True,
             })
@@ -1424,19 +1433,21 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
     rtf.append(r'{\fonttbl{\f0\fmodern\fcharset0 Courier New;}}')
     rtf.append(r'{\colortbl;\red0\green128\blue0;\red200\green0\blue0;\red160\green160\blue160;}')
     rtf.append(r'\f0\fs18')
-    rtf.append(r'\pard\tx2000\tx4000\tx5800\tx7400\tx9000')
+    rtf.append(r'\pard\tx2200\tx4200\tx5400\tx6800\tx7800\tx9000\tx10400')
     rtf.append(_rtf_escape(f'Gleitzeitkonto – {titel}') + r'\line')
     rtf.append('Startsaldo: ' + _rtf_signed(start_running) + r'\line')
     rtf.append(r'\line')
 
     for row in day_rows:
         zeit_r = _rtf_escape(row['zeit'])
+        pause_r = _rtf_escape(row.get('pause') or '')
+        ist_r = _rtf_escape(row.get('ist') or '')
         if not row['is_first']:
             # Subsequent block: only time column filled
             if row['is_weekend'] or row['is_hol']:
-                rtf_line = r'\tab ' + '{\\cf3 ' + zeit_r + '}' + r'\tab \tab \tab \tab \line'
+                rtf_line = r'\tab ' + '{\\cf3 ' + zeit_r + '}' + r'\tab \tab \tab \tab \tab \tab \line'
             else:
-                rtf_line = r'\tab ' + zeit_r + r'\tab \tab \tab \tab \line'
+                rtf_line = r'\tab ' + zeit_r + r'\tab \tab \tab \tab \tab \tab \line'
             rtf.append(rtf_line)
             continue
 
@@ -1446,13 +1457,15 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
         tag_r = _rtf_escape(row['tag'])
         datum_r = row['datum']
         soll_str = _fmt_minutes(exp) if exp > 0 else ''
-        delta_rtf = _rtf_signed(delta) if (exp > 0 or act > 0) else '+00:00'
-        saldo_rtf = _rtf_signed(row['running'])
+        delta_rtf = _rtf_signed(delta) if (exp > 0 or act > 0) else ''
+        saldo_rtf = _rtf_signed(row['running']) if row['running'] is not None else ''
 
         if row['is_weekend'] or row['is_hol']:
             rtf_line = (
                 '{\\cf3 ' + tag_r + ' ' + datum_r + '}' + r'\tab '
                 + '{\\cf3 ' + zeit_r + '}' + r'\tab '
+                + '{\\cf3 ' + pause_r + '}' + r'\tab '
+                + '{\\cf3 ' + ist_r + '}' + r'\tab '
                 + '{\\cf3 ' + soll_str + '}' + r'\tab '
                 + delta_rtf + r'\tab '
                 + saldo_rtf + r'\line'
@@ -1461,6 +1474,8 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
             rtf_line = (
                 tag_r + ' ' + datum_r + r'\tab '
                 + zeit_r + r'\tab '
+                + pause_r + r'\tab '
+                + ist_r + r'\tab '
                 + soll_str + r'\tab '
                 + delta_rtf + r'\tab '
                 + saldo_rtf + r'\line'

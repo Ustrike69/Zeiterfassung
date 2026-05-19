@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.0"
+APP_VERSION = "v1.3.1"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -179,6 +179,18 @@ def _balance_color(mins: int) -> str:
     if mins < 0:
         return "var(--danger)"
     return "inherit"
+
+
+def _calc_ist_minutes(blocks) -> int:
+    total = 0
+    for b in blocks:
+        if b["time_in"] and b["time_out"]:
+            h_in, m_in = map(int, b["time_in"].split(":"))
+            h_out, m_out = map(int, b["time_out"].split(":"))
+            duration = (h_out * 60 + m_out) - (h_in * 60 + m_in)
+            pause = int(b.get("break_minutes") or 0)
+            total += max(0, duration - pause)
+    return total
 
 
 def _parse_signed_hhmm_to_minutes(val: str) -> int:
@@ -3080,6 +3092,7 @@ def balance_view():
                 f"<td {_td}>{_status_html}</td>"
                 f"<td {_td}></td><td {_td}></td>"
                 f"<td {_td_r}></td>"
+                f"<td {_td_r}></td>"
                 f"<td {_td_r} style='padding:8px 6px;text-align:right;color:var(--mu);'>{_soll_str_d}</td>"
                 f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
                 f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
@@ -3088,15 +3101,18 @@ def balance_view():
             continue
 
         # Multi-block rows
+        _total_brk_d = sum(b["brk"] for b in _blocks_d)
+        _ist_str_d = _fmt_minutes(r["actual"]) if r["actual"] > 0 else ""
         for _bi, _blk_i in enumerate(_blocks_d):
             _is_first = _bi == 0
             _is_last  = _bi == len(_blocks_d) - 1
             _border = "border-bottom:1px solid var(--bd);" if _is_last else "border-bottom:1px solid rgba(128,128,128,.13);"
             _t_in  = _blk_i["t_in"]
-            _t_out = _blk_i["t_out"]
-            _brk   = _blk_i["brk"]
 
             if _is_first:
+                _disp_t_out   = _blocks_d[-1]["t_out"]
+                _disp_pause   = str(_total_brk_d) if _total_brk_d else ""
+                _disp_ist     = _ist_str_d
                 _wd_cell    = f"<td {_td} style='padding:8px 6px;color:var(--mu);white-space:nowrap;'>{_wd_lbl}</td>"
                 _date_cell  = (
                     f"<td {_td} style='padding:8px 6px;white-space:nowrap;'>"
@@ -3104,13 +3120,17 @@ def balance_view():
                     f"<span style='font-size:11px;opacity:.35;margin-left:3px;'>&#8599;</span></a></td>"
                 )
                 _stat_cell  = f"<td {_td}>{_status_html}</td>"
+                _ist_cell   = f"<td {_td_r}>{_disp_ist}</td>"
                 _soll_cell  = f"<td {_td_r} style='padding:8px 6px;text-align:right;color:var(--mu);'>{_soll_str_d}</td>"
                 _delta_cell = f"<td {_td_r}><b style='color:{delta_clr};'>{_delta_str_d}</b></td>"
                 _run_cell   = f"<td {_td_r}><b style='color:{running_clr};'>{_running_str_d}</b></td>"
             else:
+                _disp_t_out   = _blk_i["t_out"]
+                _disp_pause   = ""
                 _wd_cell    = f"<td {_td}></td>"
                 _date_cell  = f"<td {_td}></td>"
                 _stat_cell  = f"<td {_td}></td>"
+                _ist_cell   = f"<td {_td_r}></td>"
                 _soll_cell  = f"<td {_td_r}></td>"
                 _delta_cell = f"<td {_td}></td>"
                 _run_cell   = f"<td {_td}></td>"
@@ -3120,8 +3140,9 @@ def balance_view():
                 f" onclick=\"location.href='/day/{r['day']}'\">"
                 f"{_wd_cell}{_date_cell}{_stat_cell}"
                 f"<td {_td}>{_t_in}</td>"
-                f"<td {_td}>{_t_out}</td>"
-                f"<td {_td_r}>{str(_brk) if _brk else ''}</td>"
+                f"<td {_td}>{_disp_t_out}</td>"
+                f"<td {_td_r}>{_disp_pause}</td>"
+                f"{_ist_cell}"
                 f"{_soll_cell}{_delta_cell}{_run_cell}"
                 f"</tr>"
             )
@@ -3169,13 +3190,11 @@ def balance_view():
                 f" onclick=\"location.href='/day/{r['day']}'\">"
                 f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
-                f"<td colspan='2' style='padding:4px 2px;'>"
+                f"<td style='padding:4px 2px;'>"
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:3px;"
                 f"background:{_abs_bg};color:{_abs_color};font-weight:600;white-space:nowrap;'>{_abs_label}</span>"
                 f"</td>"
-                f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'></td>"
-                f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
-                f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
+                f"<td></td><td></td><td></td><td></td><td></td>"
                 f"</tr>"
             )
             continue
@@ -3189,6 +3208,8 @@ def balance_view():
                 f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
                 f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 2px;'></td>"
+                f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_soll_str_m}</td>"
                 f"<td style='padding:4px 4px;text-align:right;font-weight:700;white-space:nowrap;"
                 f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
@@ -3197,15 +3218,18 @@ def balance_view():
             continue
 
         # One or more blocks: one row per block
+        _total_brk_m = sum(b["brk"] for b in _blocks_m)
+        _ist_str_m = _fmt_minutes(r["actual"]) if r["actual"] > 0 else ""
         for _bi, _blk_i in enumerate(_blocks_m):
             _is_first = _bi == 0
             _is_last  = _bi == len(_blocks_m) - 1
             # Thick separator after last block of day; subtle between sibling blocks
             _border = "border-bottom:1px solid var(--bd);" if _is_last else "border-bottom:1px solid rgba(128,128,128,.13);"
             _t_in  = _blk_i["t_in"]
-            _t_out = _blk_i["t_out"]
-            _brk   = _blk_i["brk"]
             if _is_first:
+                _disp_t_out_m = _blocks_m[-1]["t_out"]
+                _disp_brk_m   = str(_total_brk_m) if _total_brk_m else ""
+                _disp_ist_m   = _ist_str_m
                 _wd_cell    = f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 _date_cell  = f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
                 _soll_cell_m = f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_soll_str_m}</td>"
@@ -3214,6 +3238,9 @@ def balance_view():
                     f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
                 )
             else:
+                _disp_t_out_m = _blk_i["t_out"]
+                _disp_brk_m   = ""
+                _disp_ist_m   = ""
                 _wd_cell     = "<td style='padding:4px 4px;'></td>"
                 _date_cell   = "<td style='padding:4px 2px;'></td>"
                 _soll_cell_m = "<td style='padding:4px 2px;'></td>"
@@ -3224,7 +3251,9 @@ def balance_view():
                 f"{_wd_cell}"
                 f"{_date_cell}"
                 f"<td style='padding:4px 2px;'>{_t_in}</td>"
-                f"<td style='padding:4px 2px;'>{_t_out}</td>"
+                f"<td style='padding:4px 2px;'>{_disp_t_out_m}</td>"
+                f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_disp_brk_m}</td>"
+                f"<td style='padding:4px 2px;text-align:right;font-size:12px;'>{_disp_ist_m}</td>"
                 f"{_soll_cell_m}"
                 f"{_delta_cell}"
                 f"</tr>"
@@ -3294,9 +3323,10 @@ def balance_view():
             <th style="padding:6px 6px;text-align:left;width:32px;">Tag</th>
             <th style="padding:6px 6px;text-align:left;">Datum</th>
             <th style="padding:6px 6px;text-align:left;">Status</th>
-            <th style="padding:6px 6px;text-align:left;">Von</th>
-            <th style="padding:6px 6px;text-align:left;">Bis</th>
+            <th style="padding:6px 6px;text-align:left;">Beginn</th>
+            <th style="padding:6px 6px;text-align:left;">Ende</th>
             <th style="padding:6px 6px;text-align:right;width:44px;">Pause</th>
+            <th style="padding:6px 6px;text-align:right;width:54px;">Ist</th>
             <th style="padding:6px 6px;text-align:right;width:54px;">Soll</th>
             <th style="padding:6px 6px;text-align:right;width:70px;">Delta</th>
             <th style="padding:6px 6px;text-align:right;width:70px;">Saldo</th>
@@ -3329,12 +3359,14 @@ def balance_view():
       </div>
       <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;">
         <colgroup>
-          <col style="width:24px;">
-          <col style="width:46px;">
-          <col style="width:44px;">
+          <col style="width:22px;">
+          <col style="width:40px;">
           <col style="width:44px;">
           <col style="width:38px;">
-          <col style="width:52px;">
+          <col style="width:26px;">
+          <col style="width:36px;">
+          <col style="width:34px;">
+          <col style="width:auto;">
         </colgroup>
         <thead>
           <tr style="background:var(--sf);">
@@ -3342,6 +3374,8 @@ def balance_view():
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Dat.</th>
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Von</th>
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Bis</th>
+            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Pse</th>
+            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Ist</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Soll</th>
             <th style="padding:5px 4px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Delta</th>
           </tr>
