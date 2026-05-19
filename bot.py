@@ -1917,12 +1917,13 @@ def _send_overtime_mail(to: str, subject: str, body_text: str) -> None:
     if not server or not username or not password:
         raise RuntimeError("SMTP nicht konfiguriert.")
     msg = _MIMEText(body_text, "plain", "utf-8")
-    msg["From"]    = from_addr
+    from_header = f"{from_addr} <{username}>" if from_addr and "@" not in from_addr else (from_addr or username)
+    msg["From"]    = from_header
     msg["To"]      = to
     msg["Subject"] = subject
     with smtplib.SMTP(server, port, timeout=10) as s:
         s.ehlo(); s.starttls(); s.login(username, password)
-        s.sendmail(from_addr, [to], msg.as_string())
+        s.sendmail(username, [to], msg.as_string())
 
 
 _overtime_checked_today: "str | None" = None

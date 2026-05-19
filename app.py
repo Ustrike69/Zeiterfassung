@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.4.3"
+APP_VERSION = "v1.4.4"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -6749,14 +6749,15 @@ def _send_mail_simple(to: str, subject: str, body_text: str) -> None:
     if not password:
         raise RuntimeError("SMTP-Passwort nicht konfiguriert.")
     msg = _MIMEText(body_text, "plain", "utf-8")
-    msg["From"]    = from_addr
+    from_header = f"{from_addr} <{username}>" if from_addr and "@" not in from_addr else (from_addr or username)
+    msg["From"]    = from_header
     msg["To"]      = to
     msg["Subject"] = subject
     with smtplib.SMTP(server, port, timeout=10) as s:
         s.ehlo()
         s.starttls()
         s.login(username, password)
-        s.sendmail(from_addr, [to], msg.as_string())
+        s.sendmail(username, [to], msg.as_string())
 
 
 def _build_rich_day_export(user_id: int, date_from: str, date_to: str):
@@ -9204,6 +9205,18 @@ def admin_home():
 
     admin_email = u.get("email") or ""
 
+    # pre-render helper sections with data-tab attribute injected
+    def _tab(html: str, tab: str) -> str:
+        return html.replace('<div class="acc"', f'<div class="acc" data-tab="{tab}"', 1)
+
+    _html_absences  = _tab(_render_admin_absences_section(), "users")
+    _html_overtime  = _tab(_render_admin_overtime_section(), "users")
+    _html_appearance = _tab(_render_appearance_section(), "system")
+    _html_backup    = _tab(_render_backup_section(), "system")
+    _html_bot       = _tab(_render_bot_section(), "system")
+    _html_update    = _tab(_render_update_section(), "system")
+    _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system")
+
     body = f"""
     {flash_html()}
 <style>
@@ -9217,6 +9230,11 @@ def admin_home():
 .acc-body{{max-height:0;overflow:hidden;transition:max-height .28s ease;}}
 .acc-body.open{{max-height:8000px;}}
 .acc-inner{{padding:14px 16px;}}
+.tab-bar{{display:flex;gap:6px;margin-bottom:14px;border-bottom:2px solid var(--bd);padding-bottom:0;}}
+.tab-btn{{padding:8px 16px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:600;
+  color:var(--mu);border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .12s,border-color .12s;}}
+.tab-btn:hover{{color:var(--tx);}}
+.tab-btn.active{{color:var(--ac);border-bottom-color:var(--ac);}}
 </style>
 <script>
 function accToggle(id){{
@@ -9233,11 +9251,24 @@ function toggleNewUser(){{
   if(!p)return;
   p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';
 }}
+var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl'];
+function switchTab(tab){{
+  document.querySelectorAll('.acc[data-tab]').forEach(function(el){{
+    el.style.display=el.dataset.tab===tab?'':'none';
+  }});
+  document.querySelectorAll('.tab-btn').forEach(function(btn){{
+    btn.classList.toggle('active',btn.dataset.tab===tab);
+  }});
+  sessionStorage.setItem('adminTab',tab);
+}}
 window.addEventListener('DOMContentLoaded',function(){{
-  var h=window.location.hash;
+  var h=(window.location.hash||'').replace('#','');
+  var tab=sessionStorage.getItem('adminTab')||'system';
+  if(h&&_USER_ACCS.indexOf(h)>=0)tab='users';
+  switchTab(tab);
   var ss=sessionStorage.getItem('openAcc');
   if(ss)sessionStorage.removeItem('openAcc');
-  var toOpen=h||(ss?'#'+ss:null);
+  var toOpen=h?('#'+h):(ss?('#'+ss):null);
   if(toOpen){{
     var el=document.querySelector(toOpen+' .acc-body');
     var hd=document.querySelector(toOpen+' .acc-hdr');
@@ -9247,8 +9278,13 @@ window.addEventListener('DOMContentLoaded',function(){{
 }});
 </script>
 
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="system" type="button" onclick="switchTab('system')">⚙ Systemeinstellungen</button>
+  <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">👥 Benutzerübersichten</button>
+</div>
+
     <!-- Section 1: Benutzerverwaltung -->
-    <div class="acc" id="acc-user">
+    <div class="acc" id="acc-user" data-tab="system">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-user-body')">
         <span>👥 Benutzerverwaltung</span><span class="acc-arr">▼</span>
       </button>
@@ -9291,7 +9327,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 2: Zeitschemas -->
-    <div class="acc" id="acc-zeit">
+    <div class="acc" id="acc-zeit" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit-body')">
         <span>🕐 Zeitschemas</span><span class="acc-arr">▼</span>
       </button>
@@ -9309,7 +9345,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 3: Urlaubsverwaltung -->
-    <div class="acc" id="acc-urlaub">
+    <div class="acc" id="acc-urlaub" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
         <span>🏖 Urlaubsverwaltung</span><span class="acc-arr">▼</span>
       </button>
@@ -9327,7 +9363,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 4: Abschlüsse -->
-    <div class="acc" id="acc-abschl">
+    <div class="acc" id="acc-abschl" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-abschl-body')">
         <span>🔒 Abschlüsse</span><span class="acc-arr">▼</span>
       </button>
@@ -9350,7 +9386,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 5: Maileinstellungen -->
-    <div class="acc" id="acc-mail">
+    <div class="acc" id="acc-mail" data-tab="system">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-mail-body')">
         <span>✉ Maileinstellungen</span><span class="acc-arr">▼</span>
       </button>
@@ -9398,22 +9434,25 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 6: Urlaubsübersicht -->
-    {_render_admin_absences_section()}
+    {_html_absences}
 
     <!-- Section 7: Gleitzeitkonto Übersicht -->
-    {_render_admin_overtime_section()}
+    {_html_overtime}
 
     <!-- Section 8: Erscheinungsbild -->
-    {_render_appearance_section()}
+    {_html_appearance}
 
-    <!-- Section 7: Backup & Restore -->
-    {_render_backup_section()}
+    <!-- Section 9: Überstunden-Defaults -->
+    {_html_ot_defs}
 
-    <!-- Section 9: Telegram Bot -->
-    {_render_bot_section()}
+    <!-- Section 10: Backup & Restore -->
+    {_html_backup}
 
-    <!-- Section 10: System Update -->
-    {_render_update_section()}
+    <!-- Section 11: Telegram Bot -->
+    {_html_bot}
+
+    <!-- Section 12: System Update -->
+    {_html_update}
     """
     return render_template_string(layout("Admin", body, u, APP_VERSION))
 
@@ -10431,6 +10470,38 @@ def _render_admin_absences_section() -> str:
     </div>"""
 
 
+def _render_overtime_defaults_section() -> str:
+    cfg = _get_app_config()
+    def_plus_h  = cfg.get("overtime_default_limit_plus") or ""
+    def_minus_h = cfg.get("overtime_default_limit_minus") or ""
+    return f"""
+    <div class="acc" id="acc-overtime-defaults">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-defaults-body')">
+        <span>⏱ Überstunden-Limits (Defaults)</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-overtime-defaults-body">
+        <div class="acc-inner">
+          <p class="small" style="color:var(--mu);margin-bottom:12px;">Globale Standardwerte. Individuelle Limits pro Nutzer überschreiben diese.</p>
+          <form method="post" action="/admin/overtime/save-defaults" onsubmit="sessionStorage.setItem('openAcc','acc-overtime-defaults')">
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
+              <div>
+                <label style="font-size:12px;">Default Plus-Limit (h)</label>
+                <input type="number" name="def_plus" value="{_html.escape(def_plus_h)}" placeholder="–" step="0.5"
+                  style="width:80px;font-size:13px;padding:4px 8px;">
+              </div>
+              <div>
+                <label style="font-size:12px;">Default Minus-Limit (h)</label>
+                <input type="number" name="def_minus" value="{_html.escape(def_minus_h)}" placeholder="–" step="0.5"
+                  style="width:80px;font-size:13px;padding:4px 8px;">
+              </div>
+            </div>
+            <button class="btn primary btn-sm" type="submit">Speichern</button>
+          </form>
+        </div>
+      </div>
+    </div>"""
+
+
 def _render_admin_overtime_section() -> str:
     today_iso = datetime.date.today().isoformat()
 
@@ -10576,19 +10647,6 @@ def _render_admin_overtime_section() -> str:
           <p class="small" style="color:var(--mu);margin-bottom:10px;">Limits in Stunden (z.B. 40 = 40h). Leer = kein Limit. Individuell überschreibt den globalen Default.</p>
 
           <form method="post" action="/admin/overtime/save" onsubmit="sessionStorage.setItem('openAcc','acc-overtime')">
-            <div style="margin-bottom:10px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-              <div>
-                <label style="font-size:12px;">Globaler Default Plus-Limit (h)</label>
-                <input type="number" name="def_plus" value="{_html.escape(def_plus_h)}" placeholder="–" step="0.5"
-                  style="width:80px;font-size:13px;padding:4px 8px;">
-              </div>
-              <div>
-                <label style="font-size:12px;">Globaler Default Minus-Limit (h)</label>
-                <input type="number" name="def_minus" value="{_html.escape(def_minus_h)}" placeholder="–" step="0.5"
-                  style="width:80px;font-size:13px;padding:4px 8px;">
-              </div>
-            </div>
-
             <div class="table-scroll" style="margin-bottom:12px;">
               <table>
                 <thead><tr>
@@ -10668,6 +10726,41 @@ def admin_overtime_save():
         db.close()
     add_flash("Gleitzeitkonto-Limits gespeichert.", "success")
     return redirect("/admin#acc-overtime")
+
+
+@app.post("/admin/overtime/save-defaults")
+@admin_required
+def admin_overtime_save_defaults():
+    bootstrap()
+    def _h_to_mins(s: str):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return int(float(s) * 60)
+        except ValueError:
+            return None
+
+    def_plus_h  = (request.form.get("def_plus") or "").strip()
+    def_minus_h = (request.form.get("def_minus") or "").strip()
+    db = connect()
+    try:
+        for key, val in [
+            ("overtime_default_limit_plus",  str(_h_to_mins(def_plus_h)  or "")),
+            ("overtime_default_limit_minus", str(_h_to_mins(def_minus_h) or "")),
+        ]:
+            db.execute(
+                "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+                (key, val),
+            )
+        db.commit()
+    finally:
+        db.close()
+    from flask import g as _g
+    if hasattr(_g, "_app_config_cache"):
+        del _g._app_config_cache
+    add_flash("Standard-Limits gespeichert.", "success")
+    return redirect("/admin#acc-overtime-defaults")
 
 
 @app.post("/admin/overtime/check")
