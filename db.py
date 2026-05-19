@@ -238,15 +238,16 @@ def init_db():
     )""")
     db.execute("CREATE INDEX IF NOT EXISTS idx_weekend_exceptions_user_day ON weekend_exceptions(user_id, day)")
 
+    # User profile / onboarding columns
+    if not _col_exists(db, "users", "tracking_start_date"):
+        db.execute("ALTER TABLE users ADD COLUMN tracking_start_date TEXT")
+
     # Migrate: set tracking_start_date for existing users that have none
+    # Must come AFTER ALTER TABLE to avoid OperationalError on fresh DB
     db.execute("""
         UPDATE users SET tracking_start_date='2026-01-01'
         WHERE tracking_start_date IS NULL OR tracking_start_date=''
     """)
-
-    # User profile / onboarding columns
-    if not _col_exists(db, "users", "tracking_start_date"):
-        db.execute("ALTER TABLE users ADD COLUMN tracking_start_date TEXT")
 
     if not _col_exists(db, "users", "password_changed"):
         db.execute("ALTER TABLE users ADD COLUMN password_changed INTEGER NOT NULL DEFAULT 0")
