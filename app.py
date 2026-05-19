@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.1"
+APP_VERSION = "v1.3.2"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3273,6 +3273,11 @@ def balance_view():
       .bal-desk{{display:none!important;}}
       .bal-mob{{display:block!important;}}
     }}
+    .mob-bal-tbl{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;}}
+    @media(max-width:480px){{
+      .mob-bal-tbl{{font-size:11px;}}
+      .mob-bal-tbl td,.mob-bal-tbl th{{padding-left:1px!important;padding-right:1px!important;}}
+    }}
     </style>
     <div class="bal-desk">
     <div class="card">
@@ -3357,16 +3362,16 @@ def balance_view():
         <div style="font-size:30px;font-weight:700;letter-spacing:-.02em;color:{period_end_clr};line-height:1.1;">{period_end_hhmm}</div>
         <div style="font-size:11px;color:var(--mu);margin-top:2px;">Saldo {period_label}</div>
       </div>
-      <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px;">
+      <table class="mob-bal-tbl">
         <colgroup>
           <col style="width:22px;">
-          <col style="width:40px;">
-          <col style="width:44px;">
+          <col style="width:42px;">
+          <col>
           <col style="width:38px;">
-          <col style="width:26px;">
-          <col style="width:36px;">
-          <col style="width:34px;">
-          <col style="width:auto;">
+          <col style="width:30px;">
+          <col style="width:38px;">
+          <col style="width:38px;">
+          <col style="width:42px;">
         </colgroup>
         <thead>
           <tr style="background:var(--sf);">
@@ -3377,7 +3382,7 @@ def balance_view():
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Pse</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Ist</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Soll</th>
-            <th style="padding:5px 4px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Delta</th>
+            <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Δ</th>
           </tr>
         </thead>
         <tbody>{mob_trs}</tbody>
