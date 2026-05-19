@@ -7,7 +7,7 @@ def db_path():
     return str(Path(DB_FILENAME).resolve())
 
 def connect():
-    c = sqlite3.connect(db_path())
+    c = sqlite3.connect(db_path(), timeout=10)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     return c
