@@ -1,6 +1,6 @@
-# Zeiterfassung v1.0.0
+# Zeiterfassung v1.4.5
 
-Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail und einem umfassenden Admin-Bereich.
+Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail, Telegram-Bot und einem umfassenden Admin-Bereich mit Rollentrennung.
 
 ---
 
@@ -136,11 +136,13 @@ Aufruf unter `/absences`.
 
 | Typ | Beschreibung |
 |-----|-------------|
-| **Urlaub** | Gegen Urlaubskontingent |
+| **Urlaub** | Gegen Urlaubskontingent; Limit-Prüfung verhindert Überschreitung |
 | **Krank** | Krankheitstage |
 | **Sonstige** | Pflichtfeld Bemerkung (Flextag, Verdi, freie Eingabe) |
 
 **Flextag:** Setzt Soll auf 0 und zieht Sollzeit zusätzlich vom Gleitzeitkonto ab.
+
+**Urlaubslimit-Validierung:** Ist das Urlaubskontingent erschöpft, können normale User keinen weiteren Urlaub eintragen. Admins erhalten eine Warnung, können aber trotzdem eintragen.
 
 ---
 
@@ -175,7 +177,7 @@ Aufruf unter `/settings`. 4 Accordion-Bereiche:
 
 | Bereich | Inhalt |
 |---------|--------|
-| **Persönliche Einstellungen** | Name, E-Mail, Passwort |
+| **Persönliche Einstellungen** | Name, E-Mail, Passwort, Geburtsdatum, Renteneintrittsalter, Telegram-ID |
 | **Urlaub** | Jahresanspruch, Übertrag-Regelung (Standard 31.03. oder Ausnahme) |
 | **Zeitschema** | Aktuelle + alle Schemas, Bearbeiten/Löschen/Neu anlegen |
 | **Kontierung** | Aktivieren/Deaktivieren + Startdatum |
@@ -190,7 +192,7 @@ Aufruf unter `/export`.
 
 Zeitraum wählbar (Datepicker + Schnellwahl: Akt. Monat / Letzter Monat / Akt. Jahr / Letztes Jahr).
 
-Verfügbare Exporte: Zeitblöcke · Abwesenheiten · Dienstreisen · Gleitzeitkonto · Feiertage · Benutzer (Admin)
+Verfügbare Exporte: Zeitblöcke · Abwesenheiten · Dienstreisen · Gleitzeitkonto · Feiertage · Benutzer (Systemadmin)
 
 ### CSV-Format (Zeitblöcke)
 
@@ -212,47 +214,49 @@ Aufruf unter `/periods`.
 
 - Abgeschlossene Monate sperren alle Einträge
 - **Jahresabschluss**: Nur Monate ab `tracking_start_date` müssen abgeschlossen sein
-- Entsperren: nur durch Admins (über Admin-Bereich)
+- Entsperren: nur durch Admins (über Admin-Bereich → Benutzerübersichten → Abschlüsse)
 
 ---
 
 ## Admin-Bereich
 
-Aufruf unter `/admin`. Accordion-Layout mit 5 Bereichen:
+Aufruf unter `/admin`. Accordion-Layout mit zwei Tabs.
 
-### 1. Benutzerverwaltung
+### Admin-Rollen
 
-- Neue User anlegen (inline, per Button einblenden)
-- Passwörter zurücksetzen · Admin-Rechte · Deaktivieren/Löschen
-- **Identität annehmen**: Als anderer User agieren (oranger Banner + „Zurück zu Admin")
+| Rolle | Beschreibung |
+|-------|-------------|
+| **🔧 Systemadmin** (`admin_role='sysadmin'`) | Voller Zugriff auf beide Tabs. Benutzerverwaltung, Rollenvergabe, Maileinstellungen, Bot, Backup, Update, Erscheinungsbild |
+| **📋 Zeitmanager** (`admin_role='timemanager'`) | Nur Tab „Benutzerübersichten". Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Urlaubsübertrag-Ausnahmen, Identität annehmen (nur normale User) |
 
-### 2. Zeitschemas
+### Tab: ⚙ Systemeinstellungen (nur Systemadmin)
 
-- Übersicht aller User mit aktuellem Soll-Wert
-- Link zu Zeitschema-Verwaltung pro User (Bearbeiten/Löschen/Neu anlegen)
+| Accordion | Inhalt |
+|-----------|--------|
+| **Benutzerverwaltung** | User anlegen, Rollen vergeben, löschen. Badges: 🔧 Systemadmin, 📋 Zeitmanager |
+| **Maileinstellungen** | SMTP-Konfiguration; STARTTLS Port 587; Test-Mail senden |
+| **Überstunden-Limits (Defaults)** | Globale Standard-Plus/Minus-Limits für alle User |
+| **Erscheinungsbild** | Akzentfarbe, Navigationsfarbe, App-Label für Dev/Prod-Unterscheidung |
+| **Backup & Restore** | Vollständig / Einstellungen / User-Daten; automatisches Backup mit Zeitplan |
+| **Telegram Bot** | Bot-Token, API-Key, Admin-IDs; Service starten/stoppen |
+| **System Update** | Git pull + Neustart direkt aus der App |
 
-### 3. Urlaubsverwaltung
+### Tab: 👥 Benutzerübersichten (beide Rollen)
 
-- Übersicht aller User mit Ausnahme-Kennzeichnung
-- Übertrag-Ausnahme: ob Resturlaub am 31.03. verfällt oder unbegrenzt gilt
-
-### 4. Abschlüsse
-
-- Monats- und Jahresabschlüsse aller User mit Jahr-Auswahl
-- Status pro User (Keine / X Monate / Jahr abgeschlossen)
-- Alle Abschlüsse eines Users für ein Jahr entsperren
-
-### 5. Maileinstellungen
-
-- SMTP-Konfiguration (Server, Port, Benutzername, Passwort, Absender)
-- Einstellungen werden in der DB gespeichert (Fallback: Umgebungsvariablen)
-- Test-Mail an beliebige Adresse senden
+| Accordion | Inhalt |
+|-----------|--------|
+| **Urlaubsübersicht** | Anspruch, Übertrag, Verbrauch, Resturlaub je User; CSV-Export |
+| **Gleitzeitkonto Übersicht** | Salden aller User; individuelle Plus/Minus-Limits; Benachrichtigungen (E-Mail + Telegram); Intervall: einmalig/täglich/wöchentlich |
+| **Zeitschemas** | Aktuelles Soll je User; Link zu Zeitschema-Verwaltung |
+| **Urlaubsverwaltung** | Übertrag-Ausnahmen (31.03.-Regel) je User |
+| **Abschlüsse** | Monats- und Jahresabschlüsse; Entsperren |
 
 ### Schutzregeln
 
 - Eigener Account nicht löschbar
-- Letzter aktiver Admin nicht löschbar
-- Admin kann keine andere Admin-Identität annehmen
+- Letzter aktiver Systemadmin nicht degradierbar
+- Admins können keine andere Admin-Identität annehmen
+- Sysadmin kann die eigene Rolle nicht selbst ändern
 
 ---
 
@@ -262,17 +266,20 @@ Aufruf unter `/admin`. Accordion-Layout mit 5 Bereichen:
 
 - Python 3.x + virtualenv unter `/opt/zeiterfassung/.venv`
 - SQLite-Datenbank (via `ZEITERFASSUNG_DB`, Standard: `zeiterfassung.db`)
-- Gunicorn via systemd
+- Gunicorn via systemd (`zeiterfassung`)
+- Telegram-Bot via systemd (`zeiterfassung-bot`)
 
 ### Starten / Neustarten
 
 ```bash
-systemctl restart zeiterfassung
-systemctl status zeiterfassung
+systemctl restart zeiterfassung zeiterfassung-bot
+systemctl status zeiterfassung zeiterfassung-bot
 journalctl -u zeiterfassung -f
 ```
 
 ### Backup
+
+Vollständiges Backup über den Admin-Bereich (Systemeinstellungen → Backup & Restore) oder manuell:
 
 ```bash
 cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
@@ -280,7 +287,7 @@ cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 
 ### SMTP-Konfiguration
 
-Entweder über den Admin-Bereich (Maileinstellungen) oder via Umgebungsvariablen in der systemd-Unit:
+Über den Admin-Bereich (Systemeinstellungen → Maileinstellungen) oder via Umgebungsvariablen in der systemd-Unit:
 
 ```
 Environment="MAIL_SERVER=mail.beispiel.de"
@@ -294,42 +301,49 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 | Datei | Beschreibung |
 |-------|-------------|
-| `app.py` | Alle Routes und Business-Logik (~8.000 Zeilen) |
+| `app.py` | Alle Routes und Business-Logik (~11.000 Zeilen) |
 | `db.py` | Datenbankinitialisierung und Migrationen |
-| `auth.py` | Session-basierte Authentifizierung |
+| `auth.py` | Session-basierte Authentifizierung, Rollen-Decorators |
 | `templates.py` | HTML-Layout-Wrapper (f-strings) |
+| `bot.py` | Telegram-Bot mit APScheduler |
+| `backup.py` | Backup-Logik (full / settings / user) |
 | `calendar_seed.py` | Import NRW-Feiertage 2026 |
 
 ---
 
 ## Versionshistorie
 
-### v1.0.0
-- Admin-Bereich zusammengefasst: Accordion-Layout mit 5 Bereichen (Benutzer, Zeitschemas, Urlaub, Abschlüsse, Mail)
+### v1.4.5
+- Admin-Rollen: Systemadmin (voller Zugriff) und Zeitmanager (nur Benutzerübersichten)
+- Rollenvergabe in Benutzerverwaltung; Schutz letzter Sysadmin
+- Telegram-Bot: Admin-Befehle auch für Zeitmanager (DB-Rollenprüfung)
+- Hilfe-Seite: Admin-Abschnitt rollenabhängig erweitert
+
+### v1.4.4
+- fix: SMTP `SMTPSenderRefused` behoben (`from_addr` → `username` als Envelope-Sender)
+- feat: Admin-Seite in zwei Tabs aufgeteilt: „Systemeinstellungen" und „Benutzerübersichten"
+- feat: Überstunden-Defaults separater Accordion im System-Tab
+
+### v1.4.3
+- Gleitzeitkonto-Übersicht für Admin: Salden, Limits, Benachrichtigungen
+- E-Mail + Telegram-Benachrichtigung bei Limit-Überschreitung (einmalig/täglich/wöchentlich)
+- APScheduler im Telegram-Bot: tägliche Prüfung um 08:00
+
+### v1.4.2
+- Urlaubslimit-Validierung: normale User können kein Urlaub über Kontingent eintragen
+- Admin-Abwesenheitsübersicht: Urlaubsstatus, Detailansicht je User, CSV-Export
+
+### v1.4.1
+- Anpassbare App-Farben: Akzent, Navigation, Label für Dev/Prod-Unterscheidung
+- Erscheinungsbild-Einstellungen in Admin-Bereich
+
+### v1.4.0 und älter
+- Admin-Bereich zusammengefasst: Accordion-Layout
 - CSV-Export per E-Mail (Zeitblöcke + Abwesenheiten)
-- Neues CSV-Format: Wochentag|Datum|Beginn|Ende|Pause|Soll|Delta|Bemerkung
-- Admin Maileinstellungen: SMTP-Konfiguration in DB gespeichert, Verbindungstest
-- Tagesansicht Redesign: kompaktes 2-Spalten-Grid, Soll/Ist/Δ im Header
-- Einstellungen als Accordion (4 Bereiche)
-- Button-Design vereinheitlicht (btn, btn-primary, btn-danger, btn-sm, btn-lg)
-- Zurück-Button auf allen Seiten
-- Mobile Timepicker: 15-Minuten-Schritte erzwungen
-- Soll-Spalte im Gleitzeitkonto, Feiertage dezent gedimmt
-- Wochenende/Feiertag-Widget: kompakter Inline-Banner
-
-### v4.6.x (Basis)
-- v4.6.6: Wochenende-Widget angepasst
-- v4.6.5: Zeiterfassung Redesign kompakt
-- v4.6.4: Einstellungen Accordion
-- v4.6.3: Dienstreisen Button-Fix
-- v4.6.2: Soll-Spalte, Feiertage gedimmt
-- v4.6.1: Button-Vereinheitlichung
-- v4.6.0: Kritischer Bug behoben
-- v4.5.x: Zurück-Button, Dashboard Grid, Timepicker-Fixes
-
-### v4.4.x – v4.5.x (Vorarbeit)
-- Kontierungsfunktion, Admin-Identitätswechsel, Gleitzeitkonto-Redesign, Zeitschema-Verwaltung, Urlaubsübertrag-Ausnahme, Wochenend-Ausnahmen
+- Tagesansicht Redesign, kompaktes 2-Spalten-Grid
+- Kontierungsfunktion, Admin-Identitätswechsel, Zeitschema-Verwaltung
+- Urlaubsübertrag-Ausnahme, Wochenend-Ausnahmen
 
 ---
 
-*Zeiterfassung v1.0.0 – Flask + SQLite – NRW*
+*Zeiterfassung v1.4.5 – Flask + SQLite – NRW*

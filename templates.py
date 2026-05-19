@@ -1,4 +1,4 @@
-def layout(title: str, body: str, user=None, app_version: str = "v1.4.4", impersonation_banner: str = "", show_back: bool = True, extra_root_css: str = "", app_label: str = "", app_label_color: str = "#f59e0b") -> str:
+def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impersonation_banner: str = "", show_back: bool = True, extra_root_css: str = "", app_label: str = "", app_label_color: str = "#f59e0b") -> str:
     nav_html = ""
     if user:
         items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export"), ("/help", "❓ Hilfe")]

@@ -86,6 +86,23 @@ if _db_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
     os.environ["ANTHROPIC_API_KEY"] = _db_api_key
 
 
+def _is_bot_admin(telegram_id: int) -> bool:
+    """True if this telegram user has any admin role (sysadmin or timemanager) or is in ADMIN_IDS."""
+    if telegram_id in ADMIN_IDS:
+        return True
+    uid = _get_user_id(telegram_id)
+    if uid is None:
+        return False
+    db = connect()
+    try:
+        r = db.execute(
+            "SELECT admin_role FROM users WHERE id=? AND is_active=1", (uid,)
+        ).fetchone()
+    finally:
+        db.close()
+    return r is not None and r["admin_role"] in ("sysadmin", "timemanager")
+
+
 def _get_user_id(telegram_id: int) -> "int | None":
     db = connect()
     try:
@@ -1037,7 +1054,7 @@ async def _check_auth(
             f"Deine Telegram-ID: {tid}"
         )
         return False, None
-    if context is not None and tid in ADMIN_IDS:
+    if context is not None and _is_bot_admin(tid):
         ctx_uid = context.user_data.get("context_uid")
         if ctx_uid is not None:
             return True, ctx_uid
@@ -1051,7 +1068,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(tid):
         await update.message.reply_text("Kein Zugriff. Bitte Admin kontaktieren.")
         return
-    is_admin = tid in ADMIN_IDS
+    is_admin = _is_bot_admin(tid)
     text = (
         "👋 *Zeiterfassung Bot*\n\n"
         "*Freitext-Eingabe:*\n"
@@ -1622,7 +1639,7 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     u = _get_user_row(own_uid)
     own_name = (u["display_name"] or u["username"]) if u else f"ID {own_uid}"
-    if tid in ADMIN_IDS:
+    if _is_bot_admin(tid):
         ctx_uid = context.user_data.get("context_uid")
         if ctx_uid is not None and ctx_uid != own_uid:
             ctx_u = _get_user_row(ctx_uid)
@@ -1640,7 +1657,7 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_als(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
     if not context.args:
@@ -1669,7 +1686,7 @@ async def cmd_als(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
     users = _all_users()
@@ -1685,7 +1702,7 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_alssaldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
     if not context.args:
@@ -1707,7 +1724,7 @@ async def cmd_alssaldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
     if not context.args:
@@ -1731,7 +1748,7 @@ async def cmd_alsurlaub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_alsabw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
     if not context.args:
@@ -2200,7 +2217,7 @@ async def _handle_erinnerung(telegram_id: int, text: str, update: Update) -> Non
 
 async def cmd_testwizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
-    if tid not in ADMIN_IDS:
+    if not _is_bot_admin(tid):
         await update.message.reply_text("Kein Zugriff.")
         return
 
@@ -2257,7 +2274,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Effective user (admin context override)
     uid = own_uid
-    if tid in ADMIN_IDS:
+    if _is_bot_admin(tid):
         ctx_uid = context.user_data.get("context_uid")
         if ctx_uid is not None:
             uid = ctx_uid

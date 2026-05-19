@@ -295,6 +295,10 @@ def init_db():
     if not _col_exists(db, "users", "overtime_last_notified"):
         db.execute("ALTER TABLE users ADD COLUMN overtime_last_notified TEXT")
 
+    if not _col_exists(db, "users", "admin_role"):
+        db.execute("ALTER TABLE users ADD COLUMN admin_role TEXT")
+        db.execute("UPDATE users SET admin_role='sysadmin' WHERE is_admin=1")
+
     db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,

@@ -82,11 +82,45 @@ def current_user():
     db = connect()
     u = db.execute(
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
-        "password_changed, onboarding_done, display_name, email FROM users WHERE id=?",
+        "password_changed, onboarding_done, display_name, email, admin_role FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
     return dict(u) if u else None
+
+
+def is_sysadmin(u=None) -> bool:
+    if u is None:
+        u = current_user()
+    return bool(u and u.get("admin_role") == "sysadmin")
+
+
+def is_timemanager(u=None) -> bool:
+    """True for any admin role (sysadmin or timemanager)."""
+    if u is None:
+        u = current_user()
+    return bool(u and u.get("admin_role") in ("sysadmin", "timemanager"))
+
+
+def set_admin_role(user_id: int, role) -> None:
+    """Set admin_role and sync is_admin flag. role: 'sysadmin', 'timemanager', or None."""
+    db = connect()
+    db.execute(
+        "UPDATE users SET admin_role=?, is_admin=?, updated_at=datetime('now') WHERE id=?",
+        (role or None, 1 if role in ("sysadmin", "timemanager") else 0, user_id),
+    )
+    db.commit()
+    db.close()
+
+
+def set_active(user_id: int, is_active: bool) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET is_active=?, updated_at=datetime('now') WHERE id=?",
+        (1 if is_active else 0, user_id),
+    )
+    db.commit()
+    db.close()
 
 
 def set_password(user_id: int, new_password: str) -> None:
@@ -125,12 +159,30 @@ def login_required(view):
 
 
 def admin_required(view):
+    """Allows both sysadmin and timemanager (any admin role)."""
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
         u = current_user()
         if not u:
             return redirect(url_for("login", next=request.path))
         if not u.get("is_admin"):
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+# Alias – semantically clearer in route definitions
+timemanager_required = admin_required
+
+
+def sysadmin_required(view):
+    """Allows only sysadmin role."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        u = current_user()
+        if not u:
+            return redirect(url_for("login", next=request.path))
+        if u.get("admin_role") != "sysadmin":
             abort(403)
         return view(*args, **kwargs)
     return wrapped

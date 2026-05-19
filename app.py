@@ -7,11 +7,14 @@ import html as _html
 import os
 from db import init_db, seed_defaults, db_path, connect
 from calendar_seed import seed_calendar_2026_nrw
-from auth import has_users, create_user, authenticate, current_user, login_required, admin_required, set_password, set_flags
+from auth import (has_users, create_user, authenticate, current_user, login_required,
+                  admin_required, sysadmin_required, timemanager_required,
+                  set_password, set_flags, set_admin_role, set_active,
+                  is_sysadmin, is_timemanager)
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.4.4"
+APP_VERSION = "v1.4.5"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -7898,7 +7901,7 @@ def export_calendar_days_csv():
 
 
 @app.get("/export/users.csv")
-@admin_required
+@sysadmin_required
 def export_users_csv():
     bootstrap()
     db = connect()
@@ -7924,38 +7927,68 @@ def help_page():
     is_admin = bool(u and u.get("is_admin"))
 
     admin_section = ""
-    if is_admin:
-        admin_section = """
+    _u_for_help = current_user()
+    _is_sysadm_help = is_sysadmin(_u_for_help)
+    if is_admin or is_timemanager(_u_for_help):
+        _sysadmin_help = """
+          <div class="help-entry">
+            <b>🔧 Rollen: Systemadmin &amp; Zeitmanager</b>
+            <p><b>Systemadmin</b> hat vollen Zugriff auf beide Admin-Bereiche. Kann Benutzer anlegen, löschen und Rollen vergeben. Zugriff auf Maileinstellungen, Bot, Backup, Update und Erscheinungsbild.</p>
+            <p><b>Zeitmanager</b> hat Zugriff auf den Bereich <em>Benutzerübersichten</em>: Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Urlaubsübertrag-Ausnahmen. Kann Identität normaler User annehmen. Kein Zugriff auf Systemeinstellungen.</p>
+            <p>Rollenvergabe: <em>Admin → Benutzerübersichten → Benutzer bearbeiten → Rolle</em> (nur für Systemadmin).</p>
+          </div>
+          <div class="help-entry">
+            <b>Benutzerverwaltung (Systemadmin)</b>
+            <p>Neue User anlegen, bestehende bearbeiten, Rollen vergeben und User löschen. Felder: Benutzername, Anzeigename, E-Mail, Rolle, Aktiv-Status, Arbeitsbeginn-Datum.</p>
+          </div>
+          <div class="help-entry">
+            <b>Maileinstellungen (Systemadmin)</b>
+            <p>SMTP-Server, Port, Absender und Anmeldedaten unter <em>Admin → Systemeinstellungen → Maileinstellungen</em>. Über <em>Test senden</em> prüfen.</p>
+          </div>
+          <div class="help-entry">
+            <b>App-Label für Dev/Prod (Systemadmin)</b>
+            <p>Unter <em>Admin → Systemeinstellungen → Erscheinungsbild</em> kann ein Label (z.B. „DEV" oder „PROD") mit Farbe gesetzt werden, das in der Kopfzeile angezeigt wird. Hilfreich um Dev- und Produktivsystem zu unterscheiden.</p>
+          </div>
+          <div class="help-entry">
+            <b>Backup &amp; Restore (Systemadmin)</b>
+            <p><b>Vollständiges Backup</b>: komplette Datenbank als SQLite-Datei.<br>
+            <b>Einstellungen-Backup</b>: Mail- und Bot-Konfiguration als JSON (ohne Passwörter).<br>
+            <b>User-Export/Import</b>: einzelne User mit Zeiteinträgen und Abwesenheiten übertragen.</p>
+          </div>""" if _is_sysadm_help else ""
+
+        admin_section = f"""
     <div class="acc help-acc">
       <button class="acc-hdr" type="button" onclick="haccToggle(this)">
         <span>🛠 Admin-Bereich</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body">
         <div class="acc-inner">
-          <div class="help-entry">
-            <b>Benutzerverwaltung</b>
-            <p>Unter <em>Admin → Benutzer</em> können neue User angelegt, bestehende bearbeitet und deaktiviert werden. Felder: Benutzername, Anzeigename, E-Mail, Admin-Recht, Arbeitsbeginn-Datum.</p>
-          </div>
+          {_sysadmin_help}
           <div class="help-entry">
             <b>Identität annehmen (Impersonation)</b>
-            <p>Im Admin-Bereich bei einem User auf <em>Als dieser User anzeigen</em> klicken. Alle Seiten werden dann aus Sicht dieses Users gerendert. Über den gelben Banner oben zurückwechseln.</p>
+            <p>Im Admin-Bereich bei einem normalen User auf <em>👤 Identität</em> klicken. Alle Seiten werden aus Sicht dieses Users angezeigt. Über den orangen Banner oben zurückwechseln.</p>
             <p>Im Telegram-Bot: <code>/als &lt;username&gt;</code> wechselt den Kontext, <code>/als ich</code> setzt zurück.</p>
           </div>
           <div class="help-entry">
             <b>Zeitschema-Verwaltung</b>
-            <p>Pro User können mehrere Zeitschemata mit unterschiedlichen Gültig-ab-Daten hinterlegt werden. Das Schema mit dem neuesten Gültig-ab-Datum ≤ Arbeitstag gilt. Zum Ersetzen: neueres Schema zuerst löschen.</p>
+            <p>Pro User können mehrere Zeitschemata mit unterschiedlichen Gültig-ab-Daten hinterlegt werden. Unter <em>Admin → Benutzerübersichten → Zeitschemas → Bearbeiten</em>.</p>
           </div>
           <div class="help-entry">
             <b>Urlaubsübertrag-Ausnahme</b>
-            <p>Unter <em>Admin → Benutzer → Bearbeiten</em> kann für einzelne User die 31.03.-Verfallsregel deaktiviert werden. Der Übertrag gilt dann unbegrenzt.</p>
+            <p>Unter <em>Admin → Benutzerübersichten → Urlaubsverwaltung</em> kann für einzelne User die 31.03.-Verfallsregel deaktiviert werden.</p>
           </div>
           <div class="help-entry">
             <b>Abschlüsse verwalten</b>
-            <p>Unter <em>Admin → Abschlüsse</em> können gesperrte Perioden eingesehen und entsperrt werden. Nur Admins können Abschlüsse rückgängig machen.</p>
+            <p>Gesperrte Perioden einsehen und entsperren unter <em>Admin → Benutzerübersichten → Abschlüsse</em>.</p>
           </div>
           <div class="help-entry">
-            <b>Maileinstellungen</b>
-            <p>Unter <em>Admin → Maileinstellungen</em> können SMTP-Server, Port, Absender und Anmeldedaten hinterlegt werden. Über <em>Test senden</em> die Konfiguration prüfen.</p>
+            <b>Gleitzeitkonto Übersicht &amp; Limits</b>
+            <p>Unter <em>Admin → Benutzerübersichten → Gleitzeitkonto</em> werden aktuelle Salden aller User angezeigt. Individuell können Plus- und Minus-Limits in Stunden sowie Benachrichtigungs-E-Mails konfiguriert werden.</p>
+            <p>Intervalle: <b>Einmalig</b> (nur beim ersten Überschreiten), <b>Täglich</b>, <b>Wöchentlich</b>. Benachrichtigt wird der User selbst (E-Mail) und optional ein Vorgesetzter.</p>
+          </div>
+          <div class="help-entry">
+            <b>Urlaubsübersicht &amp; Urlaubslimit</b>
+            <p>Unter <em>Admin → Benutzerübersichten → Urlaubsübersicht</em> sind alle User mit Anspruch, Übertrag, Verbrauch und Resturlaub aufgelistet. Wenn Urlaubskontingent erschöpft ist, wird kein weiterer Urlaub eingetragen (Warn-Hinweis für Admin-Impersonation).</p>
           </div>
         </div>
       </div>
@@ -8398,7 +8431,7 @@ function filterHelp(q){{
 
 
 @app.get("/admin/users")
-@admin_required
+@sysadmin_required
 def admin_users():
     bootstrap()
     u = current_user()
@@ -8472,7 +8505,7 @@ def admin_users():
 
 
 @app.get("/admin/users/new")
-@admin_required
+@sysadmin_required
 def admin_users_new():
     bootstrap()
     u = current_user()
@@ -8503,7 +8536,7 @@ def admin_users_new():
 
 
 @app.post("/admin/users/new")
-@admin_required
+@sysadmin_required
 def admin_users_new_post():
     bootstrap()
     username = (request.form.get("username") or "").strip()
@@ -8539,14 +8572,29 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role FROM users WHERE id=?", (user_id,)).fetchone()
     db.close()
     if not r:
         abort(404)
 
-    admin_checked = "checked" if r["is_admin"] else ""
     active_checked = "checked" if r["is_active"] else ""
     tsd_val = str(r["tracking_start_date"] or "")[:10]
+    _can_edit_role = is_sysadmin(u) and user_id != u["id"]
+
+    # role options for sysadmin dropdown
+    def _role_opt(val, label, cur):
+        sel = "selected" if cur == val else ""
+        return f'<option value="{val}" {sel}>{label}</option>'
+    cur_role = r["admin_role"] or ""
+    role_dropdown = f"""
+        <div style="margin-bottom:12px;">
+          <label>Rolle</label>
+          <select name="admin_role" style="font-size:13px;padding:5px 8px;width:auto;">
+            {_role_opt("","Keine Adminrechte",cur_role)}
+            {_role_opt("timemanager","📋 Zeitmanager",cur_role)}
+            {_role_opt("sysadmin","🔧 Systemadmin",cur_role)}
+          </select>
+        </div>""" if _can_edit_role else ""
 
     # Schedule list for this user
     all_scheds = _get_user_schedules_all(user_id)
@@ -8596,7 +8644,7 @@ def admin_users_edit(user_id: int):
     <div class="card">
       <h3>Benutzer bearbeiten: {r["username"]}</h3>
       <form method="post" action="/admin/users/{user_id}/edit">
-        <label><input type="checkbox" name="is_admin" value="1" {admin_checked}> Admin</label><br>
+        {role_dropdown}
         <label><input type="checkbox" name="is_active" value="1" {active_checked}> aktiv</label><br><br>
 
         <div><label>Arbeitsbeginn (start_date)</label><br>
@@ -8631,9 +8679,30 @@ def admin_users_edit(user_id: int):
 @admin_required
 def admin_users_edit_post(user_id: int):
     bootstrap()
-    is_admin = (request.form.get("is_admin") or "0") == "1"
+    u = current_user()
     is_active = (request.form.get("is_active") or "0") == "1"
-    set_flags(user_id, is_admin=is_admin, is_active=is_active)
+    set_active(user_id, is_active)
+
+    # Role change: only sysadmin, only for other users
+    if is_sysadmin(u) and user_id != u["id"] and "admin_role" in request.form:
+        new_role = (request.form.get("admin_role") or "").strip() or None
+        if new_role not in (None, "sysadmin", "timemanager"):
+            new_role = None
+        # Guard: don't demote last sysadmin
+        if new_role != "sysadmin":
+            db = connect()
+            sysadmin_count = db.execute(
+                "SELECT COUNT(*) FROM users WHERE admin_role='sysadmin' AND is_active=1"
+            ).fetchone()[0]
+            target_is_sysadmin = db.execute(
+                "SELECT admin_role FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            db.close()
+            if (target_is_sysadmin and target_is_sysadmin["admin_role"] == "sysadmin"
+                    and sysadmin_count <= 1):
+                add_flash("Letzter Systemadmin kann nicht degradiert werden.", "error")
+                return redirect(f"/admin/users/{user_id}/edit")
+        set_admin_role(user_id, new_role)
 
     tsd = _parse_date_input(request.form.get("tracking_start_date") or "")
     if tsd:
@@ -8651,7 +8720,7 @@ def admin_users_edit_post(user_id: int):
 
 
 @app.post("/admin/users/<int:user_id>/delete")
-@admin_required
+@sysadmin_required
 def admin_users_delete(user_id: int):
     bootstrap()
     u = current_user()
@@ -9069,7 +9138,7 @@ def admin_home():
     # ── fetch all data ─────────────────────────────────────────────────────────
     db = connect()
     all_users = db.execute(
-        "SELECT id, username, display_name, is_admin, is_active, "
+        "SELECT id, username, display_name, is_admin, is_active, admin_role, "
         "vacation_carryover_exception, contouring_enabled, created_at FROM users ORDER BY username"
     ).fetchall()
     locks_raw = db.execute(
@@ -9092,6 +9161,7 @@ def admin_home():
             locks_by_user[uid][f"{sel_year}-{r['month']:02d}"] = dict(r)
 
     # ── Section 1+2+3: build user table rows ──────────────────────────────────
+    _is_sysadm = is_sysadmin(u)
     user_trs = ""
     sched_trs = ""
     vac_trs = ""
@@ -9100,14 +9170,19 @@ def admin_home():
         display = r["display_name"] or r["username"]
         sub = r["username"] if r["display_name"] else ""
         sub_html = f" <span class='small' style='color:var(--mu);'>({sub})</span>" if sub else ""
-        flags_l = []
-        if r["is_admin"]: flags_l.append("Admin")
-        if not r["is_active"]: flags_l.append("inaktiv")
-        fl = f" <span class='small'>· {', '.join(flags_l)}</span>" if flags_l else ""
+        # Role badge
+        role = r["admin_role"]
+        if role == "sysadmin":
+            role_badge = " <span class='small' style='color:#6366f1;'>🔧 Systemadmin</span>"
+        elif role == "timemanager":
+            role_badge = " <span class='small' style='color:#0891b2;'>📋 Zeitmanager</span>"
+        else:
+            role_badge = ""
+        inact_badge = " <span class='small' style='color:var(--mu);'>· inaktiv</span>" if not r["is_active"] else ""
 
-        # delete / impersonate buttons
+        # delete / impersonate buttons (sysadmin only for delete)
         del_btn = ""
-        if uid != u["id"]:
+        if _is_sysadm and uid != u["id"]:
             safe = display.replace("'", "\\'")
             del_btn = (
                 f'<form method="post" action="/admin/users/{uid}/delete" style="display:contents;" '
@@ -9122,7 +9197,7 @@ def admin_home():
             )
         user_trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{fl}</td>'
+            f'<td>{display}{sub_html}{role_badge}{inact_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
             f'<td><div style="display:flex;gap:4px;flex-wrap:wrap;">'
             f'<a class="btn btn-sm" href="/admin/users/{uid}/edit">Bearbeiten</a>'
@@ -9211,11 +9286,13 @@ def admin_home():
 
     _html_absences  = _tab(_render_admin_absences_section(), "users")
     _html_overtime  = _tab(_render_admin_overtime_section(), "users")
-    _html_appearance = _tab(_render_appearance_section(), "system")
-    _html_backup    = _tab(_render_backup_section(), "system")
-    _html_bot       = _tab(_render_bot_section(), "system")
-    _html_update    = _tab(_render_update_section(), "system")
-    _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system")
+    _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
+    _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
+    _html_bot       = _tab(_render_bot_section(), "system") if _is_sysadm else ""
+    _html_update    = _tab(_render_update_section(), "system") if _is_sysadm else ""
+    _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
+    _new_user_btn   = '<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">+ Neuer Benutzer</button>' if _is_sysadm else ""
+    _default_tab    = "system" if _is_sysadm else "users"
 
     body = f"""
     {flash_html()}
@@ -9252,6 +9329,7 @@ function toggleNewUser(){{
   p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';
 }}
 var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl'];
+var _DEFAULT_TAB='{_default_tab}';
 function switchTab(tab){{
   document.querySelectorAll('.acc[data-tab]').forEach(function(el){{
     el.style.display=el.dataset.tab===tab?'':'none';
@@ -9263,7 +9341,7 @@ function switchTab(tab){{
 }}
 window.addEventListener('DOMContentLoaded',function(){{
   var h=(window.location.hash||'').replace('#','');
-  var tab=sessionStorage.getItem('adminTab')||'system';
+  var tab=sessionStorage.getItem('adminTab')||_DEFAULT_TAB;
   if(h&&_USER_ACCS.indexOf(h)>=0)tab='users';
   switchTab(tab);
   var ss=sessionStorage.getItem('openAcc');
@@ -9279,7 +9357,7 @@ window.addEventListener('DOMContentLoaded',function(){{
 </script>
 
 <div class="tab-bar">
-  <button class="tab-btn active" data-tab="system" type="button" onclick="switchTab('system')">⚙ Systemeinstellungen</button>
+  {"" if not _is_sysadm else '<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">⚙ Systemeinstellungen</button>'}
   <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">👥 Benutzerübersichten</button>
 </div>
 
@@ -9292,7 +9370,7 @@ window.addEventListener('DOMContentLoaded',function(){{
         <div class="acc-inner">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             <span class="small">{len(all_users)} Benutzer</span>
-            <button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">+ Neuer Benutzer</button>
+            {_new_user_btn}
           </div>
 
           <div id="new-user-panel" style="display:none;border:1px solid var(--bd);border-radius:var(--rs);padding:12px;margin-bottom:12px;background:var(--sf);">
@@ -9660,7 +9738,7 @@ function _esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 
 
 @app.get("/admin/backup/download")
-@admin_required
+@sysadmin_required
 def admin_backup_download():
     bootstrap()
     from backup import create_backup_gz
@@ -9676,7 +9754,7 @@ def admin_backup_download():
 
 
 @app.post("/admin/backup/restore")
-@admin_required
+@sysadmin_required
 def admin_backup_restore():
     bootstrap()
     from backup import restore_from_bytes
@@ -9713,7 +9791,7 @@ def admin_backup_restore():
 
 
 @app.post("/admin/backup/auto-config")
-@admin_required
+@sysadmin_required
 def admin_backup_auto_config():
     bootstrap()
     enabled = bool(request.form.get("auto_enabled"))
@@ -9727,7 +9805,7 @@ def admin_backup_auto_config():
 
 
 @app.get("/admin/backup/local/<filename>")
-@admin_required
+@sysadmin_required
 def admin_backup_download_local(filename: str):
     bootstrap()
     from backup import BACKUPS_DIR
@@ -9741,7 +9819,7 @@ def admin_backup_download_local(filename: str):
 
 
 @app.post("/admin/backup/delete/<filename>")
-@admin_required
+@sysadmin_required
 def admin_backup_delete(filename: str):
     bootstrap()
     from backup import BACKUPS_DIR
@@ -9758,7 +9836,7 @@ def admin_backup_delete(filename: str):
 
 
 @app.get("/admin/backup/settings/export")
-@admin_required
+@sysadmin_required
 def admin_backup_settings_export():
     bootstrap()
     import io as _io
@@ -9773,7 +9851,7 @@ def admin_backup_settings_export():
 
 
 @app.post("/admin/backup/settings/import")
-@admin_required
+@sysadmin_required
 def admin_backup_settings_import():
     bootstrap()
     from backup import import_settings
@@ -9797,7 +9875,7 @@ def admin_backup_settings_import():
 
 
 @app.get("/admin/backup/user/export")
-@admin_required
+@sysadmin_required
 def admin_backup_user_export():
     bootstrap()
     import io as _io
@@ -9820,7 +9898,7 @@ def admin_backup_user_export():
 
 
 @app.post("/admin/backup/user/import")
-@admin_required
+@sysadmin_required
 def admin_backup_user_import():
     bootstrap()
     from backup import import_user_data
@@ -10015,7 +10093,7 @@ def _render_update_section() -> str:
 
 
 @app.post("/admin/bot-config/save")
-@admin_required
+@sysadmin_required
 def admin_bot_config_save():
     bootstrap()
     tok = (request.form.get("bot_token") or "").strip()
@@ -10032,7 +10110,7 @@ def admin_bot_config_save():
 
 
 @app.post("/admin/bot/control")
-@admin_required
+@sysadmin_required
 def admin_bot_control():
     bootstrap()
     action = request.form.get("action", "").strip()
@@ -10051,7 +10129,7 @@ def admin_bot_control():
 
 
 @app.post("/admin/bot/setup-service")
-@admin_required
+@sysadmin_required
 def admin_bot_setup_service():
     bootstrap()
     import subprocess
@@ -10082,7 +10160,7 @@ WantedBy=multi-user.target
 
 
 @app.get("/admin/update/check")
-@admin_required
+@sysadmin_required
 def admin_update_check():
     bootstrap()
     commits = _git_pending_commits()
@@ -10092,7 +10170,7 @@ def admin_update_check():
 
 
 @app.post("/admin/update/run")
-@admin_required
+@sysadmin_required
 def admin_update_run():
     bootstrap()
     import threading
@@ -10116,7 +10194,7 @@ def admin_update_run():
 
 
 @app.get("/admin/mail-settings")
-@admin_required
+@sysadmin_required
 def admin_mail_settings():
     bootstrap()
     u = current_user()
@@ -10187,7 +10265,7 @@ def admin_mail_settings():
 
 
 @app.post("/admin/mail-settings")
-@admin_required
+@sysadmin_required
 def admin_mail_settings_save():
     bootstrap()
     mail_server  = (request.form.get("mail_server") or "").strip()
@@ -10207,7 +10285,7 @@ def admin_mail_settings_save():
 
 
 @app.post("/admin/mail-settings/test")
-@admin_required
+@sysadmin_required
 def admin_mail_settings_test():
     bootstrap()
     recipient = (request.form.get("test_recipient") or "").strip()
@@ -10729,7 +10807,7 @@ def admin_overtime_save():
 
 
 @app.post("/admin/overtime/save-defaults")
-@admin_required
+@sysadmin_required
 def admin_overtime_save_defaults():
     bootstrap()
     def _h_to_mins(s: str):
@@ -11121,7 +11199,7 @@ def admin_absences_export():
 
 
 @app.post("/admin/appearance")
-@admin_required
+@sysadmin_required
 def admin_appearance_save():
     bootstrap()
     accent    = (request.form.get("accent_color") or "").strip()
