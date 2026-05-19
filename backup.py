@@ -7,7 +7,8 @@ from pathlib import Path
 
 from db import db_path
 
-BACKUPS_DIR = Path("/opt/zeiterfassung/backups")
+import os as _os
+BACKUPS_DIR = Path(_os.environ.get("BACKUPS_DIR", _os.path.join(_os.path.dirname(__file__), "backups")))
 
 
 def _ensure_dir():

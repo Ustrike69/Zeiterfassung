@@ -1838,7 +1838,6 @@ async def check_auto_backup() -> None:
         return
     _auto_backup_done_today = today
     try:
-        sys.path.insert(0, "/opt/zeiterfassung")
         from backup import create_backup_gz, prune_backups, BACKUPS_DIR
         dest = str(BACKUPS_DIR / f"zeiterfassung_{today}_{backup_time.replace(':','-')}.db.gz")
         create_backup_gz(dest_path=dest)

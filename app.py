@@ -10,9 +10,9 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.4"
+APP_VERSION = "v1.3.5"
 app = Flask(__name__)
-app.secret_key = "change-me"  # set via env in production
+app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
 
 # -------------------------
@@ -9175,7 +9175,7 @@ def _render_backup_section() -> str:
               </div>
               <button class="btn btn-sm" type="submit">Speichern</button>
             </div>
-            <p class="small" style="margin-top:6px;color:var(--mu);">Backups werden lokal unter /opt/zeiterfassung/backups/ gespeichert. Maximal 7 Backups werden behalten.</p>
+            <p class="small" style="margin-top:6px;color:var(--mu);">Backups werden lokal im Backups-Verzeichnis gespeichert. Maximal 7 Backups werden behalten.</p>
           </form>
 
           <hr style="margin:12px 0;">
@@ -9257,7 +9257,7 @@ def admin_backup_restore():
     def _restart():
         import time, os
         time.sleep(1.5)
-        os.system("systemctl restart zeiterfassung")
+        os.system(os.environ.get("RESTART_CMD", "systemctl restart zeiterfassung"))
 
     threading.Thread(target=_restart, daemon=True).start()
     return redirect("/admin#acc-backup")

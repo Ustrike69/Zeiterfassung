@@ -1,0 +1,16 @@
+*.db
+*.db-shm
+*.db-wal
+backups/
+gdrive_service_account.json
+bot_icon.png
+__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.gitignore
+*.md
+tests/
+.venv/
+venv/
