@@ -318,6 +318,22 @@ def init_db():
             (_key,),
         )
 
+    db.execute("""CREATE TABLE IF NOT EXISTS app_config(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    for _key, _default in (
+        ("accent_color", "#2563eb"),
+        ("nav_color", ""),
+        ("app_label", ""),
+        ("app_label_color", "#f59e0b"),
+    ):
+        db.execute(
+            "INSERT OR IGNORE INTO app_config(key, value) VALUES(?, ?)",
+            (_key, _default),
+        )
+
     db.execute("""CREATE TABLE IF NOT EXISTS backup_config(
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL DEFAULT '',

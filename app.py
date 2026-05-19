@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.4.0"
+APP_VERSION = "v1.4.1"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -37,6 +37,24 @@ MOBILE_ASSETS = """
 """
 
 
+def _get_app_config() -> dict:
+    from flask import g
+    if hasattr(g, '_app_config_cache'):
+        return g._app_config_cache
+    try:
+        db = connect()
+        rows = db.execute("SELECT key, value FROM app_config").fetchall()
+        db.close()
+        result = {r["key"]: r["value"] for r in rows}
+    except Exception:
+        result = {}
+    g._app_config_cache = result
+    return result
+
+
+_HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
 def layout(title, body, user, version, show_back=True):
     """Wrapper around templates.layout that injects mobile assets globally."""
     banner = ""
@@ -51,7 +69,24 @@ def layout(title, body, user, version, show_back=True):
             'padding:4px 12px;cursor:pointer;font-weight:600;font-size:14px;">Zurück zu Admin</button>'
             '</form></div>'
         )
-    return base_layout(title, MOBILE_ASSETS + body, user, version, impersonation_banner=banner, show_back=show_back)
+    cfg = _get_app_config()
+    accent = cfg.get("accent_color") or ""
+    nav_color = cfg.get("nav_color") or ""
+    app_label = (cfg.get("app_label") or "").strip()
+    app_label_color = cfg.get("app_label_color") or "#f59e0b"
+
+    root_parts = []
+    if accent and _HEX_COLOR_RE.match(accent):
+        root_parts.append(f"--ac:{accent};--ac-fg:#ffffff;")
+    if nav_color and _HEX_COLOR_RE.match(nav_color):
+        root_parts.append(f"--nav-bg:{nav_color};")
+    extra_root_css = " ".join(root_parts)
+
+    return base_layout(title, MOBILE_ASSETS + body, user, version,
+                       impersonation_banner=banner, show_back=show_back,
+                       extra_root_css=extra_root_css,
+                       app_label=app_label,
+                       app_label_color=app_label_color if _HEX_COLOR_RE.match(app_label_color) else "#f59e0b")
 
 
 def bootstrap():
@@ -9220,13 +9255,16 @@ window.addEventListener('DOMContentLoaded',function(){{
       </div>
     </div>
 
-    <!-- Section 6: Backup & Restore -->
+    <!-- Section 6: Erscheinungsbild -->
+    {_render_appearance_section()}
+
+    <!-- Section 7: Backup & Restore -->
     {_render_backup_section()}
 
-    <!-- Section 7: Telegram Bot -->
+    <!-- Section 8: Telegram Bot -->
     {_render_bot_section()}
 
-    <!-- Section 8: System Update -->
+    <!-- Section 9: System Update -->
     {_render_update_section()}
     """
     return render_template_string(layout("Admin", body, u, APP_VERSION))
@@ -10001,6 +10039,189 @@ def admin_mail_settings_test():
     except Exception as exc:
         add_flash(f"Fehler beim Senden: {exc}", "error")
     return redirect("/admin#acc-mail")
+
+
+def _render_appearance_section() -> str:
+    cfg = _get_app_config()
+    accent    = cfg.get("accent_color") or "#2563eb"
+    nav_color = cfg.get("nav_color") or ""
+    app_label = (cfg.get("app_label") or "")[:10]
+    lbl_color = cfg.get("app_label_color") or "#f59e0b"
+
+    lbl_preview = (
+        f'<span style="background:{_html.escape(lbl_color)};color:#fff;'
+        f'font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;'
+        f'letter-spacing:.07em;text-transform:uppercase;" id="lbl-preview">'
+        f'{_html.escape(app_label) or "VORSCHAU"}</span>'
+    )
+
+    return f"""
+    <div class="acc" id="acc-appearance">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-appearance-body')">
+        <span>🎨 Erscheinungsbild</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-appearance-body">
+        <div class="acc-inner">
+          <form method="post" action="/admin/appearance" id="appearance-form">
+
+            <!-- App-Farben -->
+            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">App-Farben</div>
+
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+              <div>
+                <label style="font-size:12px;">Akzentfarbe</label>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+                  <input type="color" name="accent_color" id="inp-accent" value="{_html.escape(accent)}"
+                    style="width:44px;height:36px;padding:2px;border-radius:6px;cursor:pointer;border:1px solid var(--bd);"
+                    oninput="applyPreview()">
+                  <input type="text" id="inp-accent-txt" value="{_html.escape(accent)}"
+                    style="width:90px;font-size:13px;padding:5px 8px;"
+                    oninput="syncColor('inp-accent','inp-accent-txt')">
+                </div>
+              </div>
+              <div>
+                <label style="font-size:12px;">Navigationsleiste</label>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+                  <input type="color" name="nav_color" id="inp-nav" value="{_html.escape(nav_color) or '#f9fafb'}"
+                    style="width:44px;height:36px;padding:2px;border-radius:6px;cursor:pointer;border:1px solid var(--bd);"
+                    oninput="applyPreview()">
+                  <input type="text" id="inp-nav-txt" value="{_html.escape(nav_color)}"
+                    style="width:90px;font-size:13px;padding:5px 8px;"
+                    placeholder="Standard"
+                    oninput="syncColor('inp-nav','inp-nav-txt')">
+                </div>
+              </div>
+            </div>
+
+            <!-- Schnellauswahl -->
+            <div style="margin-bottom:14px;">
+              <label style="font-size:12px;margin-bottom:6px;display:block;">Schnellauswahl</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-sm"
+                  onclick="setPreset('#2563eb','','','#f59e0b')"
+                  style="border-left:4px solid #2563eb;">Standard</button>
+                <button type="button" class="btn btn-sm"
+                  onclick="setPreset('#16a34a','#f0fdf4','PROD','#16a34a')"
+                  style="border-left:4px solid #16a34a;">Produktion</button>
+                <button type="button" class="btn btn-sm"
+                  onclick="setPreset('#ea580c','#fff7ed','DEV','#ea580c')"
+                  style="border-left:4px solid #ea580c;">Entwicklung</button>
+                <button type="button" class="btn btn-sm"
+                  onclick="setPreset('#7c3aed','#faf5ff','TEST','#7c3aed')"
+                  style="border-left:4px solid #7c3aed;">Test</button>
+              </div>
+            </div>
+
+            <hr style="margin:14px 0;">
+
+            <!-- App-Label -->
+            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">App-Label</div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+              <div>
+                <label style="font-size:12px;">Umgebungsbezeichnung <span style="font-weight:400;color:var(--mu);">(max. 10 Zeichen, leer = kein Label)</span></label>
+                <input type="text" name="app_label" id="inp-label" maxlength="10"
+                  value="{_html.escape(app_label)}"
+                  placeholder="z. B. DEV, TEST, STAGING"
+                  style="font-size:13px;padding:5px 8px;"
+                  oninput="updateLabelPreview()">
+              </div>
+              <div>
+                <label style="font-size:12px;">Label-Farbe</label>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+                  <input type="color" name="app_label_color" id="inp-lbl-color"
+                    value="{_html.escape(lbl_color)}"
+                    style="width:44px;height:36px;padding:2px;border-radius:6px;cursor:pointer;border:1px solid var(--bd);"
+                    oninput="updateLabelPreview()">
+                  <input type="text" id="inp-lbl-color-txt" value="{_html.escape(lbl_color)}"
+                    style="width:90px;font-size:13px;padding:5px 8px;"
+                    oninput="syncColor('inp-lbl-color','inp-lbl-color-txt');updateLabelPreview()">
+                </div>
+              </div>
+              <div style="padding-bottom:4px;">
+                <label style="font-size:12px;">Vorschau in der Navigation</label>
+                <div style="margin-top:6px;background:var(--nav-bg);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;display:inline-flex;align-items:center;gap:8px;">
+                  <span style="font-size:13px;font-weight:700;">Zeiterfassung</span>
+                  {lbl_preview}
+                </div>
+              </div>
+            </div>
+
+            <hr style="margin:14px 0;">
+
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn primary btn-sm" type="submit">Speichern</button>
+              <button class="btn btn-sm" type="button"
+                onclick="setPreset('#2563eb','','','#f59e0b');document.getElementById('inp-label').value='';updateLabelPreview();document.getElementById('appearance-form').submit();">
+                Auf Standard zurücksetzen
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+<script>
+function applyPreview(){{
+  var ac=document.getElementById('inp-accent');
+  var nav=document.getElementById('inp-nav');
+  if(ac)document.getElementById('inp-accent-txt').value=ac.value;
+  if(nav)document.getElementById('inp-nav-txt').value=nav.value;
+  if(ac)document.documentElement.style.setProperty('--ac',ac.value);
+  if(nav)document.documentElement.style.setProperty('--nav-bg',nav.value||'var(--sf)');
+}}
+function syncColor(pickerId,textId){{
+  var txt=document.getElementById(textId);
+  var m=txt.value.match(/^#[0-9a-fA-F]{{3,8}}$/);
+  if(m){{document.getElementById(pickerId).value=txt.value.slice(0,7);}}
+  applyPreview();
+}}
+function setPreset(accent,nav,label,lblColor){{
+  var ai=document.getElementById('inp-accent');
+  var ni=document.getElementById('inp-nav');
+  var li=document.getElementById('inp-label');
+  var lc=document.getElementById('inp-lbl-color');
+  if(ai){{ai.value=accent;document.getElementById('inp-accent-txt').value=accent;}}
+  if(ni){{ni.value=nav||'#f9fafb';document.getElementById('inp-nav-txt').value=nav;}}
+  if(li)li.value=label||'';
+  if(lc){{lc.value=lblColor;document.getElementById('inp-lbl-color-txt').value=lblColor;}}
+  applyPreview();
+  updateLabelPreview();
+}}
+function updateLabelPreview(){{
+  var txt=document.getElementById('inp-label');
+  var clr=document.getElementById('inp-lbl-color');
+  var prev=document.getElementById('lbl-preview');
+  if(!prev)return;
+  var label=(txt?txt.value:'').trim().toUpperCase()||'VORSCHAU';
+  prev.textContent=label;
+  if(clr)prev.style.background=clr.value;
+}}
+</script>"""
+
+
+@app.post("/admin/appearance")
+@admin_required
+def admin_appearance_save():
+    bootstrap()
+    accent    = (request.form.get("accent_color") or "").strip()
+    nav_color = (request.form.get("nav_color") or "").strip()
+    app_label = (request.form.get("app_label") or "").strip()[:10]
+    lbl_color = (request.form.get("app_label_color") or "").strip()
+
+    db = connect()
+    for key, val in [
+        ("accent_color", accent if _HEX_COLOR_RE.match(accent) else "#2563eb"),
+        ("nav_color",    nav_color if (_HEX_COLOR_RE.match(nav_color) if nav_color else True) else ""),
+        ("app_label",    app_label),
+        ("app_label_color", lbl_color if _HEX_COLOR_RE.match(lbl_color) else "#f59e0b"),
+    ]:
+        db.execute(
+            "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+            (key, val),
+        )
+    db.commit()
+    db.close()
+    add_flash("Erscheinungsbild gespeichert.", "success")
+    return redirect("/admin#acc-appearance")
 
 
 if __name__ == "__main__":

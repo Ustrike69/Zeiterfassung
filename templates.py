@@ -1,4 +1,4 @@
-def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "", show_back: bool = True) -> str:
+def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impersonation_banner: str = "", show_back: bool = True, extra_root_css: str = "", app_label: str = "", app_label_color: str = "#f59e0b") -> str:
     nav_html = ""
     if user:
         items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export"), ("/help", "❓ Hilfe")]
@@ -40,6 +40,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
     --danger:#dc2626;--ok:#16a34a;
     --r:12px;--rs:8px;
     --fn:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+    --nav-bg:var(--sf);
   }}
   @media(prefers-color-scheme:dark){{
     :root{{
@@ -48,6 +49,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
       --ac:#3b82f6;
     }}
   }}
+  {f":root{{ {extra_root_css} }}" if extra_root_css else ""}
   *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
   body{{
     font-family:var(--fn);background:var(--bg);color:var(--tx);
@@ -61,7 +63,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
     display:flex;justify-content:space-between;align-items:center;gap:12px;
     padding:12px 16px;
     padding-top:calc(12px + env(safe-area-inset-top,0px));
-    background:var(--sf);border-bottom:1px solid var(--bd);
+    background:var(--nav-bg);border-bottom:1px solid var(--bd);
     position:sticky;top:0;z-index:100;
   }}
   .hdr-title{{font-weight:700;font-size:16px;line-height:1.2;}}
@@ -166,6 +168,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v2.12.11", impe
       <div class="hdr-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{title}</div>
       <div class="hdr-sub">Zeiterfassung {app_version}{" · " + user_display if user_display else ""}</div>
     </div>
+    {f'<span style="background:{app_label_color};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;letter-spacing:.07em;flex-shrink:0;text-transform:uppercase;">{app_label}</span>' if app_label else ""}
   </div>
   {nav_html}
 </header>
