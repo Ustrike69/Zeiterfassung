@@ -10,7 +10,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.2"
+APP_VERSION = "v1.3.3"
 app = Flask(__name__)
 app.secret_key = "change-me"  # set via env in production
 
@@ -3194,7 +3194,7 @@ def balance_view():
                 f"<span style='font-size:10px;padding:1px 5px;border-radius:3px;"
                 f"background:{_abs_bg};color:{_abs_color};font-weight:600;white-space:nowrap;'>{_abs_label}</span>"
                 f"</td>"
-                f"<td></td><td></td><td></td><td></td><td></td>"
+                f"<td></td><td></td><td></td><td></td>"
                 f"</tr>"
             )
             continue
@@ -3206,7 +3206,6 @@ def balance_view():
                 f" onclick=\"location.href='/day/{r['day']}'\">"
                 f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
-                f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;'></td>"
                 f"<td style='padding:4px 2px;'></td>"
@@ -3223,13 +3222,12 @@ def balance_view():
         for _bi, _blk_i in enumerate(_blocks_m):
             _is_first = _bi == 0
             _is_last  = _bi == len(_blocks_m) - 1
-            # Thick separator after last block of day; subtle between sibling blocks
             _border = "border-bottom:1px solid var(--bd);" if _is_last else "border-bottom:1px solid rgba(128,128,128,.13);"
             _t_in  = _blk_i["t_in"]
             if _is_first:
-                _disp_t_out_m = _blocks_m[-1]["t_out"]
-                _disp_brk_m   = str(_total_brk_m) if _total_brk_m else ""
-                _disp_ist_m   = _ist_str_m
+                _t_out_m    = _blocks_m[-1]["t_out"]
+                _disp_brk_m = str(_total_brk_m) if _total_brk_m else ""
+                _disp_ist_m = _ist_str_m
                 _wd_cell    = f"<td style='padding:4px 4px;color:var(--mu);font-size:12px;'>{_wd_m}</td>"
                 _date_cell  = f"<td style='padding:4px 2px;font-weight:500;white-space:nowrap;'>{_date_str_m}</td>"
                 _soll_cell_m = f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_soll_str_m}</td>"
@@ -3238,9 +3236,9 @@ def balance_view():
                     f"color:{_delta_clr_m};'>{_delta_str_m}</td>"
                 )
             else:
-                _disp_t_out_m = _blk_i["t_out"]
-                _disp_brk_m   = ""
-                _disp_ist_m   = ""
+                _t_out_m    = _blk_i["t_out"]
+                _disp_brk_m = ""
+                _disp_ist_m = ""
                 _wd_cell     = "<td style='padding:4px 4px;'></td>"
                 _date_cell   = "<td style='padding:4px 2px;'></td>"
                 _soll_cell_m = "<td style='padding:4px 2px;'></td>"
@@ -3250,8 +3248,7 @@ def balance_view():
                 f" onclick=\"location.href='/day/{r['day']}'\">"
                 f"{_wd_cell}"
                 f"{_date_cell}"
-                f"<td style='padding:4px 2px;'>{_t_in}</td>"
-                f"<td style='padding:4px 2px;'>{_disp_t_out_m}</td>"
+                f"<td style='padding:4px 2px;white-space:nowrap;font-size:12px;'>{_t_in}–{_t_out_m}</td>"
                 f"<td style='padding:4px 2px;text-align:right;color:var(--mu);font-size:12px;'>{_disp_brk_m}</td>"
                 f"<td style='padding:4px 2px;text-align:right;font-size:12px;'>{_disp_ist_m}</td>"
                 f"{_soll_cell_m}"
@@ -3367,7 +3364,6 @@ def balance_view():
           <col style="width:22px;">
           <col style="width:42px;">
           <col>
-          <col style="width:38px;">
           <col style="width:30px;">
           <col style="width:38px;">
           <col style="width:38px;">
@@ -3377,8 +3373,7 @@ def balance_view():
           <tr style="background:var(--sf);">
             <th style="padding:5px 4px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Tag</th>
             <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Dat.</th>
-            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Von</th>
-            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Bis</th>
+            <th style="padding:5px 2px;text-align:left;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Zeit</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Pse</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Ist</th>
             <th style="padding:5px 2px;text-align:right;font-size:10px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--bd);">Soll</th>
