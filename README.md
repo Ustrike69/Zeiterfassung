@@ -4,6 +4,28 @@ Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von 
 
 ---
 
+## Installation
+
+### Proxmox LXC / Debian / Ubuntu
+
+```bash
+curl -sL https://raw.githubusercontent.com/Ustrike69/Zeiterfassung-Deploy/main/proxmox/install.sh | bash
+```
+
+📖 **Ausführliche Installationsanleitung:** [PROXMOX_SETUP.md](https://github.com/Ustrike69/Zeiterfassung-Deploy/blob/main/PROXMOX_SETUP.md)
+
+### Docker
+
+```bash
+docker run -d -p 5000:5000 -v ze_data:/data \
+  -e SECRET_KEY=$(openssl rand -hex 32) \
+  ghcr.io/ustrike69/zeiterfassung:latest
+```
+
+📖 **Deploy-Repository:** [Ustrike69/Zeiterfassung-Deploy](https://github.com/Ustrike69/Zeiterfassung-Deploy)
+
+---
+
 ## Inhaltsverzeichnis
 
 1. [Erste Schritte](#erste-schritte)
