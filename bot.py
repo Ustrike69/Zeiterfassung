@@ -766,7 +766,7 @@ def _do_insert_time_block(
         return f"❌ Konnte nicht eingetragen werden: {e}"
 
 
-def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to: str) -> str:
+def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to: str, is_admin_action: bool = False) -> str:
     try:
         db = connect()
         try:
@@ -781,6 +781,25 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
                 f"⚠️ Es gibt bereits eine Abwesenheit im Zeitraum "
                 f"{_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}."
             )
+
+        warning = ""
+        if absence_type == "Urlaub":
+            year = int(date_from[:4])
+            vc = _vacation_calc(user_id, year)
+            available = float(vc["remaining_total"])
+            requested = _count_working_days(user_id, date_from, date_to, False)
+            if requested > available:
+                if is_admin_action:
+                    warning = (
+                        f"⚠️ Urlaubslimit überschritten – "
+                        f"Verfügbar: {_fmt_days(available)}, Beantragt: {_fmt_days(requested)}\n"
+                    )
+                else:
+                    return (
+                        f"❌ Nicht genügend Urlaubstage. "
+                        f"Verfügbar: {_fmt_days(available)}, Beantragt: {_fmt_days(requested)}"
+                    )
+
         _sonstige = {"Flextag", "Verdi"}
         if absence_type in _sonstige:
             lookup_name = "Sonstige"
@@ -804,7 +823,7 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
             db.commit()
         finally:
             db.close()
-        return f"✅ Eingetragen: {absence_type}\n📅 {_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}"
+        return warning + f"✅ Eingetragen: {absence_type}\n📅 {_fmt_date_de(date_from)} – {_fmt_date_de(date_to)}"
     except Exception as e:
         return f"❌ Konnte nicht eingetragen werden: {e}"
 
@@ -979,7 +998,9 @@ async def _execute_actions(
                 await update.message.reply_text("❌ Konnte nicht eingetragen werden: Unvollständige Abwesenheitsangaben.")
                 continue
 
-            result = _do_insert_absence(uid, absence_type, date_from, date_to)
+            own_uid_check = _get_user_id(update.effective_user.id)
+            is_admin_act = own_uid_check is not None and own_uid_check != uid
+            result = _do_insert_absence(uid, absence_type, date_from, date_to, is_admin_action=is_admin_act)
             await update.message.reply_text(result)
 
         else:

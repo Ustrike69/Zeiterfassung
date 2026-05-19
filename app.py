@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.4.1"
+APP_VERSION = "v1.4.2"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -754,6 +754,49 @@ def _ensure_balance_table(db: sqlite3.Connection) -> None:
     );
     """)
     db.commit()
+
+
+def _fmt_vac_days(d: float) -> str:
+    return str(int(d)) if d == int(d) else f"{d:.1f}"
+
+
+def _count_absence_workdays(user_id: int, date_from: str, date_to: str, is_half_day: int) -> float:
+    if is_half_day and date_from == date_to:
+        return 0.5 if _is_user_workday_by_schedule(user_id, date_from) else 0.0
+    total = 0.0
+    cur = datetime.date.fromisoformat(date_from)
+    end_d = datetime.date.fromisoformat(date_to)
+    while cur <= end_d:
+        if _is_user_workday_by_schedule(user_id, cur.isoformat()):
+            total += 1.0
+        cur += datetime.timedelta(days=1)
+    return total
+
+
+def _vacation_limit_check(
+    user_id: int, date_from: str, date_to: str, is_half_day: int, exclude_id: int = None
+) -> "tuple[float, float] | None":
+    """Return (available, requested) vacation days. None if dates invalid."""
+    if not date_from or not date_to:
+        return None
+    year = int(date_from[:4])
+    vc = _vacation_calc(user_id, year)
+    available = float(vc["remaining_total"])
+    if exclude_id is not None:
+        db = connect()
+        row = db.execute(
+            "SELECT a.date_from, a.date_to, a.is_half_day FROM absences a "
+            "JOIN absence_types t ON t.id=a.type_id "
+            "WHERE a.id=? AND LOWER(t.name) LIKE '%urlaub%'",
+            (exclude_id,),
+        ).fetchone()
+        db.close()
+        if row:
+            available += _count_absence_workdays(
+                user_id, str(row["date_from"]), str(row["date_to"]), int(row["is_half_day"])
+            )
+    requested = _count_absence_workdays(user_id, date_from, date_to, is_half_day)
+    return available, requested
 
 
 def _get_start_balance_minutes(user_id: int) -> int:
@@ -3840,6 +3883,30 @@ def absences_new_post():
         add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
         return redirect(url_for("absences_new"))
 
+    if type_name == "Urlaub" and not u.get("is_admin"):
+        chk = _vacation_limit_check(u["id"], date_from, date_to, is_half_day)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                db.close()
+                add_flash(
+                    f"Nicht genügend Urlaubstage verfügbar. "
+                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    "error",
+                )
+                return redirect(url_for("absences_new"))
+    elif type_name == "Urlaub" and session.get("impersonator_id"):
+        chk = _vacation_limit_check(u["id"], date_from, date_to, is_half_day)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                add_flash(
+                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    "error",
+                )
+
     if _has_overlap(db, u["id"], date_from, date_to):
         db.close()
         add_flash("Überschneidung mit vorhandener Abwesenheit. Bitte Zeitraum anpassen.", "error")
@@ -3966,6 +4033,30 @@ def absences_edit_post(absence_id: int):
             db.close()
             add_flash(sd_err, "error")
             return redirect(f"/absences/{absence_id}/edit")
+
+    if type_name == "Urlaub" and not u.get("is_admin"):
+        chk = _vacation_limit_check(u["id"], date_from, date_to, is_half_day, exclude_id=absence_id)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                db.close()
+                add_flash(
+                    f"Nicht genügend Urlaubstage verfügbar. "
+                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    "error",
+                )
+                return redirect(f"/absences/{absence_id}/edit")
+    elif type_name == "Urlaub" and session.get("impersonator_id"):
+        chk = _vacation_limit_check(u["id"], date_from, date_to, is_half_day, exclude_id=absence_id)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                add_flash(
+                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    "error",
+                )
 
     if _has_overlap(db, u["id"], date_from, date_to, exclude_id=absence_id):
         db.close()
@@ -5656,6 +5747,30 @@ def day_absence_add(day: str):
         db.close()
         add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
         return redirect(f"/day/{day}")
+
+    if type_name == "Urlaub" and not u.get("is_admin"):
+        chk = _vacation_limit_check(u["id"], day, day, is_half_day)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                db.close()
+                add_flash(
+                    f"Nicht genügend Urlaubstage verfügbar. "
+                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    "error",
+                )
+                return redirect(f"/day/{day}")
+    elif type_name == "Urlaub" and session.get("impersonator_id"):
+        chk = _vacation_limit_check(u["id"], day, day, is_half_day)
+        if chk is not None:
+            available, requested = chk
+            if requested > available:
+                add_flash(
+                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
+                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    "error",
+                )
 
     overlap = db.execute(
         """
@@ -9255,16 +9370,19 @@ window.addEventListener('DOMContentLoaded',function(){{
       </div>
     </div>
 
-    <!-- Section 6: Erscheinungsbild -->
+    <!-- Section 6: Urlaubsübersicht -->
+    {_render_admin_absences_section()}
+
+    <!-- Section 7: Erscheinungsbild -->
     {_render_appearance_section()}
 
     <!-- Section 7: Backup & Restore -->
     {_render_backup_section()}
 
-    <!-- Section 8: Telegram Bot -->
+    <!-- Section 9: Telegram Bot -->
     {_render_bot_section()}
 
-    <!-- Section 9: System Update -->
+    <!-- Section 10: System Update -->
     {_render_update_section()}
     """
     return render_template_string(layout("Admin", body, u, APP_VERSION))
@@ -10041,6 +10159,248 @@ def admin_mail_settings_test():
     return redirect("/admin#acc-mail")
 
 
+def _render_admin_absences_section() -> str:
+    today = datetime.date.today()
+    yesterday = (today - datetime.timedelta(days=1)).isoformat()
+
+    # --- year for vacation status ---
+    try:
+        abs_year = int(request.args.get("abs_year") or today.year)
+    except (ValueError, TypeError):
+        abs_year = today.year
+    year_start = f"{abs_year}-01-01"
+    year_end = f"{abs_year}-12-31"
+
+    available_years = list(range(max(today.year - 3, 2020), today.year + 2))
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == abs_year else ""}>{y}</option>'
+        for y in reversed(available_years)
+    )
+
+    db = connect()
+    active_users = db.execute(
+        "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    db.close()
+
+    # --- Section 1: vacation status all users ---
+    vac_rows = ""
+    for u_row in active_users:
+        uid = u_row["id"]
+        name = _html.escape(u_row["display_name"] or u_row["username"])
+        vc = _vacation_calc(uid, abs_year)
+        entitlement = vc["entitlement"]
+        eff_carry = vc["effective_carryover"]
+        total = entitlement + eff_carry
+        used_total = vc["used_total"]
+        genommen = _vacation_used_days(uid, abs_year, date_to_limit=yesterday)
+        geplant = max(0.0, used_total - genommen)
+        remaining = vc["remaining_total"]
+        if remaining > 0:
+            rem_col = "var(--ok)"
+        elif remaining == 0:
+            rem_col = "var(--mu)"
+        else:
+            rem_col = "var(--danger)"
+        vac_rows += (
+            f"<tr><td>{name}</td>"
+            f"<td style='text-align:center;'>{_fmt_vac_days(entitlement)}</td>"
+            f"<td style='text-align:center;'>{_fmt_vac_days(eff_carry)}</td>"
+            f"<td style='text-align:center;font-weight:600;'>{_fmt_vac_days(total)}</td>"
+            f"<td style='text-align:center;'>{_fmt_vac_days(genommen)}</td>"
+            f"<td style='text-align:center;'>{_fmt_vac_days(geplant)}</td>"
+            f"<td style='text-align:center;font-weight:600;color:{rem_col};'>{_fmt_vac_days(remaining)}</td>"
+            f"</tr>"
+        )
+
+    # --- Section 2: per-user absences ---
+    abs_from = (request.args.get("abs_from") or year_start).strip()
+    abs_to = (request.args.get("abs_to") or year_end).strip()
+    sel_uid_str = (request.args.get("abs_uid") or "").strip()
+    sel_uid = int(sel_uid_str) if sel_uid_str.isdigit() else (active_users[0]["id"] if active_users else None)
+
+    user_opts = "".join(
+        f'<option value="{u_row["id"]}" {"selected" if u_row["id"] == sel_uid else ""}>'
+        f'{_html.escape(u_row["display_name"] or u_row["username"])}</option>'
+        for u_row in active_users
+    )
+
+    detail_rows = ""
+    if sel_uid:
+        db = connect()
+        abs_list = db.execute(
+            """SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name
+               FROM absences a JOIN absence_types t ON a.type_id = t.id
+               WHERE a.user_id = ? AND a.date_to >= ? AND a.date_from <= ?
+               ORDER BY a.date_from""",
+            (sel_uid, abs_from, abs_to),
+        ).fetchall()
+        db.close()
+        type_sums: dict[str, float] = {}
+        for row in abs_list:
+            df = str(row["date_from"])[:10]
+            dt = str(row["date_to"])[:10]
+            half = int(row["is_half_day"] or 0)
+            cmt = (row["comment"] or "").strip()
+            tname = row["type_name"]
+            disp_type = cmt if (tname == "Sonstige" and cmt) else tname
+            days = _count_absence_workdays(sel_uid, df, dt, half)
+            type_sums[disp_type] = type_sums.get(disp_type, 0.0) + days
+            detail_rows += (
+                f"<tr>"
+                f"<td style='font-size:12px;'>{_fmt_date_de(df)}</td>"
+                f"<td style='font-size:12px;'>{_fmt_date_de(dt)}</td>"
+                f"<td style='font-size:12px;'>{_html.escape(disp_type)}</td>"
+                f"<td style='text-align:center;font-size:12px;'>{_fmt_vac_days(days)}</td>"
+                f"<td style='font-size:12px;color:var(--mu);'>{_html.escape(cmt) if tname != 'Sonstige' else ''}</td>"
+                f"</tr>"
+            )
+        if type_sums:
+            sum_parts = " &nbsp;·&nbsp; ".join(
+                f"<b>{_html.escape(t)}:</b> {_fmt_vac_days(v)}"
+                for t, v in sorted(type_sums.items())
+            )
+            detail_rows += (
+                f"<tr><td colspan='5' style='font-size:12px;font-weight:600;"
+                f"border-top:2px solid var(--bd);padding-top:8px;'>Summe: {sum_parts}</td></tr>"
+            )
+    if not detail_rows:
+        detail_rows = "<tr><td colspan='5' style='color:var(--mu);font-size:13px;'>Keine Abwesenheiten im gewählten Zeitraum.</td></tr>"
+
+    # --- Section 3: compact overview all users ---
+    db = connect()
+    all_abs = db.execute(
+        """SELECT a.user_id, a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name
+           FROM absences a JOIN absence_types t ON a.type_id = t.id
+           WHERE a.date_to >= ? AND a.date_from <= ?""",
+        (abs_from, abs_to),
+    ).fetchall()
+    db.close()
+
+    user_type_sums: dict[int, dict[str, float]] = {
+        u_row["id"]: {"Urlaub": 0.0, "Krank": 0.0, "Flextag": 0.0, "Verdi": 0.0, "Sonstige": 0.0}
+        for u_row in active_users
+    }
+    for ab in all_abs:
+        uid_ab = ab["user_id"]
+        if uid_ab not in user_type_sums:
+            continue
+        df = str(ab["date_from"])[:10]
+        dt = str(ab["date_to"])[:10]
+        half = int(ab["is_half_day"] or 0)
+        cmt = (ab["comment"] or "").strip().lower()
+        tname = ab["type_name"]
+        days = _count_absence_workdays(uid_ab, df, dt, half)
+        if tname == "Urlaub":
+            user_type_sums[uid_ab]["Urlaub"] += days
+        elif tname == "Krank":
+            user_type_sums[uid_ab]["Krank"] += days
+        elif tname == "Sonstige" and cmt == "flextag":
+            user_type_sums[uid_ab]["Flextag"] += days
+        elif tname == "Sonstige" and cmt == "verdi":
+            user_type_sums[uid_ab]["Verdi"] += days
+        else:
+            user_type_sums[uid_ab]["Sonstige"] += days
+
+    overview_rows = ""
+    for u_row in active_users:
+        uid_ov = u_row["id"]
+        s = user_type_sums.get(uid_ov, {})
+        cells = "".join(
+            f"<td style='text-align:center;font-size:12px;'>"
+            f"{'–' if s.get(k, 0.0) == 0 else _fmt_vac_days(s[k])}</td>"
+            for k in ("Urlaub", "Krank", "Flextag", "Verdi", "Sonstige")
+        )
+        overview_rows += f"<tr><td style='font-size:12px;'>{_html.escape(u_row['display_name'] or u_row['username'])}</td>{cells}</tr>"
+
+    export_url = f"/admin/absences/export?uid={sel_uid or ''}&from={abs_from}&to={abs_to}"
+
+    return f"""
+    <div class="acc" id="acc-absoverview">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-absoverview-body')">
+        <span>🏖 Urlaubsübersicht</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-absoverview-body">
+        <div class="acc-inner">
+
+          <!-- Urlaubsstatus alle User -->
+          <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px;flex-wrap:wrap;">
+            <input type="hidden" name="abs_uid" value="{_html.escape(sel_uid_str)}">
+            <input type="hidden" name="abs_from" value="{_html.escape(abs_from)}">
+            <input type="hidden" name="abs_to" value="{_html.escape(abs_to)}">
+            <div><label style="font-size:12px;">Urlaubsstatus Jahr</label><br>
+              <select name="abs_year" style="font-size:13px;padding:4px 8px;">{year_opts}</select>
+            </div>
+            <button class="btn btn-sm" type="submit">Anzeigen</button>
+          </form>
+          <div class="table-scroll" style="margin-bottom:16px;">
+            <table>
+              <thead><tr>
+                <th>Name</th>
+                <th style="text-align:center;">Anspruch</th>
+                <th style="text-align:center;">Übertrag</th>
+                <th style="text-align:center;">Gesamt</th>
+                <th style="text-align:center;">Genommen</th>
+                <th style="text-align:center;">Geplant</th>
+                <th style="text-align:center;">Verfügbar</th>
+              </tr></thead>
+              <tbody>{vac_rows or "<tr><td colspan='7' style='color:var(--mu);'>Keine Benutzer.</td></tr>"}</tbody>
+            </table>
+          </div>
+
+          <hr style="margin:14px 0;">
+
+          <!-- Abwesenheiten je User -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Abwesenheiten je Benutzer</div>
+          <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
+            <input type="hidden" name="abs_year" value="{abs_year}">
+            <div><label style="font-size:12px;">Benutzer</label><br>
+              <select name="abs_uid" style="font-size:13px;padding:4px 8px;">{user_opts}</select>
+            </div>
+            <div><label style="font-size:12px;">Von</label><br>
+              {_date_input("abs_from", abs_from)}
+            </div>
+            <div><label style="font-size:12px;">Bis</label><br>
+              {_date_input("abs_to", abs_to)}
+            </div>
+            <div style="padding-bottom:2px;display:flex;gap:6px;align-items:flex-end;">
+              <button class="btn btn-sm" type="submit">Anzeigen</button>
+              <a class="btn btn-sm" href="{_html.escape(export_url)}">CSV ↓</a>
+            </div>
+          </form>
+          <div class="table-scroll" style="margin-bottom:16px;">
+            <table>
+              <thead><tr><th>Von</th><th>Bis</th><th>Typ</th><th style="text-align:center;">Tage</th><th>Bemerkung</th></tr></thead>
+              <tbody>{detail_rows}</tbody>
+            </table>
+          </div>
+
+          <hr style="margin:14px 0;">
+
+          <!-- Kompakte Übersicht alle User -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">
+            Abwesenheiten alle Benutzer
+            <span style="font-size:11px;font-weight:400;color:var(--mu);">{_fmt_date_de(abs_from)} – {_fmt_date_de(abs_to)}</span>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr>
+                <th>Name</th>
+                <th style="text-align:center;">Urlaub</th>
+                <th style="text-align:center;">Krank</th>
+                <th style="text-align:center;">Flextag</th>
+                <th style="text-align:center;">Verdi</th>
+                <th style="text-align:center;">Sonstige</th>
+              </tr></thead>
+              <tbody>{overview_rows or "<tr><td colspan='6' style='color:var(--mu);'>Keine Daten.</td></tr>"}</tbody>
+            </table>
+          </div>
+
+        </div>
+      </div>
+    </div>"""
+
+
 def _render_appearance_section() -> str:
     cfg = _get_app_config()
     accent    = cfg.get("accent_color") or "#2563eb"
@@ -10196,6 +10556,98 @@ function updateLabelPreview(){{
   if(clr)prev.style.background=clr.value;
 }}
 </script>"""
+
+
+@app.get("/admin/absences")
+@admin_required
+def admin_absences():
+    bootstrap()
+    u = current_user()
+    today = datetime.date.today()
+    year = today.year
+    try:
+        year = int(request.args.get("abs_year") or year)
+    except (ValueError, TypeError):
+        pass
+    year_start = f"{year}-01-01"
+    year_end = f"{year}-12-31"
+    abs_from = (request.args.get("abs_from") or year_start).strip()
+    abs_to = (request.args.get("abs_to") or year_end).strip()
+    sel_uid_str = (request.args.get("abs_uid") or "").strip()
+
+    db = connect()
+    active_users = db.execute(
+        "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    db.close()
+
+    sel_uid = int(sel_uid_str) if sel_uid_str.isdigit() else (active_users[0]["id"] if active_users else None)
+    sel_user_name = next(
+        ((_html.escape(r["display_name"] or r["username"])) for r in active_users if r["id"] == sel_uid), "–"
+    )
+    body = f"{flash_html()}{_render_admin_absences_section()}"
+    return render_template_string(layout("Admin: Abschlüsse", body, u, APP_VERSION))
+
+
+@app.get("/admin/absences/export")
+@admin_required
+def admin_absences_export():
+    bootstrap()
+    today = datetime.date.today()
+    year = today.year
+    try:
+        year = int(request.args.get("abs_year") or year)
+    except (ValueError, TypeError):
+        pass
+    year_start = f"{year}-01-01"
+    year_end = f"{year}-12-31"
+    abs_from = (request.args.get("from") or year_start).strip()
+    abs_to = (request.args.get("to") or year_end).strip()
+    uid_str = (request.args.get("uid") or "").strip()
+
+    db = connect()
+    if uid_str.isdigit():
+        users = db.execute(
+            "SELECT id, username, display_name FROM users WHERE id=? AND is_active=1", (int(uid_str),)
+        ).fetchall()
+    else:
+        users = db.execute(
+            "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
+        ).fetchall()
+
+    rows_out = []
+    for u_row in users:
+        uid = u_row["id"]
+        name = u_row["display_name"] or u_row["username"]
+        abs_list = db.execute(
+            """SELECT a.date_from, a.date_to, a.is_half_day, a.comment, t.name AS type_name
+               FROM absences a JOIN absence_types t ON a.type_id = t.id
+               WHERE a.user_id = ? AND a.date_to >= ? AND a.date_from <= ?
+               ORDER BY a.date_from""",
+            (uid, abs_from, abs_to),
+        ).fetchall()
+        for row in abs_list:
+            df = str(row["date_from"])[:10]
+            dt = str(row["date_to"])[:10]
+            half = int(row["is_half_day"] or 0)
+            cmt = (row["comment"] or "").strip()
+            tname = row["type_name"]
+            disp_type = cmt if (tname == "Sonstige" and cmt) else tname
+            days = _count_absence_workdays(uid, df, dt, half)
+            rows_out.append((name, df, dt, disp_type, _fmt_vac_days(days), cmt if tname != "Sonstige" else ""))
+    db.close()
+
+    import io as _io
+    buf = _io.BytesIO()
+    buf.write(b"\xef\xbb\xbf")  # UTF-8 BOM for Excel
+    header = "Name;Datum Von;Datum Bis;Typ;Arbeitstage;Bemerkung\r\n"
+    buf.write(header.encode("utf-8"))
+    for cols in rows_out:
+        line = ";".join(c.replace(";", ",") for c in cols) + "\r\n"
+        buf.write(line.encode("utf-8"))
+    buf.seek(0)
+    fname = f"abwesenheiten_{abs_from}_{abs_to}.csv"
+    return send_file(buf, mimetype="text/csv", as_attachment=True, download_name=fname)
 
 
 @app.post("/admin/appearance")
