@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.8"
+APP_VERSION = "v1.3.9"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -9222,6 +9222,12 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 6: Backup & Restore -->
     {_render_backup_section()}
+
+    <!-- Section 7: Telegram Bot -->
+    {_render_bot_section()}
+
+    <!-- Section 8: System Update -->
+    {_render_update_section()}
     """
     return render_template_string(layout("Admin", body, u, APP_VERSION))
 
