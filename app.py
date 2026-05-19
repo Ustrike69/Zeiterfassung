@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.7"
+APP_VERSION = "v1.3.8"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -6438,6 +6438,115 @@ def _fmt_backup_size(n: int) -> str:
     return f"{n/1024/1024:.1f} MB"
 
 
+# ── Bot-Config helpers ─────────────────────────────────────────────────────────
+
+def _get_bot_config() -> dict:
+    db = connect()
+    try:
+        rows = db.execute("SELECT key, value FROM bot_config").fetchall()
+    except Exception:
+        rows = []
+    finally:
+        db.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def _save_bot_config(token: str, api_key: str, admin_ids: str) -> None:
+    db = connect()
+    try:
+        for key, val in (("bot_token", token), ("anthropic_api_key", api_key), ("admin_telegram_ids", admin_ids)):
+            db.execute(
+                "INSERT OR REPLACE INTO bot_config(key,value,updated_at) VALUES(?,?,datetime('now'))",
+                (key, val),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+# ── System helpers ─────────────────────────────────────────────────────────────
+
+def _bot_service_status() -> str:
+    import subprocess
+    try:
+        r = subprocess.run(["systemctl", "is-active", "zeiterfassung-bot"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _bot_service_exists() -> bool:
+    return os.path.exists("/etc/systemd/system/zeiterfassung-bot.service")
+
+
+def _git_pending_commits() -> "list[str] | None":
+    import subprocess
+    try:
+        subprocess.run(
+            ["git", "-C", "/opt/zeiterfassung", "fetch", "origin", "main", "--quiet"],
+            capture_output=True, timeout=15,
+        )
+        r = subprocess.run(
+            ["git", "-C", "/opt/zeiterfassung", "log", "HEAD..origin/main", "--oneline"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
+        return lines
+    except Exception:
+        return None
+
+
+def _git_last_commit_info() -> str:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "-C", "/opt/zeiterfassung", "log", "-1",
+             "--format=%h  %s  (%cd)", "--date=format:%d.%m.%Y %H:%M"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip()
+    except Exception:
+        return "–"
+
+
+def _service_started_at(name: str) -> str:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", name, "--property=ActiveEnterTimestamp"],
+            capture_output=True, text=True, timeout=5,
+        )
+        val = r.stdout.strip().replace("ActiveEnterTimestamp=", "").strip()
+        return val or "–"
+    except Exception:
+        return "–"
+
+
+def _run_update() -> "tuple[bool, list[str]]":
+    import subprocess
+    project = "/opt/zeiterfassung"
+    out = []
+    r1 = subprocess.run(
+        ["git", "-C", project, "pull", "origin", "main"],
+        capture_output=True, text=True, timeout=60,
+    )
+    out.append("git pull:")
+    out.append(r1.stdout.strip() or r1.stderr.strip() or "(keine Ausgabe)")
+    if r1.returncode != 0:
+        return False, out
+    r2 = subprocess.run(
+        [f"{project}/.venv/bin/pip", "install", "-r", f"{project}/requirements.txt", "-q"],
+        capture_output=True, text=True, timeout=120,
+    )
+    out.append("pip install:")
+    msg = r2.stdout.strip()
+    if r2.stderr.strip():
+        msg += ("\n" if msg else "") + r2.stderr.strip()
+    out.append(msg or "(keine neuen Pakete)")
+    return r2.returncode == 0, out
+
+
 def _send_mail(to: str, subject: str, body_text: str, attachment_name: str, attachment_bytes: bytes) -> None:
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -9307,6 +9416,267 @@ def admin_backup_delete(filename: str):
     else:
         add_flash("Datei nicht gefunden.", "error")
     return redirect("/admin#acc-backup")
+
+
+# ── Bot section ────────────────────────────────────────────────────────────────
+
+def _render_bot_section() -> str:
+    import html as _h
+    cfg = _get_bot_config()
+    tok_set = bool(cfg.get("bot_token"))
+    api_set = bool(cfg.get("anthropic_api_key"))
+    admin_ids = cfg.get("admin_telegram_ids") or ""
+
+    status = _bot_service_status()
+    svc_exists = _bot_service_exists()
+
+    if status == "active":
+        status_badge = "<span style='color:var(--ok);font-weight:600;'>● Läuft</span>"
+    elif status in ("inactive", "failed", "activating"):
+        status_badge = f"<span style='color:var(--danger);font-weight:600;'>● {status.capitalize()}</span>"
+    elif status == "not-found":
+        status_badge = "<span style='color:var(--mu);font-weight:600;'>● Nicht eingerichtet</span>"
+    else:
+        status_badge = f"<span style='color:var(--mu);'>● {_h.escape(status)}</span>"
+
+    setup_btn = ""
+    if not svc_exists:
+        setup_btn = """
+          <form method="post" action="/admin/bot/setup-service" style="display:inline;">
+            <button class="btn btn-sm" type="submit">⚙ Service einrichten</button>
+          </form>"""
+
+    tok_hint = "<span style='color:var(--ok);font-size:11px;'>gesetzt</span>" if tok_set else "<span style='color:var(--mu);font-size:11px;'>leer</span>"
+    api_hint = "<span style='color:var(--ok);font-size:11px;'>gesetzt</span>" if api_set else "<span style='color:var(--mu);font-size:11px;'>leer</span>"
+
+    return f"""
+    <div class="acc" id="acc-bot">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-bot-body')">
+        <span>🤖 Telegram Bot</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-bot-body">
+        <div class="acc-inner">
+
+          <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Bot-Konfiguration</div>
+          <form method="post" action="/admin/bot-config/save" style="margin-bottom:18px;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+              <div style="flex:1;min-width:220px;">
+                <label style="font-size:12px;">Bot-Token {tok_hint}</label>
+                <input type="password" name="bot_token" value="" placeholder="{'nicht ändern' if tok_set else 'Token von @BotFather'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
+                <div class="small" style="color:var(--mu);margin-top:3px;">Token von @BotFather in Telegram</div>
+              </div>
+              <div style="flex:1;min-width:220px;">
+                <label style="font-size:12px;">Anthropic API Key {api_hint}</label>
+                <input type="password" name="anthropic_api_key" value="" placeholder="{'nicht ändern' if api_set else 'sk-ant-...'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
+                <div class="small" style="color:var(--mu);margin-top:3px;">Von console.anthropic.com – optional, für Spracheingabe</div>
+              </div>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label style="font-size:12px;">Admin Telegram-IDs (kommagetrennt)</label>
+              <input type="text" name="admin_telegram_ids" value="{_h.escape(admin_ids)}" placeholder="z.B. 123456789, 987654321" style="font-size:13px;padding:5px 8px;min-width:280px;">
+              <div class="small" style="color:var(--mu);margin-top:3px;">Telegram-IDs der Bot-Admins – bei @userinfobot erfragen</div>
+            </div>
+            <button class="btn primary btn-sm" type="submit">Speichern</button>
+          </form>
+
+          <hr style="margin:12px 0;">
+
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Bot-Status</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+            <div>Status: {status_badge}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <form method="post" action="/admin/bot/control" style="display:inline;">
+              <input type="hidden" name="action" value="start">
+              <button class="btn btn-sm" type="submit">▶ Starten</button>
+            </form>
+            <form method="post" action="/admin/bot/control" style="display:inline;">
+              <input type="hidden" name="action" value="stop">
+              <button class="btn btn-sm" type="submit">■ Stoppen</button>
+            </form>
+            <form method="post" action="/admin/bot/control" style="display:inline;">
+              <input type="hidden" name="action" value="restart">
+              <button class="btn btn-sm" type="submit">↺ Neu starten</button>
+            </form>
+            {setup_btn}
+          </div>
+
+        </div>
+      </div>
+    </div>"""
+
+
+# ── Update section ─────────────────────────────────────────────────────────────
+
+def _render_update_section() -> str:
+    import sys as _sys, platform as _plat
+    import html as _h
+    last_commit = _h.escape(_git_last_commit_info())
+    started_web = _h.escape(_service_started_at("zeiterfassung"))
+    started_bot = _h.escape(_service_started_at("zeiterfassung-bot"))
+    py_ver = _h.escape(_sys.version.split()[0])
+    os_info = _h.escape(_plat.platform())
+
+    return f"""
+    <div class="acc" id="acc-update">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-update-body')">
+        <span>🔄 System Update</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-update-body">
+        <div class="acc-inner">
+
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Aktueller Stand</div>
+          <table style="width:auto;margin-bottom:12px;">
+            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">Version</td><td style="font-size:13px;">{APP_VERSION}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">Letzter Commit</td><td style="font-size:12px;font-family:monospace;">{last_commit}</td></tr>
+          </table>
+
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;">
+            <button class="btn btn-sm" type="button" onclick="checkUpdates(this)">🔍 Auf Updates prüfen</button>
+            <span id="update-check-result" style="font-size:13px;"></span>
+          </div>
+
+          <hr style="margin:12px 0;">
+
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Update durchführen</div>
+          <p class="small" style="color:var(--mu);">Führt git pull + pip install aus und startet den Service neu.</p>
+          <form method="post" action="/admin/update/run"
+                onsubmit="return confirm('System wirklich aktualisieren?\\n\\nDer Service wird nach dem Update neu gestartet.');">
+            <button class="btn primary btn-sm" type="submit">⬆ Jetzt aktualisieren</button>
+          </form>
+
+          <hr style="margin:12px 0;">
+
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">System-Info</div>
+          <table style="width:auto;">
+            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">Python</td><td style="font-size:12px;">{py_ver}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">Betriebssystem</td><td style="font-size:12px;">{os_info}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">Web-Service seit</td><td style="font-size:12px;">{started_web}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">Bot-Service seit</td><td style="font-size:12px;">{started_bot}</td></tr>
+          </table>
+
+        </div>
+      </div>
+    </div>
+    <script>
+    function checkUpdates(btn) {{
+      btn.disabled = true;
+      btn.textContent = '⏳ Prüfe…';
+      var el = document.getElementById('update-check-result');
+      el.textContent = '';
+      fetch('/admin/update/check')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+          btn.disabled = false;
+          btn.textContent = '🔍 Auf Updates prüfen';
+          if(d.error) {{el.textContent = '⚠ ' + d.error; el.style.color='var(--danger)';}}
+          else if(d.count === 0) {{el.textContent = '✓ Aktuell'; el.style.color='var(--ok)';}}
+          else {{el.innerHTML = '<b style="color:var(--danger);">' + d.count + ' Update(s) verfügbar</b>: ' + d.commits.slice(0,3).map(function(c){{return '<code>'+c+'</code>';}}).join(', ');}}
+        }})
+        .catch(function(){{btn.disabled=false;btn.textContent='🔍 Auf Updates prüfen';el.textContent='⚠ Fehler';el.style.color='var(--danger)';}});
+    }}
+    </script>"""
+
+
+@app.post("/admin/bot-config/save")
+@admin_required
+def admin_bot_config_save():
+    bootstrap()
+    tok = (request.form.get("bot_token") or "").strip()
+    api = (request.form.get("anthropic_api_key") or "").strip()
+    ids = (request.form.get("admin_telegram_ids") or "").strip()
+    cfg = _get_bot_config()
+    if not tok:
+        tok = cfg.get("bot_token") or ""
+    if not api:
+        api = cfg.get("anthropic_api_key") or ""
+    _save_bot_config(tok, api, ids)
+    add_flash("Bot-Konfiguration gespeichert. Bot neu starten, damit Änderungen aktiv werden.", "success")
+    return redirect("/admin#acc-bot")
+
+
+@app.post("/admin/bot/control")
+@admin_required
+def admin_bot_control():
+    bootstrap()
+    action = request.form.get("action", "").strip()
+    if action not in ("start", "stop", "restart"):
+        abort(400)
+    import subprocess
+    r = subprocess.run(
+        ["systemctl", action, "zeiterfassung-bot"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode == 0:
+        add_flash(f"Bot-Service: {action} erfolgreich.", "success")
+    else:
+        add_flash(f"Fehler: {r.stderr.strip() or r.stdout.strip()}", "error")
+    return redirect("/admin#acc-bot")
+
+
+@app.post("/admin/bot/setup-service")
+@admin_required
+def admin_bot_setup_service():
+    bootstrap()
+    import subprocess
+    svc = """\
+[Unit]
+Description=Zeiterfassung Telegram Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/zeiterfassung
+ExecStart=/opt/zeiterfassung/.venv/bin/python3 /opt/zeiterfassung/bot.py
+Restart=always
+RestartSec=10
+Environment="ZEITERFASSUNG_DB=/opt/zeiterfassung/zeiterfassung.db"
+
+[Install]
+WantedBy=multi-user.target
+"""
+    try:
+        with open("/etc/systemd/system/zeiterfassung-bot.service", "w") as f:
+            f.write(svc)
+        subprocess.run(["systemctl", "daemon-reload"], timeout=10)
+        subprocess.run(["systemctl", "enable", "--now", "zeiterfassung-bot"], timeout=15)
+        add_flash("Bot-Service eingerichtet und gestartet.", "success")
+    except Exception as e:
+        add_flash(f"Fehler beim Einrichten: {e}", "error")
+    return redirect("/admin#acc-bot")
+
+
+@app.get("/admin/update/check")
+@admin_required
+def admin_update_check():
+    bootstrap()
+    commits = _git_pending_commits()
+    if commits is None:
+        return jsonify({"error": "git fetch fehlgeschlagen"})
+    return jsonify({"count": len(commits), "commits": commits[:5]})
+
+
+@app.post("/admin/update/run")
+@admin_required
+def admin_update_run():
+    bootstrap()
+    import threading
+    success, lines = _run_update()
+    output = "\n".join(lines)
+    if success:
+        add_flash(f"Update erfolgreich. Neu starten…\n{output}", "success")
+    else:
+        add_flash(f"Update fehlgeschlagen:\n{output}", "error")
+
+    def _restart():
+        import time
+        time.sleep(1.5)
+        os.system("systemctl restart zeiterfassung")
+        os.system("systemctl restart zeiterfassung-bot 2>/dev/null || true")
+
+    if success:
+        threading.Thread(target=_restart, daemon=True).start()
+
+    return redirect("/admin#acc-update")
 
 
 @app.get("/admin/mail-settings")

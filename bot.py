@@ -61,6 +61,31 @@ sys.path.insert(0, os.path.dirname(__file__))
 from db import connect, init_db  # noqa: E402
 
 
+def _load_bot_config_from_db() -> dict:
+    try:
+        db = connect()
+        rows = db.execute("SELECT key, value FROM bot_config").fetchall()
+        db.close()
+        return {r["key"]: (r["value"] or "") for r in rows}
+    except Exception:
+        return {}
+
+
+_bot_db_cfg = _load_bot_config_from_db()
+
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or _bot_db_cfg.get("bot_token") or TOKEN  # noqa: F811
+
+_ids_raw = os.environ.get("TELEGRAM_ADMIN_IDS") or _bot_db_cfg.get("admin_telegram_ids") or ""
+if _ids_raw:
+    _parsed = {int(x.strip()) for x in _ids_raw.split(",") if x.strip().isdigit()}
+    if _parsed:
+        ADMIN_IDS = _parsed  # noqa: F811
+
+_db_api_key = _bot_db_cfg.get("anthropic_api_key") or ""
+if _db_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+    os.environ["ANTHROPIC_API_KEY"] = _db_api_key
+
+
 def _get_user_id(telegram_id: int) -> "int | None":
     db = connect()
     try:

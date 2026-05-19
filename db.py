@@ -307,6 +307,17 @@ def init_db():
             (_key,),
         )
 
+    db.execute("""CREATE TABLE IF NOT EXISTS bot_config(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    for _key in ("bot_token", "anthropic_api_key", "admin_telegram_ids"):
+        db.execute(
+            "INSERT OR IGNORE INTO bot_config(key, value) VALUES(?, '')",
+            (_key,),
+        )
+
     db.execute("""CREATE TABLE IF NOT EXISTS backup_config(
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL DEFAULT '',
