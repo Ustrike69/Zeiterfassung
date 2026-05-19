@@ -11,7 +11,7 @@ from auth import has_users, create_user, authenticate, current_user, login_requi
 from templates import layout as base_layout
 
 
-APP_VERSION = "v1.3.9"
+APP_VERSION = "v1.4.0"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -9238,8 +9238,9 @@ def _render_backup_section() -> str:
     last_ts = cfg.get("last_backup_time") or ""
     auto_on = cfg.get("auto_backup_enabled", "0") == "1"
     auto_time = cfg.get("auto_backup_time") or "02:00"
+    auto_checked = "checked" if auto_on else ""
 
-    # Local backups list
+    # Local full backups list
     backups = list_local_backups()
     backup_rows = ""
     for b in backups:
@@ -9262,7 +9263,20 @@ def _render_backup_section() -> str:
     if not backup_rows:
         backup_rows = "<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>Keine lokalen Backups vorhanden.</td></tr>"
 
-    auto_checked = "checked" if auto_on else ""
+    # Users for export/import dropdowns
+    _db = connect()
+    _all_users = _db.execute(
+        "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY username"
+    ).fetchall()
+    _db.close()
+    user_export_opts = "".join(
+        f'<option value="{u["id"]}">{u["display_name"] or u["username"]}</option>'
+        for u in _all_users
+    )
+    user_import_opts = "".join(
+        f'<option value="{u["id"]}">{u["display_name"] or u["username"]}</option>'
+        for u in _all_users
+    )
 
     return f"""
     <div class="acc" id="acc-backup">
@@ -9272,18 +9286,19 @@ def _render_backup_section() -> str:
       <div class="acc-body" id="acc-backup-body">
         <div class="acc-inner">
 
-          <!-- Backup erstellen -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Backup erstellen</div>
-          <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px;">
+          <!-- ── 1. Vollständiges Backup ── -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Vollständiges Backup</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">Komplette Datenbank inkl. aller Nutzer, Zeiteinträge und Einstellungen (.db.gz).</p>
+          <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
             <a class="btn primary btn-sm" href="/admin/backup/download">&#11015; Jetzt sichern &amp; herunterladen</a>
             <div class="small" style="color:var(--mu);padding-top:5px;">
               {"Letztes Backup: <b>" + last_ts + "</b>" if last_ts else "Noch kein Backup erstellt."}
             </div>
           </div>
-          <form method="post" action="/admin/backup/auto-config" style="margin-bottom:20px;">
+          <form method="post" action="/admin/backup/auto-config" style="margin-bottom:12px;">
             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
               <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
-                <input type="checkbox" name="auto_enabled" value="1" {auto_checked}> Automatisches Backup aktivieren
+                <input type="checkbox" name="auto_enabled" value="1" {auto_checked}> Automatisches Backup
               </label>
               <div>
                 <label style="font-size:12px;">Uhrzeit</label>
@@ -9291,13 +9306,10 @@ def _render_backup_section() -> str:
               </div>
               <button class="btn btn-sm" type="submit">Speichern</button>
             </div>
-            <p class="small" style="margin-top:6px;color:var(--mu);">Backups werden lokal im Backups-Verzeichnis gespeichert. Maximal 7 Backups werden behalten.</p>
+            <p class="small" style="margin-top:6px;color:var(--mu);">Maximal 7 Backups werden lokal behalten.</p>
           </form>
 
-          <hr style="margin:12px 0;">
-
-          <!-- Restore -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Backup wiederherstellen</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Vollständiges Backup wiederherstellen</div>
           <form method="post" action="/admin/backup/restore" enctype="multipart/form-data"
                 onsubmit="return confirm('Datenbank wirklich wiederherstellen?\\n\\nAlle Daten werden durch den Stand der Backup-Datei ersetzt.\\nDer aktuelle Stand wird vorher automatisch gesichert.');">
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
@@ -9308,22 +9320,118 @@ def _render_backup_section() -> str:
               <button class="btn danger btn-sm" type="submit">&#11014; Wiederherstellen</button>
             </div>
           </form>
-          <p class="small" style="color:var(--mu);">Der aktuelle Stand wird vor dem Restore automatisch gesichert. Nach dem Restore wird der Service neu gestartet.</p>
+          <p class="small" style="color:var(--mu);margin-bottom:12px;">Vor dem Restore wird automatisch ein Sicherungs-Backup erstellt. Alle Einstellungen inkl. Tokens werden wiederhergestellt.</p>
 
-          <hr style="margin:12px 0;">
-
-          <!-- Lokale Backups -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Lokale Backups ({len(backups)})</div>
-          <div class="table-scroll">
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Lokale Backups ({len(backups)})</div>
+          <div class="table-scroll" style="margin-bottom:0;">
             <table>
               <thead><tr><th>Datum</th><th>Größe</th><th>Dateiname</th><th></th></tr></thead>
               <tbody>{backup_rows}</tbody>
             </table>
           </div>
 
+          <hr style="margin:20px 0;">
+
+          <!-- ── 2. Einstellungen-Backup ── -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Einstellungen-Backup</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">Enthält Mail- und Bot-Konfiguration als JSON. Passwörter und API-Keys werden <b>nicht</b> exportiert und müssen nach dem Import neu gesetzt werden.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+            <a class="btn btn-sm" href="/admin/backup/settings/export">&#11015; Einstellungen exportieren (.json)</a>
+          </div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Einstellungen importieren</div>
+          <form method="post" action="/admin/backup/settings/import" enctype="multipart/form-data">
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
+              <div>
+                <label style="font-size:12px;">Einstellungs-Datei (.json)</label>
+                <input type="file" name="settings_file" accept=".json" required style="font-size:13px;">
+              </div>
+              <button class="btn btn-sm" type="submit">&#11014; Importieren</button>
+            </div>
+          </form>
+          <p class="small" style="color:var(--mu);">Nach dem Import Passwörter unter Mail- und Bot-Einstellungen neu setzen.</p>
+
+          <hr style="margin:20px 0;">
+
+          <!-- ── 3. User-Export / Import ── -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">User-Export / Import</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">Exportiert Zeiteinträge, Abwesenheiten, Dienstreisen und Zeitschemas eines Benutzers als JSON. Nützlich für Transfers zwischen Instanzen.</p>
+
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">User exportieren</div>
+          <form method="get" action="/admin/backup/user/export" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px;">
+            <div>
+              <label style="font-size:12px;">Benutzer</label><br>
+              <select name="uid" style="font-size:13px;padding:4px 8px;">{user_export_opts}</select>
+            </div>
+            <button class="btn btn-sm" type="submit">&#11015; Exportieren (.json)</button>
+          </form>
+
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">User importieren</div>
+          <p class="small" style="color:var(--mu);margin-bottom:8px;">Ziel-Benutzer muss bereits existieren. Duplikate (gleicher Tag) werden übersprungen.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+            <div>
+              <label style="font-size:12px;">Export-Datei (.json)</label><br>
+              <input type="file" id="user-import-file" accept=".json" style="font-size:13px;">
+            </div>
+            <div>
+              <label style="font-size:12px;">Ziel-Benutzer</label><br>
+              <select id="user-import-target" style="font-size:13px;padding:4px 8px;">{user_import_opts}</select>
+            </div>
+            <div style="padding-top:18px;">
+              <button class="btn btn-sm" type="button" onclick="userImportPreview()">Vorschau anzeigen</button>
+            </div>
+          </div>
+          <div id="user-import-preview" style="display:none;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;margin-bottom:10px;font-size:13px;"></div>
+          <form method="post" action="/admin/backup/user/import" enctype="multipart/form-data" id="user-import-form">
+            <input type="hidden" name="target_uid" id="user-import-target-hidden">
+            <input type="file" name="user_file" id="user-import-file-hidden" style="display:none;" accept=".json">
+            <button class="btn primary btn-sm" type="submit" id="user-import-confirm" style="display:none;" onclick="return prepareUserImport()">&#11014; Jetzt importieren</button>
+          </form>
+
         </div>
       </div>
-    </div>"""
+    </div>
+<script>
+function userImportPreview(){{
+  var fi=document.getElementById('user-import-file');
+  if(!fi||!fi.files||!fi.files[0]){{alert('Bitte zuerst eine Datei auswählen.');return;}}
+  var fr=new FileReader();
+  fr.onload=function(e){{
+    try{{
+      var d=JSON.parse(e.target.result);
+      if(d._type!=='zeiterfassung_user_export'){{alert('Ungültige User-Export-Datei.');return;}}
+      var u=(d.user||{{}});
+      var tb=(d.time_blocks||[]).length;
+      var ab=(d.absences||[]).length;
+      var bt=(d.business_trips||[]).length;
+      var sc=(d.user_schedules||[]).length;
+      var pr=document.getElementById('user-import-preview');
+      pr.style.display='block';
+      pr.innerHTML='<b>Export von: '+_esc(u.username||'?')+'</b>'
+        +(u.display_name?' <span style="color:var(--mu);">('+_esc(u.display_name)+')</span>':'')+'<br>'
+        +'<span style="color:var(--mu);font-size:12px;">Exportiert: '+_esc(d._exported_at||'')+'</span>'
+        +'<div style="margin-top:8px;">Zeitblöcke: <b>'+tb+'</b> &nbsp;·&nbsp; '
+        +'Abwesenheiten: <b>'+ab+'</b> &nbsp;·&nbsp; '
+        +'Dienstreisen: <b>'+bt+'</b> &nbsp;·&nbsp; '
+        +'Zeitschemas: <b>'+sc+'</b></div>';
+      document.getElementById('user-import-confirm').style.display='inline-block';
+    }}catch(ex){{alert('Fehler beim Lesen der Datei: '+ex);}}
+  }};
+  fr.readAsText(fi.files[0],'utf-8');
+}}
+function prepareUserImport(){{
+  var fi=document.getElementById('user-import-file');
+  var fh=document.getElementById('user-import-file-hidden');
+  var tgt=document.getElementById('user-import-target');
+  var th=document.getElementById('user-import-target-hidden');
+  if(!fi||!fi.files||!fi.files[0]){{alert('Keine Datei ausgewählt.');return false;}}
+  var dt=new DataTransfer();
+  dt.items.add(fi.files[0]);
+  fh.files=dt.files;
+  th.value=tgt.value;
+  return true;
+}}
+function _esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+</script>"""
 
 
 @app.get("/admin/backup/download")
@@ -9421,6 +9529,103 @@ def admin_backup_delete(filename: str):
         add_flash(f"Backup {filename} gelöscht.", "success")
     else:
         add_flash("Datei nicht gefunden.", "error")
+    return redirect("/admin#acc-backup")
+
+
+@app.get("/admin/backup/settings/export")
+@admin_required
+def admin_backup_settings_export():
+    bootstrap()
+    import io as _io
+    from backup import export_settings
+    data, fname = export_settings()
+    return send_file(
+        _io.BytesIO(data),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=fname,
+    )
+
+
+@app.post("/admin/backup/settings/import")
+@admin_required
+def admin_backup_settings_import():
+    bootstrap()
+    from backup import import_settings
+    f = request.files.get("settings_file")
+    if not f or not f.filename:
+        add_flash("Keine Datei ausgewählt.", "error")
+        return redirect("/admin#acc-backup")
+    if not f.filename.lower().endswith(".json"):
+        add_flash("Nur .json Dateien erlaubt.", "error")
+        return redirect("/admin#acc-backup")
+    try:
+        counts = import_settings(f.read())
+        add_flash(
+            f"Einstellungen importiert: {counts['mail']} Mail-Werte, {counts['bot']} Bot-Werte. "
+            "Passwörter müssen ggf. neu gesetzt werden.",
+            "success",
+        )
+    except Exception as e:
+        add_flash(f"Import fehlgeschlagen: {e}", "error")
+    return redirect("/admin#acc-backup")
+
+
+@app.get("/admin/backup/user/export")
+@admin_required
+def admin_backup_user_export():
+    bootstrap()
+    import io as _io
+    from backup import export_user_data
+    try:
+        uid = int(request.args.get("uid") or 0)
+    except (ValueError, TypeError):
+        abort(400)
+    try:
+        data, fname = export_user_data(uid)
+    except ValueError as e:
+        add_flash(str(e), "error")
+        return redirect("/admin#acc-backup")
+    return send_file(
+        _io.BytesIO(data),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=fname,
+    )
+
+
+@app.post("/admin/backup/user/import")
+@admin_required
+def admin_backup_user_import():
+    bootstrap()
+    from backup import import_user_data
+    f = request.files.get("user_file")
+    if not f or not f.filename:
+        add_flash("Keine Datei ausgewählt.", "error")
+        return redirect("/admin#acc-backup")
+    if not f.filename.lower().endswith(".json"):
+        add_flash("Nur .json Dateien erlaubt.", "error")
+        return redirect("/admin#acc-backup")
+    target_raw = (request.form.get("target_uid") or "").strip()
+    if not target_raw:
+        add_flash("Kein Ziel-Benutzer ausgewählt.", "error")
+        return redirect("/admin#acc-backup")
+    try:
+        target_uid = int(target_raw)
+    except ValueError:
+        add_flash("Ungültiger Ziel-Benutzer.", "error")
+        return redirect("/admin#acc-backup")
+    try:
+        s = import_user_data(f.read(), target_uid)
+        add_flash(
+            f"Import abgeschlossen: {s['time_blocks']} Zeitblöcke, "
+            f"{s['absences']} Abwesenheiten, {s['business_trips']} Dienstreisen, "
+            f"{s['schedules']} Zeitschemas importiert"
+            + (f" · {s['skipped']} Duplikate übersprungen" if s["skipped"] else "") + ".",
+            "success",
+        )
+    except Exception as e:
+        add_flash(f"Import fehlgeschlagen: {e}", "error")
     return redirect("/admin#acc-backup")
 
 
