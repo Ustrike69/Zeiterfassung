@@ -17,14 +17,15 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout
+      - name: Checkout Hauptrepo
         uses: actions/checkout@v4
 
-      - name: Hole Dockerfile aus Deploy-Repo
+      - name: Hole Dockerfile + entrypoint aus Deploy-Repo
         run: |
+          mkdir -p docker
           curl -sL https://raw.githubusercontent.com/Ustrike69/Zeiterfassung-Deploy/main/docker/Dockerfile -o Dockerfile
-          curl -sL https://raw.githubusercontent.com/Ustrike69/Zeiterfassung-Deploy/main/docker/entrypoint.sh -o entrypoint.sh
-          chmod +x entrypoint.sh
+          curl -sL https://raw.githubusercontent.com/Ustrike69/Zeiterfassung-Deploy/main/docker/entrypoint.sh -o docker/entrypoint.sh
+          chmod +x docker/entrypoint.sh
 
       - name: Login to ghcr.io
         uses: docker/login-action@v3
