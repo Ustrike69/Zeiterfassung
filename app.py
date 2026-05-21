@@ -6963,15 +6963,23 @@ def _bot_service_exists() -> bool:
     return os.path.exists("/etc/systemd/system/zeiterfassung-bot.service")
 
 
+_GIT_REMOTE_URL = "https://github.com/Ustrike69/Zeiterfassung.git"
+
+
 def _git_pending_commits() -> "list[str] | None":
     import subprocess
+    project = "/opt/zeiterfassung"
     try:
         subprocess.run(
-            ["git", "-C", "/opt/zeiterfassung", "fetch", "origin", "main", "--quiet"],
+            ["git", "-C", project, "remote", "set-url", "origin", _GIT_REMOTE_URL],
+            capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["git", "-C", project, "fetch", "origin", "main", "--quiet"],
             capture_output=True, timeout=15,
         )
         r = subprocess.run(
-            ["git", "-C", "/opt/zeiterfassung", "log", "HEAD..origin/main", "--oneline"],
+            ["git", "-C", project, "log", "HEAD..origin/main", "--oneline"],
             capture_output=True, text=True, timeout=5,
         )
         lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
@@ -7010,6 +7018,10 @@ def _run_update() -> "tuple[bool, list[str]]":
     import subprocess
     project = "/opt/zeiterfassung"
     out = []
+    subprocess.run(
+        ["git", "-C", project, "remote", "set-url", "origin", _GIT_REMOTE_URL],
+        capture_output=True, timeout=5,
+    )
     r1 = subprocess.run(
         ["git", "-C", project, "pull", "origin", "main"],
         capture_output=True, text=True, timeout=60,
@@ -11105,6 +11117,19 @@ def _render_bot_section() -> str:
 
 # ── Update section ─────────────────────────────────────────────────────────────
 
+def _live_app_version() -> str:
+    try:
+        import re as _re
+        with open("/opt/zeiterfassung/app.py", "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _m = _re.match(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', _line)
+                if _m:
+                    return _m.group(1)
+    except Exception:
+        pass
+    return APP_VERSION
+
+
 def _render_update_section() -> str:
     import sys as _sys, platform as _plat
     import html as _h
@@ -11113,6 +11138,7 @@ def _render_update_section() -> str:
     started_bot = _h.escape(_service_started_at("zeiterfassung-bot"))
     py_ver = _h.escape(_sys.version.split()[0])
     os_info = _h.escape(_plat.platform())
+    live_version = _h.escape(_live_app_version())
 
     _check_btn_lbl = t('admin.update_check_btn')
     _checking_lbl = t('admin.update_checking')
@@ -11129,7 +11155,7 @@ def _render_update_section() -> str:
 
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.update_current_state')}</div>
           <table style="width:auto;margin-bottom:12px;">
-            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">{t('admin.update_version')}</td><td style="font-size:13px;">{APP_VERSION}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">{t('admin.update_version')}</td><td style="font-size:13px;">{live_version}</td></tr>
             <tr><td style="color:var(--mu);font-size:12px;">{t('admin.update_last_commit')}</td><td style="font-size:12px;font-family:monospace;">{last_commit}</td></tr>
           </table>
 
