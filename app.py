@@ -5,16 +5,19 @@ import sqlite3
 import re
 import html as _html
 import os
+import json as _json
 from db import init_db, seed_defaults, db_path, connect
-from calendar_seed import seed_calendar_2026_nrw
+from calendar_seed import seed_all_regions_if_needed, REGION_GROUPS, ALL_REGIONS
 from auth import (has_users, create_user, authenticate, current_user, login_required,
                   admin_required, sysadmin_required, timemanager_required,
                   set_password, set_flags, set_admin_role, set_active,
-                  is_sysadmin, is_timemanager)
+                  is_sysadmin, is_timemanager, validate_password, set_must_change_password,
+                  set_language)
 from templates import layout as base_layout
+from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v1.4.5"
+APP_VERSION = "v2.0.0"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -66,10 +69,10 @@ def layout(title, body, user, version, show_back=True):
         banner = (
             '<div style="background:#f59e0b;color:#1c1917;padding:10px 16px;text-align:center;'
             'font-weight:600;display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;">'
-            f'<span>⚠️ Du agierst als <strong>{username}</strong></span>'
+            f'<span>{t("admin.impersonate_banner")} <strong>{username}</strong></span>'
             '<form method="post" action="/admin/impersonate/stop" style="display:inline;">'
-            '<button type="submit" style="background:#1c1917;color:#fef3c7;border:none;border-radius:6px;'
-            'padding:4px 12px;cursor:pointer;font-weight:600;font-size:14px;">Zurück zu Admin</button>'
+            f'<button type="submit" style="background:#1c1917;color:#fef3c7;border:none;border-radius:6px;'
+            f'padding:4px 12px;cursor:pointer;font-weight:600;font-size:14px;">{t("admin.impersonate_stop")}</button>'
             '</form></div>'
         )
     cfg = _get_app_config()
@@ -103,7 +106,7 @@ def bootstrap():
     _ensure_vacation_carryover_schema()
     _ensure_business_trips_schema()
     _ensure_contoured_days_schema()
-    seed_calendar_2026_nrw()
+    seed_all_regions_if_needed()
 
 
 
@@ -592,7 +595,7 @@ def _delete_vacation_carryover_override(user_id: int, year: int) -> None:
 def _is_user_workday_by_schedule(user_id: int, iso_day: str) -> bool:
     """Workday according to schedule + weekend/holiday blocking, but without absence logic."""
     sched = _normalize_schedule(_get_user_schedule_for_day(user_id, iso_day))
-    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day):
+    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day, user_id):
         return False
     d = datetime.date.fromisoformat(iso_day)
     mask = int(sched.get("workdays_mask", _default_workdays_mask()))
@@ -956,9 +959,8 @@ def _get_calendar_day_row(iso_day: str) -> dict:
     return d
 
 
-def _blocked_by_calendar(iso_day: str) -> bool:
-    cd = _get_calendar_day_row(iso_day)
-    return bool(int(cd.get("is_weekend", 0))) or bool(int(cd.get("is_holiday", 0)))
+def _blocked_by_calendar(iso_day: str, user_id=None) -> bool:
+    return _is_weekend(iso_day) or _is_holiday(iso_day, user_id)
 
 
 def _week_dates_from(iso_day: str):
@@ -1016,7 +1018,7 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
         return max(0, int(ov))
     sched = _normalize_schedule(_get_user_schedule_for_day(user_id, iso_day))
 
-    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day):
+    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day, user_id):
         return 0
 
     d = datetime.date.fromisoformat(iso_day)
@@ -1063,7 +1065,7 @@ def _scheduled_minutes_ignoring_absence(user_id: int, iso_day: str) -> int:
     if ov is not None:
         return max(0, int(ov))
     sched = _normalize_schedule(_get_user_schedule_for_day(user_id, iso_day))
-    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day):
+    if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso_day, user_id):
         return 0
     d = datetime.date.fromisoformat(iso_day)
     wd = d.weekday()
@@ -1093,14 +1095,16 @@ def _scheduled_minutes_ignoring_absence(user_id: int, iso_day: str) -> int:
 
 
 def _fetch_flextag_ranges(user_id: int) -> list:
-    """Return list of (date_from, date_to) for all Flextag (Sonstige/Flextag) absences."""
+    """Return list of (date_from, date_to) for all Flextag absences (own type or legacy Sonstige+comment)."""
     db = connect()
     try:
         rows = db.execute("""
             SELECT a.date_from, a.date_to
             FROM absences a JOIN absence_types t ON a.type_id = t.id
-            WHERE a.user_id = ? AND t.name = 'Sonstige'
-              AND LOWER(TRIM(COALESCE(a.comment,''))) = 'flextag'
+            WHERE a.user_id = ? AND (
+                t.name = 'Flextag'
+                OR (t.name = 'Sonstige' AND LOWER(TRIM(COALESCE(a.comment,''))) = 'flextag')
+            )
         """, (user_id,)).fetchall()
         return [(r["date_from"], r["date_to"]) for r in rows]
     finally:
@@ -1134,7 +1138,7 @@ def _absence_summary_for_period(user_id: int, start_iso: str, end_iso: str) -> d
         d = datetime.date.fromisoformat(iso)
         if not _mask_allows(mask, d.weekday()):
             continue
-        if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso):
+        if int(sched.get("block_weekends_holidays", 1)) == 1 and _blocked_by_calendar(iso, user_id):
             continue
         for ab in absences:
             if ab["date_from"] <= iso <= ab["date_to"]:
@@ -1144,12 +1148,18 @@ def _absence_summary_for_period(user_id: int, start_iso: str, end_iso: str) -> d
                         past["urlaub"] += 1
                     elif t == "Krank":
                         past["krank"] += 1
+                    elif t == "Flextag":
+                        past["sonstige"]["Flextag"] = past["sonstige"].get("Flextag", 0) + 1
+                    elif t == "Verdi":
+                        past["sonstige"]["Verdi"] = past["sonstige"].get("Verdi", 0) + 1
                     elif t == "Sonstige":
                         remark = (ab["comment"] or "").strip()
                         past["sonstige"][remark] = past["sonstige"].get(remark, 0) + 1
                 else:
                     if t == "Urlaub":
                         planned["urlaub"] += 1
+                    elif t == "Flextag":
+                        planned["sonstige"]["Flextag"] = planned["sonstige"].get("Flextag", 0) + 1
                     elif t == "Sonstige":
                         remark = (ab["comment"] or "").strip()
                         planned["sonstige"][remark] = planned["sonstige"].get(remark, 0) + 1
@@ -1527,10 +1537,28 @@ def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bo
       </form>"""
 
 
-def _is_holiday(iso_day: str) -> bool:
+def _get_user_holiday_region(user_id=None) -> str:
+    if user_id:
+        try:
+            db = connect()
+            row = db.execute("SELECT holiday_region FROM users WHERE id=?", (user_id,)).fetchone()
+            db.close()
+            if row and row["holiday_region"]:
+                return row["holiday_region"]
+        except Exception:
+            pass
+    cfg = _get_app_config()
+    return cfg.get("default_holiday_region") or "DE-NW"
+
+
+def _is_holiday(iso_day: str, user_id=None) -> bool:
     try:
+        region = _get_user_holiday_region(user_id)
         db = connect()
-        r = db.execute("SELECT is_holiday FROM calendar_days WHERE day=?", (iso_day,)).fetchone()
+        r = db.execute(
+            "SELECT is_holiday FROM calendar_days WHERE day=? AND region=?",
+            (iso_day, region),
+        ).fetchone()
         db.close()
         return bool(r and int(r["is_holiday"]) == 1)
     except Exception:
@@ -1582,6 +1610,43 @@ def _timepicker_datalist(id_name: str = "time_suggestions") -> str:
 
 
 FORM_ASSETS_JS = ""
+
+_PW_STRENGTH_JS = r"""<script>
+function _pwChk(pw,uname){
+  return{len:pw.length>=10,upper:/[A-Z]/.test(pw),lower:/[a-z]/.test(pw),
+    digit:/[0-9]/.test(pw),special:/[^a-zA-Z0-9\s]/.test(pw),
+    nouser:!uname||pw.toLowerCase().indexOf(uname.toLowerCase())<0};
+}
+function _pwUpdate(iid,lid,uname){
+  var pw=(document.getElementById(iid)||{}).value||'';
+  var el=document.getElementById(lid);if(!el)return;
+  var c=_pwChk(pw,uname);
+  var items=[[c.len,'Mindestens 10 Zeichen'],[c.upper,'Großbuchstabe (A-Z)'],
+    [c.lower,'Kleinbuchstabe (a-z)'],[c.digit,'Ziffer (0-9)'],[c.special,'Sonderzeichen']];
+  if(uname)items.push([c.nouser,'Kein Benutzernamen enthalten']);
+  el.innerHTML=items.map(function(x){
+    var col=x[0]?'var(--ok)':'var(--danger)';
+    return '<span style="display:block;color:'+col+';font-size:12px;">'+(x[0]?'✓ ':'✗ ')+x[1]+'</span>';
+  }).join('');
+}
+</script>"""
+
+
+def _generate_password() -> str:
+    import secrets
+    import string
+    upper = string.ascii_uppercase
+    lower = string.ascii_lowercase
+    digits = string.digits
+    specials = "!@#$%^&*()-_=+"
+    pw = [secrets.choice(upper), secrets.choice(lower), secrets.choice(digits), secrets.choice(specials)]
+    pool = upper + lower + digits + specials
+    pw += [secrets.choice(pool) for _ in range(8)]
+    for i in range(len(pw) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        pw[i], pw[j] = pw[j], pw[i]
+    return "".join(pw)
+
 
 def _parse_date_input(s: str) -> str | None:
     """Accept TT.MM.JJJJ or YYYY-MM-DD, return YYYY-MM-DD or None."""
@@ -1657,17 +1722,42 @@ def setup():
     bootstrap()
     if has_users():
         return redirect(url_for("login"))
+    # Allow language selection via query param before account is created
+    setup_lang = (request.args.get("lang") or "en").strip()
+    if setup_lang not in [code for code, _ in _available_languages()]:
+        setup_lang = "en"
+    lang_options = "".join(
+        f'<option value="{code}" {"selected" if code == setup_lang else ""}>{label}</option>'
+        for code, label in _available_languages()
+    )
     body = f'''
     {flash_html()}
     {FORM_ASSETS_JS}
 
     <div class="card">
-      <h3>Ersteinrichtung</h3>
-      <p>Lege den ersten Admin-Benutzer an.</p>
-      <form method="post" action="/setup">
-        <div><label>Admin Username</label><br><input name="username" required></div><br>
-        <div><label>Admin Passwort</label><br><input type="password" name="password" required></div><br>
-        <button class="btn" type="submit">Admin anlegen</button>
+      <h3>{t("setup.title", setup_lang)}</h3>
+      <form method="post" action="/setup" style="display:flex;flex-direction:column;gap:12px;max-width:400px;">
+        <input type="hidden" name="lang" value="{setup_lang}">
+        <div>
+          <label>{t("setup.language_label", setup_lang)}</label>
+          <select name="language_select" onchange="window.location.href='/setup?lang='+this.value">
+            {lang_options}
+          </select>
+        </div>
+        <div><label>{t("setup.username_label", setup_lang)}</label><input name="username" required></div>
+        <div><label>{t("setup.password_label", setup_lang)}</label><input type="password" name="password" required></div>
+        <div style="border:1px solid var(--bd);border-radius:var(--rs);padding:12px;">
+          <div style="font-size:14px;font-weight:600;margin-bottom:8px;">{t("setup.usage_label", setup_lang)}</div>
+          <label style="font-weight:400;display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;">
+            <input type="radio" name="admin_only" value="0" checked style="margin-top:3px;width:auto;">
+            <span><b>{t("setup.usage_yes", setup_lang)}</b></span>
+          </label>
+          <label style="font-weight:400;display:flex;align-items:flex-start;gap:8px;">
+            <input type="radio" name="admin_only" value="1" style="margin-top:3px;width:auto;">
+            <span><b>{t("setup.usage_no", setup_lang)}</b></span>
+          </label>
+        </div>
+        <div><button class="btn primary" type="submit">{t("setup.submit", setup_lang)}</button></div>
       </form>
     </div>
     '''
@@ -1681,11 +1771,27 @@ def setup_post():
         return redirect(url_for("login"))
     username = (request.form.get("username") or "").strip()
     password = (request.form.get("password") or "").strip()
+    chosen_lang = (request.form.get("lang") or "en").strip()
+    if chosen_lang not in [code for code, _ in _available_languages()]:
+        chosen_lang = "en"
     if not username or not password:
         add_flash("Bitte Username und Passwort angeben.", "error")
-        return redirect(url_for("setup"))
-    create_user(username, password, is_admin=True, is_active=True, onboarding_done=1)
-    add_flash("Admin angelegt. Bitte einloggen.", "success")
+        return redirect(url_for("setup", lang=chosen_lang))
+    admin_only_val = 1 if (request.form.get("admin_only") or "0") == "1" else 0
+    new_id = create_user(username, password, is_admin=True, is_active=True, onboarding_done=1)
+    db = connect()
+    db.execute(
+        "UPDATE users SET admin_role='sysadmin', admin_only=?, language=?, updated_at=datetime('now') WHERE id=?",
+        (admin_only_val, chosen_lang, new_id),
+    )
+    # Save default language to app_config
+    db.execute(
+        "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES('default_language', ?, datetime('now'))",
+        (chosen_lang,),
+    )
+    db.commit()
+    db.close()
+    add_flash(t("setup.created", chosen_lang), "success")
     return redirect(url_for("login"))
 
 
@@ -1694,18 +1800,20 @@ def login():
     bootstrap()
     if not has_users():
         return redirect(url_for("setup"))
+    # Use default app language for login page (no session yet)
+    _login_lang = _get_app_config().get("default_language") or "de"
     nxt = request.args.get("next") or "/"
     body = f'''
     {flash_html()}
     <div class="card">
-      <h3>Login</h3>
+      <h3>{t("login.title", _login_lang)}</h3>
       <form method="post" action="/login">
         <input type="hidden" name="next" value="{nxt}">
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>Username</label><br><input name="username" required></div>
-          <div><label>Passwort</label><br><input type="password" name="password" required></div>
+          <div><label>{t("login.username", _login_lang)}</label><br><input name="username" required></div>
+          <div><label>{t("login.password", _login_lang)}</label><br><input type="password" name="password" required></div>
         </div><br>
-        <button class="btn" type="submit">Login</button>
+        <button class="btn" type="submit">{t("login.submit", _login_lang)}</button>
       </form>
       <p class="small">DB: {db_path()}</p>
     </div>
@@ -1721,9 +1829,15 @@ def login_post():
     nxt = request.form.get("next") or "/"
     u = authenticate(username, password)
     if not u:
-        add_flash("Login fehlgeschlagen.", "error")
+        add_flash(t("login.failed"), "error")
         return redirect(url_for("login", next=nxt))
     session["user_id"] = u["id"]
+    # Set session language from user preference
+    from db import connect as _db_connect
+    _ldb = _db_connect()
+    _lrow = _ldb.execute("SELECT language FROM users WHERE id=?", (u["id"],)).fetchone()
+    _ldb.close()
+    session["lang"] = (_lrow["language"] if _lrow and _lrow["language"] else "de") or "de"
     return redirect(nxt)
 
 
@@ -1735,10 +1849,13 @@ def logout():
 
 # ─── Onboarding Wizard ────────────────────────────────────────────────────────
 
-def _onboarding_step_indicator(current_step: int) -> str:
-    steps = ["Passwort", "Profil", "Zeitschema", "Urlaub", "Startsaldo", "Fertig"]
+def _onboarding_step_indicator(current_step: int, show_step0: bool = False) -> str:
+    if show_step0:
+        step_list = [(0, t("onboarding.step0")), (1, t("onboarding.step1")), (2, t("onboarding.step2")), (3, t("onboarding.step3")), (4, t("onboarding.step4")), (5, t("onboarding.step5")), (6, t("onboarding.step6"))]
+    else:
+        step_list = [(1, t("onboarding.step1")), (2, t("onboarding.step2")), (3, t("onboarding.step3")), (4, t("onboarding.step4")), (5, t("onboarding.step5")), (6, t("onboarding.step6"))]
     items = []
-    for i, label in enumerate(steps, 1):
+    for i, label in step_list:
         if i < current_step:
             style = "color:var(--ok);font-weight:700;"
             icon = "✓ "
@@ -1748,7 +1865,7 @@ def _onboarding_step_indicator(current_step: int) -> str:
         else:
             style = "color:var(--mu);"
             icon = ""
-        items.append(f"<span style='{style}'>{icon}{i}. {label}</span>")
+        items.append(f"<span style='{style}'>{icon}{i + (0 if show_step0 else 0)}. {label}</span>")
     sep = " <span style='color:var(--mu);'>·</span> "
     return f"<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px;font-size:13px;'>{sep.join(items)}</div>"
 
@@ -1761,30 +1878,62 @@ def onboarding():
     if u.get("onboarding_done"):
         return redirect(url_for("index"))
 
+    _is_ob_sysadm = is_sysadmin(u)
     try:
-        step = int(request.args.get("step") or 1)
+        step = int(request.args.get("step") if "step" in request.args else (-1))
     except (ValueError, TypeError):
-        step = 1
-    step = max(1, min(6, step))
+        step = -1
+    if step == -1:
+        step = 0 if _is_ob_sysadm else 1
+    step = max(0 if _is_ob_sysadm else 1, min(6, step))
 
     today = datetime.date.today()
-    indicator = _onboarding_step_indicator(step)
+    indicator = _onboarding_step_indicator(step, show_step0=_is_ob_sysadm)
 
-    if step == 1:
+    if step == 0 and _is_ob_sysadm:
+        cur_ao = 1 if u.get("admin_only") else 0
+        body = f"""
+        {flash_html()}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 0 – Nutzungsart</h3>
+          <p class="small">Wie wirst du dieses System nutzen? Die Einstellung kann später unter <b>Einstellungen → Persönliche Einstellungen</b> geändert werden.</p>
+          <form method="post" action="/onboarding?step=0" style="display:flex;flex-direction:column;gap:12px;max-width:420px;margin-top:14px;">
+            <label style="font-weight:400;display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--bd);border-radius:var(--rs);cursor:pointer;">
+              <input type="radio" name="admin_only" value="0" {"checked" if cur_ao == 0 else ""} style="margin-top:3px;width:auto;">
+              <span><b>Ich erfasse meine Arbeitszeiten</b><br><span class="small" style="color:var(--mu);">Zugriff auf Zeiterfassung, Kalender und Gleitzeitkonto.</span></span>
+            </label>
+            <label style="font-weight:400;display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--bd);border-radius:var(--rs);cursor:pointer;">
+              <input type="radio" name="admin_only" value="1" {"checked" if cur_ao == 1 else ""} style="margin-top:3px;width:auto;">
+              <span><b>Ich bin nur für die Verwaltung zuständig</b><br><span class="small" style="color:var(--mu);">Kein eigenes Zeitkonto. Direktzugriff auf den Admin-Bereich nach dem Login.</span></span>
+            </label>
+            <div><button class="btn primary" type="submit">Weiter →</button></div>
+          </form>
+        </div>
+        """
+
+    elif step == 1:
+        uname = _html.escape(u.get("username") or "")
         body = f"""
         {flash_html()}
         {FORM_ASSETS_JS}
         {indicator}
         <div class="card">
           <h3>Schritt 1 – Passwort ändern</h3>
-          <p class="small">Bitte ändere dein temporäres Passwort.</p>
-          <form method="post" action="/onboarding?step=1" style="display:flex;flex-direction:column;gap:10px;max-width:340px;margin-top:12px;">
-            <div><label>Aktuelles Passwort</label><br><input type="password" name="current_password" required></div>
-            <div><label>Neues Passwort</label><br><input type="password" name="new_password" required></div>
-            <div><label>Wiederholung</label><br><input type="password" name="new_password2" required></div>
+          <p class="small">Bitte ändere dein temporäres Passwort. Das neue Passwort muss die Kennwortregeln erfüllen.</p>
+          <form method="post" action="/onboarding?step=1" style="display:flex;flex-direction:column;gap:10px;max-width:360px;margin-top:12px;">
+            <div><label>Aktuelles Passwort</label><input type="password" name="current_password" required autocomplete="current-password"></div>
+            <div>
+              <label>Neues Passwort</label>
+              <input type="password" name="new_password" id="obpw-inp" required autocomplete="new-password"
+                     oninput="_pwUpdate('obpw-inp','obpw-chk','{uname}')">
+              <div id="obpw-chk" style="margin-top:6px;padding:8px;background:var(--sf);border-radius:var(--rs);border:1px solid var(--bd);line-height:1.7;"></div>
+            </div>
+            <div><label>Wiederholung</label><input type="password" name="new_password2" required autocomplete="new-password"></div>
             <div><button class="btn primary" type="submit">Weiter →</button></div>
           </form>
         </div>
+        {_PW_STRENGTH_JS}
         """
 
     elif step == 2:
@@ -1919,14 +2068,28 @@ def onboarding():
         """
 
     elif step == 6:
-        sched = _get_user_schedule_for_day(u["id"], today.isoformat()) or {}
-        vc = _vacation_calc(u["id"], today.year)
-        start_balance_minutes = _get_start_balance_minutes(u["id"])
-        tracking_start = _fmt_date_de(u.get("tracking_start_date")) or "ab Jahresbeginn"
-        mode_txt = "Wochenarbeitszeit" if sched.get("mode") == "weekly" else "Je Wochentag"
-        weekly_h = f"{(int(sched.get('weekly_minutes', 0))/60):g}h" if sched.get("weekly_minutes") else "—"
         dn = u.get("display_name") or u.get("username") or ""
-        body = f"""
+        if u.get("admin_only"):
+            body = f"""
+        {flash_html()}
+        {indicator}
+        <div class="card">
+          <h3>Schritt 6 – Konto bereit!</h3>
+          <p>Hallo <b>{dn}</b>, dein Konto ist konfiguriert.</p>
+          <p class="small" style="margin-top:8px;">Als Admin-Benutzer ohne eigene Zeiterfassung hast du Zugriff auf den Admin-Bereich.</p>
+          <form method="post" action="/onboarding?step=6" style="margin-top:14px;">
+            <button class="btn primary" type="submit">Zur Übersicht →</button>
+          </form>
+        </div>
+            """
+        else:
+            sched = _get_user_schedule_for_day(u["id"], today.isoformat()) or {}
+            vc = _vacation_calc(u["id"], today.year)
+            start_balance_minutes = _get_start_balance_minutes(u["id"])
+            tracking_start = _fmt_date_de(u.get("tracking_start_date")) or "ab Jahresbeginn"
+            mode_txt = "Wochenarbeitszeit" if sched.get("mode") == "weekly" else "Je Wochentag"
+            weekly_h = f"{(int(sched.get('weekly_minutes', 0))/60):g}h" if sched.get("weekly_minutes") else "—"
+            body = f"""
         {flash_html()}
         {indicator}
         <div class="card">
@@ -1943,12 +2106,12 @@ def onboarding():
             <button class="btn primary" type="submit">Zeiterfassung starten →</button>
           </form>
         </div>
-        """
+            """
 
     else:
         body = f"""<div class="card"><h3>Unbekannter Schritt</h3></div>"""
 
-    return render_template_string(layout("Willkommen", body, u, APP_VERSION))
+    return render_template_string(layout(t("onboarding.step6_title"), body, u, APP_VERSION))
 
 
 @app.post("/onboarding")
@@ -1964,7 +2127,18 @@ def onboarding_post():
     except (ValueError, TypeError):
         step = 1
 
-    if step == 1:
+    if step == 0:
+        admin_only_val = 1 if (request.form.get("admin_only") or "0") == "1" else 0
+        db = connect()
+        db.execute(
+            "UPDATE users SET admin_only=?, updated_at=datetime('now') WHERE id=?",
+            (admin_only_val, u["id"]),
+        )
+        db.commit()
+        db.close()
+        return redirect("/onboarding?step=1")
+
+    elif step == 1:
         current_password = request.form.get("current_password") or ""
         new_password = (request.form.get("new_password") or "").strip()
         new_password2 = (request.form.get("new_password2") or "").strip()
@@ -1973,8 +2147,9 @@ def onboarding_post():
         if not _auth_check(u["username"], current_password):
             add_flash("Aktuelles Passwort falsch.", "error")
             return redirect("/onboarding?step=1")
-        if len(new_password) < 6:
-            add_flash("Neues Passwort muss mindestens 6 Zeichen haben.", "error")
+        errs = validate_password(new_password, u.get("username") or "")
+        if errs:
+            add_flash("Passwort ungültig: " + "; ".join(errs), "error")
             return redirect("/onboarding?step=1")
         if new_password != new_password2:
             add_flash("Passwörter stimmen nicht überein.", "error")
@@ -1992,6 +2167,9 @@ def onboarding_post():
         )
         db.commit()
         db.close()
+        u = current_user()
+        if u and u.get("admin_only"):
+            return redirect("/onboarding?step=6")
         return redirect("/onboarding?step=3")
 
     elif step == 3:
@@ -2106,13 +2284,14 @@ def _get_missing_entry_days(user_id: int, year: int) -> set:
     if yesterday < year_start:
         return set()
     days_with = _days_with_any_entry(user_id, year_start, yesterday)
+    _region = _get_user_holiday_region(user_id)
     db = connect()
     try:
         hol_days = {
             str(r["day"])[:10]
             for r in db.execute(
-                "SELECT day FROM calendar_days WHERE day BETWEEN ? AND ? AND is_holiday=1",
-                (year_start, yesterday),
+                "SELECT day FROM calendar_days WHERE day BETWEEN ? AND ? AND is_holiday=1 AND region=?",
+                (year_start, yesterday, _region),
             ).fetchall()
         }
     finally:
@@ -2524,12 +2703,16 @@ def _calc_retirement(user_id: int):
 def index():
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
     today = datetime.date.today()
 
-    # Saldo
-    balance_minutes = _calc_balance_end_at(u["id"], today.isoformat())
+    # Saldo (Stand Vortag)
+    yesterday_balance = today - datetime.timedelta(days=1)
+    balance_minutes = _calc_balance_end_at(u["id"], yesterday_balance.isoformat())
     balance_str = _fmt_minutes_signed(balance_minutes)
     balance_color = "var(--ok)" if balance_minutes >= 0 else "var(--danger)"
+    balance_date_de = _fmt_date_de(yesterday_balance.isoformat())
 
     # Resturlaub
     year = today.year
@@ -2537,11 +2720,11 @@ def index():
     vac_hint = ""
     if vc.get("carryover_exception"):
         if vc["effective_carryover"] > 0:
-            vac_hint = f" · <span style='color:#d97706;'>{vc['effective_carryover']:.1f} Tage Übertrag (gilt weiterhin)</span>"
+            vac_hint = f" · <span style='color:#d97706;'>{vc['effective_carryover']:.1f} {t('dashboard.carryover_active')}</span>"
     elif not vc["deadline_passed"] and vc["carryover"] > 0:
-        vac_hint = f" · <span style='color:var(--danger);'>Übertrag verfällt am {vc['deadline']}</span>"
+        vac_hint = f" · <span style='color:var(--danger);'>{t('dashboard.carryover_expires')} {vc['deadline']}</span>"
     elif vc["deadline_passed"] and vc["carryover_forfeited"] > 0:
-        vac_hint = f" · <span style='color:var(--mu);'>{vc['carryover_forfeited']:.1f} Tage Übertrag verfallen</span>"
+        vac_hint = f" · <span style='color:var(--mu);'>{vc['carryover_forfeited']:.1f} {t('dashboard.carryover_forfeited')}</span>"
 
     # Fehlende Einträge
     missing_count = len(_get_missing_entry_days(u["id"], year))
@@ -2600,31 +2783,31 @@ def index():
             f"</div>"
         )
 
-    ab_cells = _ab_cell("Urlaub", [
-        ("Genommen", past_urlaub),
-        *([("Geplant", planned_urlaub)] if planned_urlaub else []),
-        ("Verfügbar", vac_available),
+    ab_cells = _ab_cell(t("absence_type.urlaub"), [
+        (t("absence_summary.taken"), past_urlaub),
+        *([( t("absence_summary.planned"), planned_urlaub)] if planned_urlaub else []),
+        (t("absence_summary.available"), vac_available),
     ])
     if past_krank:
-        ab_cells += _ab_cell("Krank", [("Tage", past_krank)])
+        ab_cells += _ab_cell(t("absence_type.krank"), [(t("absence_summary.sick"), past_krank)])
     if past_verdi or planned_verdi:
-        ab_cells += _ab_cell("Verdi", [
-            *([("Genommen", past_verdi)] if past_verdi else []),
-            *([("Geplant", planned_verdi)] if planned_verdi else []),
+        ab_cells += _ab_cell(t("absence_type.verdi"), [
+            *([( t("absence_summary.taken"), past_verdi)] if past_verdi else []),
+            *([( t("absence_summary.planned"), planned_verdi)] if planned_verdi else []),
         ])
     if past_flextag or planned_flextag:
-        ab_cells += _ab_cell("Flextag", [
-            *([("Genommen", past_flextag)] if past_flextag else []),
+        ab_cells += _ab_cell(t("absence_type.flextag"), [
+            *([( t("absence_summary.taken"), past_flextag)] if past_flextag else []),
             *([("Geplant", planned_flextag)] if planned_flextag else []),
         ])
 
     if contouring_enabled:
         _kontiering_grid_card = f"""
       <div class="card" style="margin:0;">
-        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Kontierung {year}</div>
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">{t("dashboard.booking")} {year}</div>
         {"" if not (contouring_start and contouring_start > today.isoformat()) else f"<div style='color:var(--mu);font-size:12px;margin-bottom:4px;'>ab <b style='color:var(--tx);'>{_fmt_date_de(contouring_start)}</b></div>"}
-        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1.1;">{uncontoured_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
-        <div class="small" style="margin-top:2px;margin-bottom:8px;">bis: <b style="color:var(--tx);">{max_contoured_str}</b></div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{uc_color};line-height:1.1;">{uncontoured_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">{t("common.days")}</span></div>
+        <div class="small" style="margin-top:2px;margin-bottom:8px;">{t("dashboard.booking_until")}: <b style="color:var(--tx);">{max_contoured_str}</b></div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <div class="dt-wrap" style="flex:1;min-width:90px;max-width:140px;">
             <input type="text" id="kontier-dt-text" class="dt-text"
@@ -2636,18 +2819,18 @@ def index():
                    onchange="kontierDtPick(this)">
           </div>
           <button id="kontier-btn" class="btn btn-sm" onclick="doKontieren()"
-                  {"" if kontier_has_range else "disabled"}>Kontieren</button>
+                  {"" if kontier_has_range else "disabled"}>{t("btn.booking")}</button>
         </div>
         <div id="kontier-toast" style="display:none;margin-top:8px;padding:6px 10px;
              background:var(--ok);color:#fff;border-radius:6px;font-size:12px;font-weight:600;"></div>
       </div>"""
     else:
-        _kontiering_grid_card = """
+        _kontiering_grid_card = f"""
       <div class="card" style="margin:0;opacity:.6;">
-        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Kontierung</div>
-        <div style="font-size:15px;font-weight:600;color:var(--mu);">Deaktiviert</div>
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">{t("dashboard.booking")}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--mu);">{t("dashboard.booking_off")}</div>
         <div style="margin-top:8px;">
-          <a class="btn" href="/settings" >Einstellungen</a>
+          <a class="btn" href="/settings" >{t("nav.settings")}</a>
         </div>
       </div>"""
 
@@ -2656,15 +2839,15 @@ def index():
         _ret_de = _fmt_date_de(retirement["retirement_date"])
         _ret_widget = f"""
     <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Rentencountdown (Alter {retirement['age']})</div>
-      <div style="font-size:1.6rem;font-weight:700;letter-spacing:-.02em;line-height:1.15;">{retirement['years']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">J.</span> {retirement['months']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">Mon.</span> {retirement['days']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">Tage</span></div>
-      <div class="small" style="margin-top:6px;color:var(--mu);">Eintritt: <b style="color:var(--tx);">{_ret_de}</b> &nbsp;·&nbsp; {retirement['cal_days']:,} Kalendertage &nbsp;·&nbsp; {retirement['net_workdays']:,} Arbeitstage &nbsp;·&nbsp; {retirement['weeks']:,} Wochen</div>
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">{t("dashboard.retirement")} ({t("dashboard.age_label")} {retirement['age']})</div>
+      <div style="font-size:1.6rem;font-weight:700;letter-spacing:-.02em;line-height:1.15;">{retirement['years']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">{t("dashboard.years_short")}</span> {retirement['months']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">{t("dashboard.months_short")}</span> {retirement['days']} <span style="font-size:.95rem;font-weight:400;color:var(--mu);">{t("dashboard.days_short")}</span></div>
+      <div class="small" style="margin-top:6px;color:var(--mu);">{t("dashboard.retire_entry")}: <b style="color:var(--tx);">{_ret_de}</b> &nbsp;·&nbsp; {retirement['cal_days']:,} {t("dashboard.cal_days")} &nbsp;·&nbsp; {retirement['net_workdays']:,} {t("dashboard.workdays")} &nbsp;·&nbsp; {retirement['weeks']:,} {t("dashboard.weeks")}</div>
     </div>"""
     elif retirement and retirement["retired"]:
-        _ret_widget = """
+        _ret_widget = f"""
     <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Rentencountdown</div>
-      <div style="font-size:1.1rem;font-weight:600;">Du bist bereits im Rentenalter! 🎉</div>
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">{t("dashboard.retirement")}</div>
+      <div style="font-size:1.1rem;font-weight:600;">{t("dashboard.retired")}</div>
     </div>"""
     else:
         _ret_widget = ""
@@ -2677,35 +2860,35 @@ def index():
 </style>
 
     <div style="display:flex;gap:8px;margin-bottom:16px;">
-      <a class="btn primary btn-lg" href="/day/{today.isoformat()}" style="flex:1;text-align:center;">Zeiterfassung</a>
-      <a class="btn primary btn-lg" href="/calendar" style="flex:1;text-align:center;">Kalender</a>
+      <a class="btn primary btn-lg" href="/day/{today.isoformat()}" style="flex:1;text-align:center;">{t("dashboard.time_tracking")}</a>
+      <a class="btn primary btn-lg" href="/calendar" style="flex:1;text-align:center;">{t("dashboard.calendar")}</a>
     </div>
 
     <div class="idx-grid">
 
       <div class="card" style="margin:0;">
-        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Gleitzeitkonto</div>
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">{t("dashboard.balance")}</div>
         <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{balance_color};line-height:1.1;">{balance_str}</div>
         <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-          <span class="small">Stand heute</span>
-          <a class="btn" href="/balance" >Details</a>
+          <span class="small">{t("dashboard.balance_as_of")} ({balance_date_de})</span>
+          <a class="btn" href="/balance" >{t("btn.details")}</a>
         </div>
       </div>
 
       <div class="card" style="margin:0;">
-        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Resturlaub {year}</div>
-        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;line-height:1.1;">{vc["remaining_total"]:.1f} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">{t("dashboard.vacation_left")} {year}</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;line-height:1.1;">{vc["remaining_total"]:.1f} <span style="font-size:1rem;font-weight:400;color:var(--mu);">{t("common.days")}</span></div>
         <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-          <span class="small">von {vc["entitlement"] + vc["effective_carryover"]:.1f} verfügbar{vac_hint}</span>
-          <a class="btn" href="/settings/vacation" >Details</a>
+          <span class="small">{t("common.from")} {vc["entitlement"] + vc["effective_carryover"]:.1f} {t("dashboard.vacation_avail")}{vac_hint}</span>
+          <a class="btn" href="/settings/vacation" >{t("btn.details")}</a>
         </div>
       </div>
 
       <div class="card" style="margin:0;">
-        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Fehlende Einträge {year}</div>
-        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1.1;">{missing_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">Tage</span></div>
+        <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">{t("dashboard.missing")} {year}</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-.02em;color:{missing_color};line-height:1.1;">{missing_count} <span style="font-size:1rem;font-weight:400;color:var(--mu);">{t("common.days")}</span></div>
         <div style="margin-top:8px;">
-          <span class="small">vergangene Arbeitstage ohne Zeiteintrag</span>
+          <span class="small">{t("dashboard.missing_hint")}</span>
         </div>
       </div>
 
@@ -2744,30 +2927,30 @@ def index():
         body:JSON.stringify({{until:until}})
       }}).then(function(r){{return r.json();}})
       .then(function(d){{
-        btn.textContent='Kontieren';
+        btn.textContent='{t("btn.booking")}';
         if(d.ok){{
           var dtxt=document.getElementById('kontier-dt-text').value;
           var toast=document.getElementById('kontier-toast');
-          toast.textContent=(d.marked?d.marked+' Tage bis '+dtxt+' kontiert':'Alle Tage bereits kontiert');
+          toast.textContent=(d.marked?d.marked+' {t("dashboard.days_booked")} '+dtxt+' {t("dashboard.booked_suffix")}':'{t("dashboard.all_booked")}');
           toast.style.display='block';
           setTimeout(function(){{location.reload();}},2200);
         }}else{{btn.disabled=false;}}
-      }}).catch(function(){{btn.disabled=false;btn.textContent='Kontieren';}});
+      }}).catch(function(){{btn.disabled=false;btn.textContent='{t("btn.booking")}';}});
     }}
     _validateKontier();
     </script>
 
     <div class="card" style="margin-bottom:12px;">
-      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">Abwesenheiten {year}</div>
+      <div style="color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">{t("dashboard.absences")} {year}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;">{ab_cells}</div>
       <div style="margin-top:10px;">
-        <a class="btn" href="/absences" >Alle Abwesenheiten</a>
+        <a class="btn" href="/absences" >{t("dashboard.all_absences")}</a>
       </div>
     </div>
 
     {_ret_widget}
     '''
-    return render_template_string(layout("Übersicht", body, u, APP_VERSION, show_back=False))
+    return render_template_string(layout(t("dashboard.title"), body, u, APP_VERSION, show_back=False))
 
 
 
@@ -2943,6 +3126,8 @@ def _render_absence_summary_card(user_id: int, start_iso: str, end_iso: str) -> 
 def balance_view():
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
     today = datetime.date.today()
 
     try:
@@ -3002,7 +3187,7 @@ def balance_view():
     if sel_month == 0:
         display_start = year_start
         display_end   = year_end
-        period_label  = f"Gesamtes Jahr {sel_year}"
+        period_label  = f"{t('month.whole_year')} {sel_year}"
         period_start_balance = start_minutes
     else:
         m_last_day    = calendar.monthrange(sel_year, sel_month)[1]
@@ -3010,7 +3195,7 @@ def balance_view():
         display_end   = datetime.date(sel_year, sel_month, m_last_day).isoformat()
         prior = [r for r in all_rows if r["day"] < display_start]
         period_start_balance = prior[-1]["running"] if prior else start_minutes
-        period_label = f"{MONTH_NAMES_DE[sel_month]} {sel_year}"
+        period_label = f"{_t_month(sel_month)} {sel_year}"
 
     display_rows_full = [r for r in all_rows if display_start <= r["day"] <= display_end]
 
@@ -3027,9 +3212,9 @@ def balance_view():
         f'<option value="{y}" {"selected" if y == sel_year else ""}>{y}</option>'
         for y in reversed(available_years)
     )
-    month_opts = f'<option value="0" {"selected" if sel_month == 0 else ""}>Gesamtes Jahr</option>'
+    month_opts = f'<option value="0" {"selected" if sel_month == 0 else ""}>{t("month.whole_year")}</option>'
     for mi in range(1, 13):
-        month_opts += f'<option value="{mi}" {"selected" if mi == sel_month else ""}>{MONTH_NAMES_DE[mi]}</option>'
+        month_opts += f'<option value="{mi}" {"selected" if mi == sel_month else ""}>{_t_month(mi)}</option>'
 
     # ── Status-Badges (Abwesenheiten + Feiertage) für den Anzeigebereich ────
     _day_status: dict[str, list[tuple[str, str]]] = {}
@@ -3049,9 +3234,10 @@ def balance_view():
                 _day_status.setdefault(_iso, []).append((_ab["type_name"], _ab["type_color"] or "#6c757d"))
             _cur += datetime.timedelta(days=1)
     _holiday_days: set = set()
+    _bal_region = _get_user_holiday_region(u["id"])
     for _hol in _db2.execute(
-        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND day BETWEEN ? AND ?",
-        (display_start, display_end),
+        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND region=? AND day BETWEEN ? AND ?",
+        (_bal_region, display_start, display_end),
     ).fetchall():
         _iso_hol = str(_hol["day"])[:10]
         _holiday_days.add(_iso_hol)
@@ -3087,13 +3273,13 @@ def balance_view():
     if sel_month == 0:
         _pm_y, _pm_m = sel_year - 1, 12
         _nm_y, _nm_m = sel_year, 1
-        mob_month_label = "Gesamtes Jahr"
+        mob_month_label = t("month.whole_year")
     else:
         _pm_y = sel_year - 1 if sel_month == 1 else sel_year
         _pm_m = 12 if sel_month == 1 else sel_month - 1
         _nm_y = sel_year + 1 if sel_month == 12 else sel_year
         _nm_m = 1 if sel_month == 12 else sel_month + 1
-        mob_month_label = MONTH_NAMES_DE[sel_month]
+        mob_month_label = _t_month(sel_month)
 
     mob_prev_month_url = f"/balance?y={_pm_y}&m={_pm_m}" if _pm_y >= min_year else None
     mob_next_month_url = f"/balance?y={_nm_y}&m={_nm_m}" if _nm_y <= today.year else None
@@ -3467,7 +3653,7 @@ def balance_view():
       {("<p class='small' style='padding:8px 12px;color:var(--mu);'><i>Keine Tage im Zeitraum.</i></p>" if not display_rows else "")}
     </div>
     """
-    return render_template_string(layout("Gleitzeitkonto", body, u, APP_VERSION))
+    return render_template_string(layout(t("balance.title"), body, u, APP_VERSION))
 
 
 
@@ -3606,7 +3792,7 @@ def balance_monthly():
       </table>
     </div>
     """
-    return render_template_string(layout("Monatsabschluss", body, u, APP_VERSION))
+    return render_template_string(layout(t("balance.monthly"), body, u, APP_VERSION))
 
 
 @app.get("/balance/monthly.csv")
@@ -3666,10 +3852,18 @@ def _has_overlap(conn, user_id: int, date_from: str, date_to: str, exclude_id=No
     return (r["c"] if r else 0) > 0
 
 
-FIXED_REMARKS = ["Flextag", "Verdi"]
+FIXED_REMARKS: list[str] = []  # Flextag and Verdi are now dedicated absence types
 
 MONTH_NAMES_DE = ["", "Januar", "Februar", "März", "April", "Mai", "Juni",
                   "Juli", "August", "September", "Oktober", "November", "Dezember"]
+
+
+def _t_month(n: int) -> str:
+    return t(f"month.{n}")
+
+
+def _t_month_short(n: int) -> str:
+    return t(f"month.short.{n}")
 
 _REMARK_JS = """
 function syncRemarkNew(rowId, inpId, sel) {
@@ -3727,6 +3921,8 @@ def _resolve_comment_from_form() -> str:
 def absences_list():
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
 
     q_from = (request.args.get("from") or "").strip()
     q_to = (request.args.get("to") or "").strip()
@@ -3762,7 +3958,7 @@ def absences_list():
     trs = ""
     for a in absences:
         color = a["type_color"] or "#999"
-        scope = "1/2" if a["is_half_day"] else "ganztägig"
+        scope = t("absences.half_day") if a["is_half_day"] else t("absences.full_day")
         bemerkung = (a["comment"] or "") if a["type_name"] == "Sonstige" else ""
         trs += f"""
         <tr>
@@ -3773,9 +3969,9 @@ def absences_list():
           <td>{bemerkung}</td>
           <td style="white-space:nowrap;">
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
-              <a class="btn btn-sm" href="/absences/{a["id"]}/edit">Bearbeiten</a>
-              <form method="post" action="/absences/{a["id"]}/delete" style="display:contents;" onsubmit="return confirm('Wirklich löschen?');">
-                <button class="btn danger btn-sm" type="submit">Löschen</button>
+              <a class="btn btn-sm" href="/absences/{a["id"]}/edit">{t("btn.edit")}</a>
+              <form method="post" action="/absences/{a["id"]}/delete" style="display:contents;" onsubmit="return confirm('{t("absences.confirm_delete")}');">
+                <button class="btn danger btn-sm" type="submit">{t("btn.delete")}</button>
               </form>
             </div>
           </td>
@@ -3785,24 +3981,24 @@ def absences_list():
     {flash_html()}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Abwesenheiten</h3>
-        <a class="btn" href="/absences/new">+ Neu</a>
+        <h3 style="margin:0;">{t("absences.title")}</h3>
+        <a class="btn" href="/absences/new">{t("btn.new")}</a>
       </div>
       <form method="get" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:10px;">
         {FORM_ASSETS_JS}
-        <div><label>Von</label><br>{_date_input("from", q_from)}</div>
-        <div><label>Bis</label><br>{_date_input("to", q_to)}</div>
-        <div><button class="btn" type="submit">Filtern</button> <a class="btn" href="/absences">Reset</a></div>
+        <div><label>{t("absences.from")}</label><br>{_date_input("from", q_from)}</div>
+        <div><label>{t("absences.to")}</label><br>{_date_input("to", q_to)}</div>
+        <div><button class="btn" type="submit">{t("btn.filter")}</button> <a class="btn" href="/absences">{t("btn.reset")}</a></div>
       </form>
       <hr>
       <table>
-        <thead><tr><th>Typ</th><th>Von</th><th>Bis</th><th>Umfang</th><th>Bemerkung</th><th></th></tr></thead>
+        <thead><tr><th>{t("absences.type")}</th><th>{t("absences.from")}</th><th>{t("absences.to")}</th><th>{t("absences.scope")}</th><th>{t("absences.comment")}</th><th></th></tr></thead>
         <tbody>{trs}</tbody>
       </table>
-      {("<p class='small'><i>Keine Einträge.</i></p>" if not absences else "")}
+      {(f"<p class='small'><i>{t('absences.no_entries')}</i></p>" if not absences else "")}
     </div>
     """
-    return render_template_string(layout("Abwesenheiten", body, u, APP_VERSION))
+    return render_template_string(layout(t("absences.title"), body, u, APP_VERSION))
 
 
 @app.get("/absences/new")
@@ -3810,26 +4006,25 @@ def absences_list():
 def absences_new():
     bootstrap()
     u = current_user()
+    enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
     db = connect()
-    types = db.execute("SELECT id, name, color FROM absence_types WHERE active=1 ORDER BY name").fetchall()
-    user_remarks = [r["remark"] for r in db.execute(
-        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
-    ).fetchall()]
+    placeholders = ",".join("?" * len(enabled_ids)) if enabled_ids else "0"
+    types = db.execute(
+        f"SELECT id, name, color FROM absence_types WHERE active=1 AND id IN ({placeholders}) ORDER BY name",
+        enabled_ids
+    ).fetchall()
     db.close()
 
     options = "".join([f'<option value="{t["id"]}">{t["name"]}</option>' for t in types])
     sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
-    remark_html = _remark_select_html(user_remarks)
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
 <script>
-{_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
   document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
-  if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
 </script>
     <div class="card">
@@ -3843,14 +4038,17 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div id="remark_row" style="display:none;">{remark_html}</div><br>
+        <div id="remark_row" style="display:none;">
+          <label>Bemerkung <span style="color:var(--danger);">*</span></label><br>
+          <input type="text" name="comment" placeholder="Bemerkung eingeben …" style="width:100%;" required>
+        </div><br>
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
     </div>
 <script>syncBemerkung(document.getElementById('absence_type_sel'),{sonstige_id});</script>
     """
-    return render_template_string(layout("Abwesenheit", body, u, APP_VERSION))
+    return render_template_string(layout(t("absences.new"), body, u, APP_VERSION))
 
 
 @app.post("/absences/new")
@@ -3878,6 +4076,10 @@ def absences_new_post():
             add_flash(sd_err, "error")
             return redirect(url_for("absences_new"))
 
+    _enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
+    if type_id not in _enabled_ids:
+        add_flash("Ungültiger Abwesenheitstyp.", "error")
+        return redirect(url_for("absences_new"))
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
     type_name = type_row["name"] if type_row else ""
@@ -3923,7 +4125,7 @@ def absences_new_post():
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
-    add_flash("Abwesenheit gespeichert.", "success")
+    add_flash(t("absences.saved"), "success")
     return redirect(url_for("absences_list"))
 
 
@@ -3941,10 +4143,12 @@ def absences_edit(absence_id: int):
         db.close()
         abort(404)
 
-    types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
-    user_remarks = [r["remark"] for r in db.execute(
-        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
-    ).fetchall()]
+    enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
+    placeholders = ",".join("?" * len(enabled_ids)) if enabled_ids else "0"
+    types = db.execute(
+        f"SELECT id, name FROM absence_types WHERE active=1 AND id IN ({placeholders}) ORDER BY name",
+        enabled_ids
+    ).fetchall()
     db.close()
 
     options = ""
@@ -3957,18 +4161,16 @@ def absences_edit(absence_id: int):
     is_sonstige_now = current_type_name == "Sonstige"
     checked = "checked" if row["is_half_day"] else ""
     comment = row["comment"] or ""
-    remark_html = _remark_select_html(user_remarks, selected=comment if is_sonstige_now else "")
     remark_display = "" if is_sonstige_now else "none"
+    comment_val = _html.escape(comment) if is_sonstige_now else ""
 
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
 <script>
-{_REMARK_JS}
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
   document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
-  if (isSonstige) syncRemarkNew('remark_new_row','remark_new_inp',document.getElementById('remark_sel'));
 }}
 </script>
     <div class="card">
@@ -3982,13 +4184,16 @@ function syncBemerkung(sel, sonstigeId) {{
           <div><label>Bis</label><br>{_date_input("date_to", str(row["date_to"]), required=True)}</div>
         </div><br>
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
-        <div id="remark_row" style="display:{remark_display};">{remark_html}</div><br>
+        <div id="remark_row" style="display:{remark_display};">
+          <label>Bemerkung <span style="color:var(--danger);">*</span></label><br>
+          <input type="text" name="comment" value="{comment_val}" placeholder="Bemerkung eingeben …" style="width:100%;" required>
+        </div><br>
         <button class="btn" type="submit">Aktualisieren</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
     </div>
     """
-    return render_template_string(layout("Abwesenheit bearbeiten", body, u, APP_VERSION))
+    return render_template_string(layout(t("absences.edit"), body, u, APP_VERSION))
 
 
 @app.post("/absences/<int:absence_id>/edit")
@@ -4008,6 +4213,10 @@ def absences_edit_post(absence_id: int):
         add_flash(err, "error")
         return redirect(f"/absences/{absence_id}/edit")
 
+    _enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
+    if type_id not in _enabled_ids:
+        add_flash("Ungültiger Abwesenheitstyp.", "error")
+        return redirect(f"/absences/{absence_id}/edit")
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
     type_name = type_row["name"] if type_row else ""
@@ -4075,7 +4284,7 @@ def absences_edit_post(absence_id: int):
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
-    add_flash("Abwesenheit aktualisiert.", "success")
+    add_flash(t("absences.updated"), "success")
     return redirect(url_for("absences_list"))
 
 
@@ -4096,7 +4305,7 @@ def absences_delete(absence_id: int):
     db.execute("DELETE FROM absences WHERE id=? AND user_id=?", (absence_id, u["id"]))
     db.commit()
     db.close()
-    add_flash("Abwesenheit gelöscht.", "success")
+    add_flash(t("absences.deleted"), "success")
     return redirect(url_for("absences_list"))
 
 
@@ -4268,10 +4477,11 @@ def calendar_year_list():
 
     db = connect()
 
+    _cal_region = _get_user_holiday_region(uid)
     hol_rows = db.execute(
         "SELECT day, is_holiday, is_weekend, holiday_name FROM calendar_days"
-        " WHERE day>=? AND day<=?",
-        (y_start, y_end),
+        " WHERE region=? AND day>=? AND day<=?",
+        (_cal_region, y_start, y_end),
     ).fetchall()
     hol_map = {str(r["day"])[:10]: r for r in hol_rows}
 
@@ -4341,7 +4551,7 @@ def calendar_year_list():
             day_badges.setdefault(iso, []).append((txt, a["type_color"] or "#999"))
             cur += datetime.timedelta(days=1)
 
-    _wd = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    _wd = [t(f"weekday.short.{i}") for i in range(7)]
     rows = []
 
     for mo in range(1, 13):
@@ -4350,7 +4560,7 @@ def calendar_year_list():
             f"<div style='font-size:12px;font-weight:700;text-transform:uppercase;"
             f"letter-spacing:.06em;color:var(--mu);padding:10px 4px 6px;"
             f"border-bottom:1px solid var(--bd);'>"
-            f"{MONTH_NAMES_DE[mo]} {year}</div>"
+            f"{_t_month(mo)} {year}</div>"
         )
         d_it  = datetime.date(year, mo, 1)
         d_end = datetime.date(year, mo, calendar.monthrange(year, mo)[1])
@@ -4410,6 +4620,8 @@ def calendar_year_list():
 def calendar_view():
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
 
     today = datetime.date.today()
     user_start_date = _get_tracking_start(u["id"])
@@ -4435,11 +4647,12 @@ def calendar_view():
         totals[day_iso] = totals.get(day_iso, 0) + mins
     net_map = {d: _fmt_minutes(m) for d, m in totals.items()}
 
+    _cal2_region = _get_user_holiday_region(u["id"])
     hol_map = {
         str(r["day"]).strip()[:10]: r
         for r in db.execute(
-            "SELECT day, is_holiday, holiday_name FROM calendar_days WHERE day BETWEEN ? AND ?",
-            (first_iso, last_iso),
+            "SELECT day, is_holiday, holiday_name FROM calendar_days WHERE region=? AND day BETWEEN ? AND ?",
+            (_cal2_region, first_iso, last_iso),
         ).fetchall()
     }
 
@@ -4490,7 +4703,7 @@ def calendar_view():
     cal_locked  = _is_day_locked(u["id"], f"{year}-{month:02d}-01")
     lock_badge  = " \U0001f512" if cal_locked else ""
 
-    _wd = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    _wd = [t(f"weekday.short.{i}") for i in range(7)]
 
     # ── Desktop grid ──────────────────────────────────────────────────────────
     def _badge_html(items):
@@ -4534,7 +4747,7 @@ def calendar_view():
         wd  = _wd[d.weekday()]
         if user_start_date and iso < user_start_date:
             return (
-                f"<td class='daycell daycell-before' title='Vor Arbeitsbeginn – kein Eintrag möglich'>"
+                f"<td class='daycell daycell-before' title='{t('calendar.before_start_title')}'>"
                 f"<div class='dc-head'><b class='dc-num' style='opacity:.4;'>{daynum}</b></div>"
                 f"</td>"
             )
@@ -4552,7 +4765,7 @@ def calendar_view():
             nh_h = (
                 f"<div id='nh_{iso}' class='dc-time' data-net='' data-has-net='0'"
                 f" style='color:var(--danger);font-size:13px;font-weight:700;'"
-                f" title='Fehlender Eintrag'>✕</div>"
+                f" title='{t('calendar.missing_entry')}'>✕</div>"
             )
         elif net:
             clr = "#b45309" if is_kontiert else "var(--mu)"
@@ -4581,11 +4794,11 @@ def calendar_view():
         if not contour_allowed:
             km_item = ""
         elif is_kontiert:
-            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">✕ Kontierung aufheben</a>"
+            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{t('calendar.ctx_unbook')}</a>"
         elif has_entry:
-            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">✓ Als kontiert markieren</a>"
+            km_item = f"  <a href='#' id='km_{iso}' onclick=\"return toggleKontiert('{iso}', event);\">{t('calendar.ctx_book')}</a>"
         else:
-            km_item = f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>✓ Kontieren (kein Eintrag)</span>"
+            km_item = f"  <span style='display:block;padding:6px 8px;font-size:13px;color:var(--mu);'>{t('calendar.ctx_no_entry_book')}</span>"
         exc_badge = "<span class='dc-exc' title='Ausnahme aktiv'>⚡</span>" if iso in exc_days_month else ""
         return (
             f"<td class='daycell' title='{wd}, {daynum:02d}.{month:02d}.{year}'>"
@@ -4597,8 +4810,8 @@ def calendar_view():
             f"<div class='dc-abs'>{_badge_html(badges)}</div>"
             f"{trip_h}{hol_html}"
             f"<div id='m_{iso}' class='daymenu' onclick='event.stopPropagation();'>"
-            f"  <a href='/day/{iso}'>⏱ Zeiten erfassen</a>"
-            f"  <a href='/absences/new'>\U0001f3d6 Abwesenheit anlegen</a>"
+            f"  <a href='/day/{iso}'>{t('calendar.ctx_time')}</a>"
+            f"  <a href='/absences/new'>{t('calendar.ctx_absence')}</a>"
             f"{km_item}"
             f"</div>"
             f"</td>"
@@ -4607,7 +4820,7 @@ def calendar_view():
     cal_obj  = calendar.Calendar(firstweekday=0)
     weeks    = cal_obj.monthdayscalendar(year, month)
     grid_head = (
-        "<tr><th class='kw-head'>KW</th>"
+        f"<tr><th class='kw-head'>{t('calendar.week_abbr')}</th>"
         + "".join(f"<th>{d}</th>" for d in _wd)
         + "</tr>"
     )
@@ -4677,7 +4890,7 @@ def calendar_view():
     # ── Navigation ────────────────────────────────────────────────────────────
     prev_m, prev_y = (month - 1, year) if month > 1 else (12, year - 1)
     next_m, next_y = (month + 1, year) if month < 12 else (1, year + 1)
-    month_label = f"{MONTH_NAMES_DE[month]} {year}"
+    month_label = f"{_t_month(month)} {year}"
     _prev_blocked = bool(
         user_start_date and
         datetime.date(prev_y, prev_m, 1) < datetime.date.fromisoformat(user_start_date).replace(day=1)
@@ -4832,7 +5045,7 @@ function toggleKontiert(iso,ev){{
 
     {cal_js}
     """
-    return render_template_string(layout("Kalender", body, u, APP_VERSION))
+    return render_template_string(layout(t("calendar.title"), body, u, APP_VERSION))
 
 
 
@@ -4904,6 +5117,8 @@ def _exception_banner(day: str, is_blocked_day: bool, exc_row, locked: bool) -> 
 def day_detail(day: str):
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
 
@@ -4928,9 +5143,6 @@ def day_detail(day: str):
 
     abs_types = db.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
     abs_sonstige_id = next((t["id"] for t in abs_types if t["name"] == "Sonstige"), 0)
-    abs_user_remarks = [r["remark"] for r in db.execute(
-        "SELECT remark FROM absence_remarks WHERE user_id=? ORDER BY remark", (u["id"],)
-    ).fetchall()]
     trip = db.execute(
         "SELECT * FROM business_trips WHERE user_id=? AND start_date <= ? AND (end_date >= ? OR end_date IS NULL) ORDER BY id DESC LIMIT 1",
         (u["id"], day, day),
@@ -4948,7 +5160,7 @@ def day_detail(day: str):
     sched_day = _get_user_schedule(u["id"])
     is_blocked_day = (
         int(sched_day.get("block_weekends_holidays", 1)) == 1
-        and (_is_weekend(day) or _is_holiday(day))
+        and (_is_weekend(day) or _is_holiday(day, u["id"]))
     )
     exc_row = _get_weekend_exception(u["id"], day) if is_blocked_day else None
 
@@ -5029,7 +5241,6 @@ def day_detail(day: str):
 
     abs_opts = "".join([f"<option value='{t['id']}'>{t['name']}</option>" for t in abs_types])
     abs_sonstige_id_js = abs_sonstige_id
-    abs_remark_html = _remark_select_html(abs_user_remarks, pfx="d_")
 
     _lock_notice = (
         "<div class='day-lock'>🔒 <b>Monat abgeschlossen</b> – Dieser Zeitraum kann nicht mehr bearbeitet werden. "
@@ -5096,15 +5307,15 @@ function validateBlockForm(form) {{
           <label style="font-size:13px;padding-bottom:6px;white-space:nowrap;font-weight:400;"><input type="checkbox" name="is_half_day" value="1"> ½ Tag</label>
           <button class="btn primary btn-sm" type="submit" style="white-space:nowrap;">+ Speichern</button>
         </div>
-        <div id="d_remark_row" style="display:none;">{abs_remark_html}</div>
+        <div id="d_remark_row" style="display:none;margin-top:6px;">
+          <input type="text" name="comment" placeholder="Bemerkung …" style="width:100%;font-size:13px;">
+        </div>
       </form>
       <div style="font-size:11px;color:var(--mu);margin-top:4px;">Bereits vorhandene Abwesenheit wird nicht überschrieben.</div>
 <script>
-{_REMARK_JS}
 function syncDayBemerkung(sel) {{
   var isSonstige = String(sel.value) === String({abs_sonstige_id_js});
   document.getElementById("d_remark_row").style.display = isSonstige ? "" : "none";
-  if (isSonstige) syncRemarkNew("d_remark_new_row","d_remark_new_inp",document.getElementById("d_remark_sel"));
 }}
 syncDayBemerkung(document.getElementById("day_type_sel"));
 </script>"""
@@ -5222,7 +5433,7 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
       {_business_trip_section_compact(day, trip, locked=day_locked)}
     </div>
     """
-    return render_template_string(layout("Tages-Editor", body, u, APP_VERSION, show_back=False))
+    return render_template_string(layout(t("day.title"), body, u, APP_VERSION, show_back=False))
 
 
 def _business_trip_section_compact(day: str, trip, locked: bool = False) -> str:
@@ -5438,7 +5649,7 @@ def day_business_trip_save(day: str):
         )
     db.commit()
     db.close()
-    add_flash("Dienstreise gespeichert.", "success")
+    add_flash(t("trips.saved"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5459,7 +5670,7 @@ def day_business_trip_delete(day: str):
         db.execute("DELETE FROM business_trips WHERE user_id=? AND start_date=?", (u["id"], day))
     db.commit()
     db.close()
-    add_flash("Dienstreise gelöscht.", "success")
+    add_flash(t("trips.deleted"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5482,7 +5693,7 @@ def day_block_add(day: str):
         return redirect(f"/day/{day}")
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays',1)) == 1:
-        if _is_weekend(day) or _is_holiday(day):
+        if _is_weekend(day) or _is_holiday(day, u['id']):
             if not _has_weekend_exception(u['id'], day):
                 if request.form.get('override_nonwork'):
                     if request.form.get('save_exception'):
@@ -5526,7 +5737,7 @@ def day_block_add(day: str):
     )
     db.commit()
     db.close()
-    add_flash("Zeitblock gespeichert.", "success")
+    add_flash(t("day.saved"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5625,7 +5836,7 @@ function validateBlockForm(form) {{
 }}
 </script>
     """
-    return render_template_string(layout("Zeitblock bearbeiten", body, u, APP_VERSION))
+    return render_template_string(layout(t("day.edit_block"), body, u, APP_VERSION))
 
 
 @app.post("/day/<day>/block/<int:block_id>/edit")
@@ -5645,7 +5856,7 @@ def day_block_edit_post(day: str, block_id: int):
 
     sched = _get_user_schedule(u['id'])
     if int(sched.get('block_weekends_holidays', 1)) == 1:
-        if _is_weekend(day) or _is_holiday(day):
+        if _is_weekend(day) or _is_holiday(day, u['id']):
             if not _has_weekend_exception(u['id'], day):
                 if request.form.get('override_nonwork'):
                     if request.form.get('save_exception'):
@@ -5706,7 +5917,7 @@ def day_block_edit_post(day: str, block_id: int):
     )
     db.commit()
     db.close()
-    add_flash("Zeitblock aktualisiert.", "success")
+    add_flash(t("day.updated"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5723,7 +5934,7 @@ def day_block_delete(day: str):
     db.execute("DELETE FROM time_blocks WHERE id=? AND user_id=?", (block_id, u["id"]))
     db.commit()
     db.close()
-    add_flash("Zeitblock gelöscht.", "success")
+    add_flash(t("day.deleted"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5797,7 +6008,7 @@ def day_absence_add(day: str):
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
-    add_flash("Abwesenheit gespeichert.", "success")
+    add_flash(t("absences.saved"), "success")
     return redirect(f"/day/{day}")
 
 
@@ -5889,26 +6100,28 @@ def settings_view():
         badge = ""
         try:
             if sid and cur_id and int(sid) == int(cur_id):
-                badge = "<span class='badge' style='background:#0a7;color:#fff;'>Aktuell</span>"
+                badge = f"<span class='badge' style='background:#0a7;color:#fff;'>{t('settings.badge_current')}</span>"
             elif valid_from and valid_from > today_iso:
-                badge = "<span class='badge' style='background:#888;color:#fff;'>Zukünftig</span>"
+                badge = f"<span class='badge' style='background:#888;color:#fff;'>{t('settings.badge_upcoming')}</span>"
             else:
-                badge = "<span class='badge' style='background:#ddd;'>Historie</span>"
+                badge = f"<span class='badge' style='background:#ddd;'>{t('settings.badge_history')}</span>"
         except Exception:
             badge = ""
 
-        mode_txt = "Woche" if mode == "weekly" else ("Tag" if mode == "daily" else mode)
+        mode_txt = t('schedule.mode_weekly') if mode == "weekly" else (t('schedule.mode_daily') if mode == "daily" else mode)
 
         if mode == "daily":
             day_parts = []
-            for day_key, label in [("mon_minutes","Mo"),("tue_minutes","Di"),("wed_minutes","Mi"),
-                                    ("thu_minutes","Do"),("fri_minutes","Fr"),("sat_minutes","Sa"),("sun_minutes","So")]:
+            for day_key, label in [("mon_minutes",t('schedule.mo')),("tue_minutes",t('schedule.tu')),
+                                    ("wed_minutes",t('schedule.we')),("thu_minutes",t('schedule.th')),
+                                    ("fri_minutes",t('schedule.fr')),("sat_minutes",t('schedule.sa')),
+                                    ("sun_minutes",t('schedule.su'))]:
                 v = int(s.get(day_key) or 0)
                 if v:
                     day_parts.append(f"{label}:{_fmt_minutes(v)}")
             soll_txt = " ".join(day_parts) if day_parts else "–"
         else:
-            soll_txt = f"{weekly_hours_txt} h/Woche" if weekly_hours_txt else "–"
+            soll_txt = f"{weekly_hours_txt} {t('schedule.hours_week')}" if weekly_hours_txt else "–"
 
         del_btn = ""
         if sid:
@@ -5958,22 +6171,22 @@ def settings_view():
 
     if contouring_enabled:
         _kont_html = (
-            f"<div style='margin-bottom:10px;'><span style='color:var(--ok);font-weight:600;'>&#10003; Aktiv</span>"
-            f" <span style='color:var(--mu);font-size:13px;'>seit {contouring_start_label}</span></div>"
+            f"<div style='margin-bottom:10px;'><span style='color:var(--ok);font-weight:600;'>{t('settings.kont_active')}</span>"
+            f" <span style='color:var(--mu);font-size:13px;'>{t('settings.kont_since')} {contouring_start_label}</span></div>"
             f"<form method='post' action='/settings/contouring/toggle'"
-            f" onsubmit=\"return confirm('Kontierung wirklich deaktivieren? Bestehende Kontierungen bleiben erhalten.');\">"
-            f"<button class='btn danger' type='submit'>Kontierung deaktivieren</button></form>"
+            f" onsubmit=\"return confirm('{t('settings.kont_disable_confirm')}');\">"
+            f"<button class='btn danger' type='submit'>{t('settings.contouring_off')}</button></form>"
         )
     else:
         _kont_html = (
-            f"<div style='margin-bottom:12px;color:var(--mu);'>Kontierung ist deaktiviert.</div>"
+            f"<div style='margin-bottom:12px;color:var(--mu);'>{t('settings.kont_disabled_msg')}</div>"
             f"<form method='post' action='/settings/contouring/toggle'>"
             f"<div style='margin-bottom:10px;'>"
-            f"<label>Kontierung gilt ab:</label><br>"
+            f"<label>{t('settings.kont_start_lbl')}</label><br>"
             f"{_date_input('contouring_start_date', default_start)}"
-            f"<div class='small' style='color:var(--mu);margin-top:3px;'>Standard: 1. des aktuellen Monats.</div>"
+            f"<div class='small' style='color:var(--mu);margin-top:3px;'>{t('settings.kont_default_hint')}</div>"
             f"</div>"
-            f"<button class='btn primary' type='submit'>Aktivieren</button>"
+            f"<button class='btn primary' type='submit'>{t('settings.kont_enable_btn')}</button>"
             f"</form>"
         )
 
@@ -6013,58 +6226,58 @@ function wizValidate(e){{
   if(t&&!t.disabled){{
     var parts=t.value.split(':');
     var h=parseInt(parts[0]||0,10);
-    if(h<15||h>23){{e.preventDefault();alert('Bitte eine Uhrzeit zwischen 15:00 und 23:00 wählen.');return false;}}
+    if(h<15||h>23){{e.preventDefault();alert('{t("settings.reminder_time_error")}');return false;}}
   }}
 }}
 </script>
 
-    <h2 style="margin:0 0 14px 0;font-size:18px;">Einstellungen</h2>
+    <h2 style="margin:0 0 14px 0;font-size:18px;">{t('settings.title')}</h2>
 
     <!-- 1. Persönliche Einstellungen -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-profil')">
-        <span>👤 Persönliche Einstellungen</span><span class="acc-arr">▼</span>
+        <span>{t('settings.personal_section')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-profil">
         <div class="acc-inner">
           <form method="post" action="/settings/profile" style="display:flex;flex-direction:column;gap:10px;max-width:400px;">
             <div>
-              <label>Anzeigename</label><br>
+              <label>{t('settings.display_name')}</label><br>
               <input name="display_name" value="{profile_dn}" placeholder="{u['username']}">
-              <div class="small" style="color:var(--mu);margin-top:3px;">Wird im Header angezeigt. Leer = Benutzername.</div>
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.display_name_hint')}</div>
             </div>
             <div>
-              <label>E-Mail</label><br>
+              <label>{t('settings.email')}</label><br>
               <input type="email" name="email" value="{profile_em}" placeholder="max@example.com">
             </div>
             <div>
-              <label>Geburtsdatum</label><br>
+              <label>{t('settings.birth_date')}</label><br>
               <input type="date" name="birth_date" value="{profile_bd}" style="width:180px;">
-              <div class="small" style="color:var(--mu);margin-top:3px;">Wird für den Rentencountdown auf der Übersicht verwendet.</div>
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.birth_date_hint')}</div>
             </div>
             <div>
-              <label>Renteneintrittsalter</label><br>
+              <label>{t('settings.retire_age')}</label><br>
               <input type="number" name="retirement_age" value="{profile_ra}" min="60" max="72" step="1" style="width:100px;">
-              <div class="small" style="color:var(--mu);margin-top:3px;">Standard: 67 Jahre. Erlaubter Bereich: 60–72.</div>
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.retire_age_hint')}</div>
             </div>
-            <div><button class="btn" type="submit">Profil speichern</button></div>
+            <div><button class="btn" type="submit">{t('settings.save_profile_btn')}</button></div>
           </form>
 
           <div class="acc-sub">
-            <b style="font-size:14px;">Telegram</b>
+            <b style="font-size:14px;">{t('settings.telegram')}</b>
             <form method="post" action="/settings/telegram" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
               <div>
                 <label>Telegram-ID</label><br>
                 <input type="text" name="telegram_id" value="{profile_tg}" placeholder="z.B. 123456789" pattern="[0-9]*" inputmode="numeric" style="width:200px;">
-                <div class="small" style="color:var(--mu);margin-top:3px;">Deine Telegram-ID findest du indem du @userinfobot in Telegram eine Nachricht schickst.</div>
+                <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.tg_hint')}</div>
               </div>
-              <div><button class="btn" type="submit">Telegram-ID speichern</button></div>
+              <div><button class="btn" type="submit">{t('settings.tg_save')}</button></div>
             </form>
           </div>
 
           <div class="acc-sub">
-            <b style="font-size:14px;">📱 Telegram Erinnerung</b>
-            {'<div class="small" style="color:var(--mu);margin-top:8px;margin-bottom:4px;">Bitte zuerst eine Telegram-ID hinterlegen um Erinnerungen zu aktivieren.</div>' if not profile_tg else ''}
+            <b style="font-size:14px;">{t('settings.reminder_section')}</b>
+            {'<div class="small" style="color:var(--mu);margin-top:8px;margin-bottom:4px;">' + t('settings.reminder_need_tg') + '</div>' if not profile_tg else ''}
             <form method="post" action="/settings/reminder" onsubmit="wizValidate(event)" style="display:flex;flex-direction:column;gap:12px;max-width:400px;margin-top:10px;">
               <div style="{'opacity:0.5;' if not profile_tg else ''}">
                 <label style="display:flex;align-items:center;gap:8px;cursor:{'pointer' if profile_tg else 'default'};">
@@ -6072,45 +6285,68 @@ function wizValidate(e){{
                     {"checked" if (profile_tg and wiz_enabled) else ""}
                     {"" if profile_tg else "disabled"}
                     onchange="wizToggle(this)">
-                  <span>Abend-Erinnerung aktiv</span>
+                  <span>{t('settings.reminder_active')}</span>
                   <span title="Der Bot fragt dich abends ob du deine Zeiten erfasst hast" style="cursor:help;color:var(--mu);font-size:13px;">ⓘ</span>
                 </label>
               </div>
               <div id="wiz-time-row" style="{'opacity:1;' if (profile_tg and wiz_enabled) else 'opacity:0.5;'}">
-                <label>Uhrzeit</label><br>
+                <label>{t('settings.reminder_time_lbl')}</label><br>
                 <input type="time" name="reminder_time" id="wiz-time"
                   value="{wiz_time}" step="900" style="width:140px;"
                   {"" if (profile_tg and wiz_enabled) else "disabled"}>
-                <div class="small" style="color:var(--mu);margin-top:3px;">Erlaubter Bereich: 15:00 – 23:00 Uhr</div>
+                <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.reminder_time_hint')}</div>
               </div>
-              <div><button class="btn" type="submit" {"" if profile_tg else "disabled"}>Erinnerung speichern</button></div>
+              <div><button class="btn" type="submit" {"" if profile_tg else "disabled"}>{t('settings.reminder_save')}</button></div>
             </form>
           </div>
 
           <div class="acc-sub">
-            <b style="font-size:14px;">Passwort ändern</b>
+            <b style="font-size:14px;">{t('settings.pw_section')}</b>
             <form method="post" action="/settings/password" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
               <div>
-                <label>Aktuelles Passwort</label><br>
+                <label>{t('settings.password_old')}</label><br>
                 <input type="password" name="current_password" required autocomplete="current-password">
               </div>
               <div>
-                <label>Neues Passwort</label><br>
+                <label>{t('settings.password_new')}</label><br>
                 <input type="password" name="new_password" required autocomplete="new-password" minlength="6">
               </div>
               <div>
-                <label>Neues Passwort bestätigen</label><br>
+                <label>{t('settings.pw_confirm_repeat')}</label><br>
                 <input type="password" name="new_password_confirm" required autocomplete="new-password">
               </div>
-              <div><button class="btn" type="submit">Passwort ändern</button></div>
+              <div><button class="btn" type="submit">{t('btn.change_pw')}</button></div>
             </form>
           </div>
 
           <div class="acc-sub">
-            <div class="small" style="color:var(--mu);">Arbeitsbeginn</div>
-            <div style="font-size:14px;font-weight:600;margin-top:2px;">{_fmt_date_de(u.get("tracking_start_date")) or "–"}</div>
-            <div class="small" style="color:var(--mu);margin-top:2px;">Kein Eintrag vor diesem Datum möglich. Änderung nur durch Admin.</div>
+            <b style="font-size:14px;">{t("settings.language")}</b>
+            <form method="post" action="/settings/language" style="display:flex;flex-direction:column;gap:10px;max-width:300px;margin-top:10px;">
+              <div>
+                <label>{t("settings.language")}</label><br>
+                <select name="language">
+                  {"".join(f'<option value="{code}" {"selected" if (u.get("language") or "de") == code else ""}>{label}</option>' for code, label in _available_languages())}
+                </select>
+              </div>
+              <div><button class="btn" type="submit">{t("btn.save")}</button></div>
+            </form>
           </div>
+
+          <div class="acc-sub">
+            <div class="small" style="color:var(--mu);">{t('settings.tracking_start_lbl')}</div>
+            <div style="font-size:14px;font-weight:600;margin-top:2px;">{_fmt_date_de(u.get("tracking_start_date")) or "–"}</div>
+            <div class="small" style="color:var(--mu);margin-top:2px;">{t('settings.tracking_start_hint')}</div>
+          </div>
+
+          {f"""<div class="acc-sub">
+            <b style="font-size:14px;">{t('settings.time_mode_section')}</b>
+            <p class="small" style="margin-top:6px;margin-bottom:10px;">{t('settings.time_mode_desc')}</p>
+            <form method="post" action="/settings/admin-only"
+                  onsubmit="return !this.dataset.ao||confirm('Zeiterfassungs-Funktionen wirklich {"deaktivieren" if not u.get("admin_only") else "aktivieren"}?');"
+                  data-ao="1">
+              {"<span style='color:var(--ok);font-weight:600;'>" + t('settings.time_active') + "</span><div class='small' style='color:var(--mu);margin:6px 0 10px;'>" + t('settings.time_active_desc') + "</div><button class='btn btn-sm danger' type='submit' name='admin_only' value='1'>" + t('settings.time_disable_btn') + "</button>" if not u.get("admin_only") else "<span style='color:var(--mu);font-weight:600;'>" + t('settings.time_disabled') + "</span><div class='small' style='color:var(--mu);margin:6px 0 10px;'>" + t('settings.time_disabled_desc') + "</div><button class='btn btn-sm primary' type='submit' name='admin_only' value='0'>" + t('settings.time_enable_btn') + "</button>"}
+            </form>
+          </div>""" if is_sysadmin(u) else ""}
         </div>
       </div>
     </div>
@@ -6118,33 +6354,33 @@ function wizValidate(e){{
     <!-- 2. Urlaub -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub')">
-        <span>🏖 Urlaub – {vac_year}</span><span class="acc-arr">▼</span>
+        <span>{t('settings.vac_section')} – {vac_year}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-urlaub">
         <div class="acc-inner">
-          {"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;'><b>Urlaubsübertrag: Ausnahme gilt</b> – " + f"{vac_effective_carryover:.1f} Tage übertragen (verfallen nicht am 31.03.)</div>" if vac_carryover_exception else ""}
+          {"<div style='background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;'><b>" + t('settings.vac_exc_note') + "</b> – " + f"{vac_effective_carryover:.1f} Tage übertragen (verfallen nicht am 31.03.)</div>" if vac_carryover_exception else ""}
           <p class="small" style="margin-bottom:12px;">
-            Urlaub wird nur an <b>Arbeitstagen</b> gezählt (gemäß Zeitschema + Wochenenden/Feiertage).
+            {t('settings.vac_workdays_note')}
             {"Übertrag-Frist: " + vac_deadline + " <b style='color:#d97706;'>(Ausnahme gilt – kein Verfall)</b>." if vac_carryover_exception else ("<b style='color:var(--danger);'>Übertrag verfällt am " + vac_deadline + " (Urlaubsbeginn muss ≤ " + vac_deadline + " liegen).</b>" if not vac_deadline_passed and vac_carryover > 0 else ("Übertrag verfallen am " + vac_deadline + "." if vac_deadline_passed and vac_carryover_forfeited > 0 else "Übertrag-Frist: " + vac_deadline + "."))}
           </p>
           <form method="post" action="/settings/vacation/save" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:14px;">
             <input type="hidden" name="year" value="{vac_year}">
             <div>
-              <label>Urlaubsanspruch (Tage)</label><br>
+              <label>{t('settings.vac_entitlement_lbl')}</label><br>
               <input name="entitlement_days" type="number" step="0.5" min="0" value="{vac_entitlement}" required style="width:120px;">
             </div>
             <div>
-              <label>Übertrag Vorjahr (Tage)</label><br>
+              <label>{t('settings.vac_carryover_lbl')}</label><br>
               <input name="carryover_days" type="number" step="0.5" min="0" value="{vac_carryover}" required style="width:120px;">
             </div>
-            <div><button class="btn" type="submit">Speichern</button></div>
+            <div><button class="btn" type="submit">{t('btn.save')}</button></div>
           </form>
           <div style="display:flex;gap:18px;flex-wrap:wrap;">
-            <div><div class="small">Genommen</div><div style="font-size:22px;font-weight:700;">{vac_used_total:.1f}</div></div>
-            <div><div class="small">Rest gesamt</div><div style="font-size:22px;font-weight:700;">{vac_remaining_total:.1f}</div></div>
-            <div><div class="small">{"Übertrag (Ausnahme)" if vac_carryover_exception else "Übertrag offen"}</div><div style="font-size:22px;font-weight:700;{"color:#d97706;" if vac_carryover_exception else ""}">{vac_carryover_remaining:.1f}</div></div>
-            <div><div class="small">Anspruch {vac_year} offen</div><div style="font-size:22px;font-weight:700;">{vac_entitlement_remaining:.1f}</div></div>
-            {"<div><div class='small' style='color:var(--danger);'>Übertrag verfallen</div><div style='font-size:22px;font-weight:700;color:var(--danger);'>" + f"{vac_carryover_forfeited:.1f}" + "</div></div>" if vac_carryover_forfeited > 0 else ""}
+            <div><div class="small">{t('settings.vac_used')}</div><div style="font-size:22px;font-weight:700;">{vac_used_total:.1f}</div></div>
+            <div><div class="small">{t('settings.vac_remaining_total')}</div><div style="font-size:22px;font-weight:700;">{vac_remaining_total:.1f}</div></div>
+            <div><div class="small">{t('settings.vac_carryover_exc') if vac_carryover_exception else t('settings.vac_carryover_open')}</div><div style="font-size:22px;font-weight:700;{"color:#d97706;" if vac_carryover_exception else ""}">{vac_carryover_remaining:.1f}</div></div>
+            <div><div class="small">{t('settings.vac_entitlement')} {vac_year} offen</div><div style="font-size:22px;font-weight:700;">{vac_entitlement_remaining:.1f}</div></div>
+            {"<div><div class='small' style='color:var(--danger);'>" + t('settings.vac_forfeited') + "</div><div style='font-size:22px;font-weight:700;color:var(--danger);'>" + f"{vac_carryover_forfeited:.1f}" + "</div></div>" if vac_carryover_forfeited > 0 else ""}
           </div>
         </div>
       </div>
@@ -6153,21 +6389,21 @@ function wizValidate(e){{
     <!-- 3. Zeitschema -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit')">
-        <span>🕐 Zeitschema</span><span class="acc-arr">▼</span>
+        <span>{t('settings.sched_section')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-zeit">
         <div class="acc-inner">
-          <p class="small" style="margin-bottom:12px;">An Wochenenden/Feiertagen wird standardmäßig nicht gearbeitet (kann als Ausnahme zugelassen werden).</p>
+          <p class="small" style="margin-bottom:12px;">{t('settings.sched_weekend_note')}</p>
           <div class="table-scroll" style="margin-bottom:16px;">
             <table style="min-width:500px;">
               <thead><tr>
-                <th>Gültig ab</th><th>Status</th><th>Modus</th><th>Soll</th><th>Arbeitstage</th><th></th>
+                <th>{t('settings.schedule_valid')}</th><th>{t('common.status')}</th><th>{t('settings.sched_mode_col')}</th><th>{t('settings.sched_target_col')}</th><th>{t('settings.schedule_mask')}</th><th></th>
               </tr></thead>
-              <tbody>{sched_rows if sched_rows else "<tr><td colspan='6' style='color:var(--mu);'>Noch kein Zeitschema gespeichert.</td></tr>"}</tbody>
+              <tbody>{sched_rows if sched_rows else f"<tr><td colspan='6' style='color:var(--mu);'>{t('settings.sched_none')}</td></tr>"}</tbody>
             </table>
           </div>
           <div class="acc-sub">
-            <b style="font-size:14px;">Neues Zeitschema anlegen</b>
+            <b style="font-size:14px;">{t('settings.sched_add_new')}</b>
             <div style="margin-top:10px;">
               {_sched_form_html(sched, "/settings/save", "/settings", show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
             </div>
@@ -6179,7 +6415,7 @@ function wizValidate(e){{
     <!-- 4. Kontierung -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-kont')">
-        <span>📋 Kontierung</span><span class="acc-arr">▼</span>
+        <span>{t('settings.kont_section')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-kont">
         <div class="acc-inner">
@@ -6188,7 +6424,7 @@ function wizValidate(e){{
       </div>
     </div>
     """
-    return render_template_string(layout("Einstellungen", body, u, APP_VERSION))
+    return render_template_string(layout(t("settings.title"), body, u, APP_VERSION))
 
 
 @app.get("/settings/password")
@@ -6196,6 +6432,7 @@ function wizValidate(e){{
 def settings_password():
     bootstrap()
     u = current_user()
+    uname = _html.escape(u.get("username") or "")
     body = f"""
     {flash_html()}
     <div class="card">
@@ -6203,26 +6440,28 @@ def settings_password():
         <h3 style="margin:0;">Passwort ändern</h3>
         <a class="btn" href="/settings">← Zurück</a>
       </div>
-      <form method="post" action="/settings/password" style="margin-top:12px;">
+      <form method="post" action="/settings/password" style="margin-top:12px;max-width:380px;">
         <div style="margin-bottom:10px;">
-          <label>Aktuelles Passwort</label><br>
+          <label>Aktuelles Passwort</label>
           <input type="password" name="current_password" required autocomplete="current-password">
         </div>
         <div style="margin-bottom:10px;">
-          <label>Neues Passwort</label><br>
-          <input type="password" name="new_password" required minlength="6" autocomplete="new-password">
-          <div class="small" style="color:#777;">Mindestens 6 Zeichen.</div>
+          <label>Neues Passwort</label>
+          <input type="password" name="new_password" id="spw-inp" required autocomplete="new-password"
+                 oninput="_pwUpdate('spw-inp','spw-chk','{uname}')">
+          <div id="spw-chk" style="margin-top:6px;padding:8px;background:var(--sf);border-radius:var(--rs);border:1px solid var(--bd);line-height:1.7;"></div>
         </div>
-        <div style="margin-bottom:10px;">
-          <label>Neues Passwort (Wiederholung)</label><br>
-          <input type="password" name="new_password_confirm" required minlength="6" autocomplete="new-password">
+        <div style="margin-bottom:14px;">
+          <label>Neues Passwort (Wiederholung)</label>
+          <input type="password" name="new_password_confirm" required autocomplete="new-password">
         </div>
-        <button class="btn" type="submit">Passwort speichern</button>
+        <button class="btn primary" type="submit">Passwort speichern</button>
         <a class="btn" href="/settings">Abbrechen</a>
       </form>
     </div>
+    {_PW_STRENGTH_JS}
     """
-    return render_template_string(layout("Passwort ändern", body, u, APP_VERSION))
+    return render_template_string(layout(t("settings.password"), body, u, APP_VERSION))
 
 
 @app.post("/settings/profile")
@@ -6248,7 +6487,7 @@ def settings_profile_save():
     )
     db.commit()
     db.close()
-    add_flash("Profil gespeichert.", "success")
+    add_flash(t("settings.profile_saved"), "success")
     return redirect("/settings")
 
 
@@ -6344,8 +6583,9 @@ def settings_password_post():
         add_flash("Aktuelles Passwort ist falsch.", "error")
         return redirect("/settings/password")
 
-    if len(new_password) < 6:
-        add_flash("Neues Passwort muss mindestens 6 Zeichen haben.", "error")
+    errs = validate_password(new_password, u.get("username") or "")
+    if errs:
+        add_flash("Passwort ungültig: " + "; ".join(errs), "error")
         return redirect("/settings/password")
 
     if new_password != new_password_confirm:
@@ -6353,8 +6593,98 @@ def settings_password_post():
         return redirect("/settings/password")
 
     set_password(u["id"], new_password)
-    add_flash("Passwort wurde geändert.", "success")
+    add_flash(t("settings.password_saved"), "success")
     return redirect("/settings")
+
+
+@app.post("/settings/admin-only")
+@login_required
+def settings_admin_only():
+    bootstrap()
+    u = current_user()
+    if not is_sysadmin(u):
+        abort(403)
+    new_val = 1 if (request.form.get("admin_only") or "0") == "1" else 0
+    db = connect()
+    db.execute(
+        "UPDATE users SET admin_only=?, updated_at=datetime('now') WHERE id=?",
+        (new_val, u["id"]),
+    )
+    db.commit()
+    db.close()
+    msg = "Zeiterfassung deaktiviert. Du siehst ab sofort nur den Admin-Bereich." if new_val else "Zeiterfassung aktiviert."
+    add_flash(msg, "success")
+    return redirect("/settings")
+
+
+@app.post("/settings/language")
+@login_required
+def settings_language_post():
+    bootstrap()
+    u = current_user()
+    from translations import available_languages as _al
+    valid_langs = [code for code, _ in _al()]
+    lang = (request.form.get("language") or "de").strip()
+    if lang not in valid_langs:
+        lang = "de"
+    set_language(u["id"], lang)
+    session["lang"] = lang
+    add_flash(t("settings.language_saved"), "success")
+    return redirect("/settings")
+
+
+@app.get("/change-password")
+@login_required
+def change_password():
+    bootstrap()
+    u = current_user()
+    uname = _html.escape(u.get("username") or "")
+    body = f"""
+    {flash_html()}
+    <div class="card" style="max-width:420px;">
+      <h3>Neues Passwort festlegen</h3>
+      <p class="small" style="margin-bottom:14px;">Bitte wähle ein neues Passwort. Du wirst danach automatisch weitergeleitet.</p>
+      <form method="post" action="/change-password">
+        <div style="margin-bottom:10px;">
+          <label>Neues Passwort</label>
+          <input type="password" name="new_password" id="cpw-inp" required autocomplete="new-password"
+                 oninput="_pwUpdate('cpw-inp','cpw-chk','{uname}')">
+          <div id="cpw-chk" style="margin-top:6px;padding:8px;background:var(--sf);border-radius:var(--rs);border:1px solid var(--bd);line-height:1.7;"></div>
+        </div>
+        <div style="margin-bottom:14px;">
+          <label>Passwort wiederholen</label>
+          <input type="password" name="new_password_confirm" required autocomplete="new-password">
+        </div>
+        <button class="btn primary" type="submit">Passwort speichern</button>
+      </form>
+    </div>
+    {_PW_STRENGTH_JS}
+    """
+    return render_template_string(layout(t("change_pw.title"), body, u, APP_VERSION, show_back=False))
+
+
+@app.post("/change-password")
+@login_required
+def change_password_post():
+    bootstrap()
+    u = current_user()
+    new_password = (request.form.get("new_password") or "").strip()
+    new_password_confirm = (request.form.get("new_password_confirm") or "").strip()
+
+    errs = validate_password(new_password, u.get("username") or "")
+    if errs:
+        add_flash("Passwort ungültig: " + "; ".join(errs), "error")
+        return redirect("/change-password")
+
+    if new_password != new_password_confirm:
+        add_flash("Passwörter stimmen nicht überein.", "error")
+        return redirect("/change-password")
+
+    set_password(u["id"], new_password)
+    add_flash(t("settings.password_saved"), "success")
+    if not u.get("onboarding_done"):
+        return redirect("/onboarding?step=2")
+    return redirect("/")
 
 
 @app.get("/settings/vacation")
@@ -6443,7 +6773,7 @@ def settings_vacation():
       </p>
     </div>
     """
-    return render_template_string(layout("Urlaub", body, u, APP_VERSION))
+    return render_template_string(layout(t("settings.vacation"), body, u, APP_VERSION))
 
 
 @app.post("/settings/vacation/save")
@@ -6779,9 +7109,10 @@ def _build_rich_day_export(user_id: int, date_from: str, date_to: str):
         "WHERE a.user_id=? AND NOT (a.date_to < ? OR a.date_from > ?)",
         (user_id, date_from, date_to),
     ).fetchall()
+    _export_region = _get_user_holiday_region(user_id)
     holidays_raw = db.execute(
-        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND day BETWEEN ? AND ?",
-        (date_from, date_to),
+        "SELECT day, holiday_name FROM calendar_days WHERE is_holiday=1 AND region=? AND day BETWEEN ? AND ?",
+        (_export_region, date_from, date_to),
     ).fetchall()
     trips_raw = db.execute(
         "SELECT start_date, end_date, destination FROM business_trips "
@@ -7021,7 +7352,7 @@ def settings_save():
             return render_template_string(layout("Zeitschema – Überschneidung", warn_body, u, APP_VERSION))
 
     _sched_save_to_db(u["id"], sched)
-    add_flash("Zeitschema gespeichert.", "success")
+    add_flash(t("settings.schedule_saved"), "success")
     return redirect("/settings")
 
 
@@ -7056,6 +7387,8 @@ def settings_schedule_delete(schedule_id: int):
 def business_trips_list():
     bootstrap()
     u = current_user()
+    if u and u.get("admin_only"):
+        return redirect("/admin")
     today = datetime.date.today()
     year = int(request.args.get("y") or today.year)
     show_form = request.args.get("new") == "1"
@@ -7087,72 +7420,76 @@ def business_trips_list():
         ey = _fmt_date_de(e, omit_year=(int(e[:4]) == year))
         return f"{sy} – {ey}"
 
+    _lbl_edit = t('btn.edit')
+    _lbl_del = t('btn.delete')
+    _confirm_del = t('trips.confirm_delete')
+    _no_trips = t('trips.no_entries')
     rows_html = ""
     if trips:
-        for t in trips:
-            dest = t['destination'] or ''
-            notes = t['notes'] or ''
+        for trip in trips:
+            dest = trip['destination'] or ''
+            notes = trip['notes'] or ''
             rows_html += (
                 f"<tr>"
-                f"<td style='white-space:nowrap;'>{fmt_date_range(t)}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_date_range(trip)}</td>"
                 f"<td style='max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'><b title='{dest}'>{dest}</b></td>"
-                f"<td style='white-space:nowrap;'>{fmt_time(t['departure_time'])}</td>"
-                f"<td style='white-space:nowrap;'>{fmt_time(t['departure_end_time'])}</td>"
-                f"<td style='white-space:nowrap;'>{fmt_time(t['return_time'])}</td>"
-                f"<td style='white-space:nowrap;'>{fmt_time(t['return_end_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(trip['departure_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(trip['departure_end_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(trip['return_time'])}</td>"
+                f"<td style='white-space:nowrap;'>{fmt_time(trip['return_end_time'])}</td>"
                 f"<td class='small' style='max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='{notes}'>{notes}</td>"
                 f"<td style='white-space:nowrap;'>"
                 f"<div style='display:flex;gap:6px;'>"
-                f"<a class='btn btn-sm' href='/day/{t['start_date']}'>Bearbeiten</a>"
+                f"<a class='btn btn-sm' href='/day/{trip['start_date']}'>{_lbl_edit}</a>"
                 f"<form method='post' action='/business_trips/delete' style='display:contents;'"
-                f" onsubmit=\"return confirm('Dienstreise löschen?');\">"
-                f"<input type='hidden' name='trip_id' value='{t['id']}'>"
+                f" onsubmit=\"return confirm('{_confirm_del}');\">"
+                f"<input type='hidden' name='trip_id' value='{trip['id']}'>"
                 f"<input type='hidden' name='y' value='{year}'>"
-                f"<button class='btn danger btn-sm' type='submit'>Löschen</button></form>"
+                f"<button class='btn danger btn-sm' type='submit'>{_lbl_del}</button></form>"
                 f"</div></td>"
                 f"</tr>"
             )
     else:
-        rows_html = f"<tr><td colspan='8' class='small' style='color:var(--mu);'>Keine Dienstreisen in {year}.</td></tr>"
+        rows_html = f"<tr><td colspan='8' class='small' style='color:var(--mu);'>{_no_trips}</td></tr>"
 
     new_form_html = ""
     if show_form:
         new_form_html = f"""
         <div class="card" style="margin-top:12px;">
-          <h3 style="margin-top:0;">+ Neue Dienstreise</h3>
+          <h3 style="margin-top:0;">+ {t('trips.new')}</h3>
           {FORM_ASSETS_JS}
           <form method="post" action="/business_trips/add">
             <input type="hidden" name="y" value="{year}">
             <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
               <div>
-                <label>Ort *</label><br>
-                <input name="destination" required placeholder="Reiseziel" style="max-width:280px;">
+                <label>{t('trips.location')} *</label><br>
+                <input name="destination" required placeholder="{t('trips.destination')}" style="max-width:280px;">
               </div>
               <div>
-                <label>Startdatum *</label><br>
+                <label>{t('trips.date_from')} *</label><br>
                 {_date_input("start_date", today.isoformat(), required=True)}
               </div>
               <div>
-                <label style="font-weight:400;"><input type="checkbox" onchange="toggleMultiday(this)"> Mehrtägig</label>
+                <label style="font-weight:400;"><input type="checkbox" onchange="toggleMultiday(this)"> {t('trips.multiday')}</label>
               </div>
             </div>
             <div class="multiday-fields" style="display:none;margin-bottom:8px;">
-              <label>Enddatum</label><br>
+              <label>{t('trips.date_to')}</label><br>
               {_date_input("end_date")}
             </div>
             <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
-              <div><label>Abreise</label><br>{_time_input("departure_time")}</div>
-              <div><label>Ankunft Ziel</label><br>{_time_input("departure_end_time")}</div>
-              <div><label>Rückreise Start</label><br>{_time_input("return_time")}</div>
-              <div><label>Ankunft Zuhause</label><br>{_time_input("return_end_time")}</div>
+              <div><label>{t('trips.departure')}</label><br>{_time_input("departure_time")}</div>
+              <div><label>{t('trips.arrival_dest')}</label><br>{_time_input("departure_end_time")}</div>
+              <div><label>{t('trips.return_start')}</label><br>{_time_input("return_time")}</div>
+              <div><label>{t('trips.arrival_home')}</label><br>{_time_input("return_end_time")}</div>
             </div>
             <div style="margin-bottom:8px;">
-              <label>Notizen</label><br>
+              <label>{t('trips.notes')}</label><br>
               <textarea name="notes" rows="2" placeholder="optional" style="max-width:500px;"></textarea>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn primary" type="submit">Speichern</button>
-              <a class="btn" href="/business_trips?y={year}">Abbrechen</a>
+              <button class="btn primary" type="submit">{t('btn.save')}</button>
+              <a class="btn" href="/business_trips?y={year}">{t('btn.cancel')}</a>
             </div>
           </form>
         </div>"""
@@ -7162,22 +7499,22 @@ def business_trips_list():
     {flash_html()}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">✈ Dienstreisen – {year}</h3>
+        <h3 style="margin:0;">✈ {t('nav.trips')} – {year}</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           {"<span class='btn' style='opacity:.35;cursor:not-allowed;'>◀︎ " + str(prev_year) + "</span>" if _prev_year_blocked else f"<a class='btn' href='/business_trips?y={prev_year}'>◀︎ {prev_year}</a>"}
-          <a class="btn" href="/business_trips?y={today.year}">Heute</a>
+          <a class="btn" href="/business_trips?y={today.year}">{t('common.today')}</a>
           <a class="btn" href="/business_trips?y={next_year}">{next_year} ▶︎</a>
-          <a class="btn primary btn-sm" href="/business_trips?y={year}&new=1">+ Neu</a>
+          <a class="btn primary btn-sm" href="/business_trips?y={year}&new=1">{t('btn.new')}</a>
         </div>
       </div>
       <div class="table-scroll" style="margin-top:10px;">
         <table style="min-width:600px;">
           <thead>
             <tr>
-              <th>Datum</th><th>Ort</th>
-              <th>Abreise</th><th>Ziel an</th>
-              <th>Rückreise</th><th>Heim an</th>
-              <th>Notizen</th><th></th>
+              <th>{t('common.date')}</th><th>{t('trips.location')}</th>
+              <th>{t('trips.departure')}</th><th>{t('trips.arrival_dest')}</th>
+              <th>{t('trips.return_start')}</th><th>{t('trips.arrival_home')}</th>
+              <th>{t('trips.notes')}</th><th></th>
             </tr>
           </thead>
           <tbody>{rows_html}</tbody>
@@ -7186,7 +7523,7 @@ def business_trips_list():
     </div>
     {new_form_html}
     """
-    return render_template_string(layout("Dienstreisen", body, u, APP_VERSION))
+    return render_template_string(layout(t("trips.title"), body, u, APP_VERSION))
 
 
 @app.post("/business_trips/add")
@@ -7239,7 +7576,7 @@ def business_trips_add():
     )
     db.commit()
     db.close()
-    add_flash("Dienstreise gespeichert.", "success")
+    add_flash(t("trips.saved"), "success")
     return redirect(f"/business_trips?y={year}")
 
 
@@ -7263,7 +7600,7 @@ def business_trips_delete():
         db.execute("DELETE FROM business_trips WHERE id=? AND user_id=?", (int(trip_id), u["id"]))
         db.commit()
         db.close()
-        add_flash("Dienstreise gelöscht.", "success")
+        add_flash(t("trips.deleted"), "success")
     return redirect(f"/business_trips?y={year}")
 
 
@@ -7304,8 +7641,8 @@ def periods_view():
         month_last_day = f"{sel_year}-{m:02d}-{calendar.monthrange(sel_year, m)[1]:02d}"
         if user_start and month_last_day < user_start:
             trs += (
-                f"<tr><td style='color:var(--mu);'>{MONTH_NAMES_DE[m]} {sel_year}</td>"
-                f"<td><span class='small' style='color:var(--mu);'>Vor Arbeitsbeginn</span></td>"
+                f"<tr><td style='color:var(--mu);'>{_t_month(m)} {sel_year}</td>"
+                f"<td><span class='small' style='color:var(--mu);'>{t('periods.before_start_short')}</span></td>"
                 f"<td></td></tr>"
             )
             continue
@@ -7317,7 +7654,7 @@ def periods_view():
         month_is_past = (sel_year < today.year) or (sel_year == today.year and m < today.month)
 
         if month_locked:
-            status_html = f"<span style='color:var(--ok);'>🔒 Abgeschlossen</span>"
+            status_html = f"<span style='color:var(--ok);'>{t('periods.status_closed')}</span>"
             if lock_row:
                 status_html += f" <span class='small'>({_lock_who(lock_row)})</span>"
             action = ""
@@ -7328,24 +7665,24 @@ def periods_view():
                         f"<form method='post' action='/periods/unlock' style='display:inline;'>"
                         f"<input type='hidden' name='year' value='{sel_year}'>"
                         f"<input type='hidden' name='month' value='{m}'>"
-                        f"<button class='btn danger btn-sm' >Entsperren</button></form>"
+                        f"<button class='btn danger btn-sm' >{t('btn.unlock')}</button></form>"
                     )
                 else:
-                    action = "<span class='small' style='color:var(--mu);'>via Jahresabschluss</span>"
+                    action = f"<span class='small' style='color:var(--mu);'>{t('periods.via_year_lock')}</span>"
         elif month_is_past:
-            status_html = "<span style='color:var(--mu);'>Offen</span>"
+            status_html = f"<span style='color:var(--mu);'>{t('periods.open_status')}</span>"
             action = (
                 f"<form method='post' action='/periods/lock' style='display:inline;'>"
                 f"<input type='hidden' name='year' value='{sel_year}'>"
                 f"<input type='hidden' name='month' value='{m}'>"
-                f"<button class='btn btn-sm' >Abschließen</button></form>"
+                f"<button class='btn btn-sm' >{t('periods.close_btn')}</button></form>"
             )
         else:
             status_html = "<span class='small' style='color:var(--mu);'>–</span>"
             action = ""
 
         trs += (
-            f"<tr><td><a href='/balance?y={sel_year}&m={m}'>{MONTH_NAMES_DE[m]} {sel_year}</a></td>"
+            f"<tr><td><a href='/balance?y={sel_year}&m={m}'>{_t_month(m)} {sel_year}</a></td>"
             f"<td>{status_html}</td><td>{action}</td></tr>"
         )
 
@@ -7353,10 +7690,10 @@ def periods_view():
     year_is_past = sel_year < today.year
     year_before_start = bool(user_start and f"{sel_year}-12-31" < user_start)
     if year_before_start:
-        yr_status = "<span class='small' style='color:var(--mu);'>Vor Arbeitsbeginn</span>"
+        yr_status = f"<span class='small' style='color:var(--mu);'>{t('periods.before_start_short')}</span>"
         yr_action = ""
     elif year_locked:
-        yr_status = f"<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
+        yr_status = f"<span style='color:var(--ok);'>{t('periods.year_closed_status')}</span>"
         lr = locks.get("year")
         if lr:
             yr_status += f" <span class='small'>({_lock_who(lr)})</span>"
@@ -7365,17 +7702,17 @@ def periods_view():
             yr_action = (
                 f"<form method='post' action='/periods/unlock' style='display:inline;'>"
                 f"<input type='hidden' name='year' value='{sel_year}'>"
-                f"<button class='btn danger btn-sm' >Jahr entsperren</button></form>"
+                f"<button class='btn danger btn-sm' >{t('periods.year_unlock_btn')}</button></form>"
             )
     elif year_is_past:
-        yr_status = "<span style='color:var(--mu);'>Offen</span>"
+        yr_status = f"<span style='color:var(--mu);'>{t('periods.open_status')}</span>"
         yr_action = (
             f"<form method='post' action='/periods/lock' style='display:inline;'>"
             f"<input type='hidden' name='year' value='{sel_year}'>"
-            f"<button class='btn btn-sm' >Jahr abschließen</button></form>"
+            f"<button class='btn btn-sm' >{t('periods.year_close_btn')}</button></form>"
         )
     else:
-        yr_status = "<span class='small' style='color:var(--mu);'>Laufendes Jahr</span>"
+        yr_status = f"<span class='small' style='color:var(--mu);'>{t('periods.running_year')}</span>"
         yr_action = ""
 
     available_years = list(range(max(today.year - 5, 2020), today.year + 1))
@@ -7392,24 +7729,24 @@ def periods_view():
     {flash_html()}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <h3 style="margin:0;">Abschlüsse</h3>
+        <h3 style="margin:0;">{t('periods.title')}</h3>
         <form method="get" style="display:flex;gap:8px;align-items:end;">
-          <div><label>Jahr</label><br><select name="y">{year_opts}</select></div>
-          <button class="btn" type="submit">Anzeigen</button>
+          <div><label>{t('periods.year_label')}</label><br><select name="y">{year_opts}</select></div>
+          <button class="btn" type="submit">{t('periods.show_btn')}</button>
         </form>
       </div>
-      <p class="small" style="margin-top:8px;">Abgeschlossene Zeiträume können nicht mehr bearbeitet werden. Entsperren nur durch Admins möglich.</p>
+      <p class="small" style="margin-top:8px;">{t('periods.info_text')}</p>
       <table style="margin-top:12px;">
-        <thead><tr><th>Monat</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>{t('periods.month_col')}</th><th>{t('common.status')}</th><th></th></tr></thead>
         <tbody>{trs}</tbody>
       </table>
       <hr>
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-        <b>Jahr {sel_year}:</b> {yr_status} {yr_action}
+        <b>{t('periods.year_label')} {sel_year}:</b> {yr_status} {yr_action}
       </div>
     </div>
     """
-    return render_template_string(layout("Abschlüsse", body, u, APP_VERSION))
+    return render_template_string(layout(t("periods.title"), body, u, APP_VERSION))
 
 
 @app.post("/periods/lock")
@@ -7444,7 +7781,7 @@ def periods_lock():
             add_flash(f"Abschluss nicht möglich – Monat liegt vor Arbeitsbeginn ({_fmt_date_de(user_start)}).", "error")
             return redirect(f"/periods?y={year}")
     _lock_period(u["id"], year, month, locked_by=u["id"])
-    label = f"{MONTH_NAMES_DE[month]} {year}" if month else f"Jahr {year}"
+    label = f"{_t_month(month)} {year}" if month else f"{t('periods.whole_year')} {year}"
     add_flash(f"{label} abgeschlossen.", "success")
     return redirect(f"/periods?y={year}")
 
@@ -7465,7 +7802,7 @@ def periods_unlock():
         return redirect("/periods")
 
     _unlock_period(u["id"], year, month)
-    label = f"{MONTH_NAMES_DE[month]} {year}" if month else f"Jahr {year}"
+    label = f"{_t_month(month)} {year}" if month else f"{t('periods.whole_year')} {year}"
     add_flash(f"{label} entsperrt.", "success")
     return redirect(f"/periods?y={year}")
 
@@ -7482,7 +7819,7 @@ def export_home():
     default_from_de = f"01.01.{year}"
     default_to_de   = f"31.12.{year}"
     user_email = u.get("email") or ""
-    admin_btn = f'<button class="btn" type="button" onclick="dlExport(\'/export/users.csv\',false)">Benutzer (Admin)</button>' if u.get("is_admin") else ""
+    admin_btn = f'<button class="btn" type="button" onclick="dlExport(\'/export/users.csv\',false)">{t("export.admin_users_btn")}</button>' if u.get("is_admin") else ""
 
     # Admin: build user select options for mail form
     admin_user_select = ""
@@ -7499,19 +7836,20 @@ def export_home():
         )
         admin_user_select = (
             f'<div style="margin-bottom:10px;">'
-            f'<label>Mitarbeiter</label><br>'
+            f'<label>{t("export.employee")}</label><br>'
             f'<select name="user_id" style="max-width:300px;">{opts}</select>'
             f'</div>'
         )
 
+    _js_select_dates = t('export.select_dates')
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
     <div class="card">
-      <h3 style="margin-top:0;">Zeitraum</h3>
+      <h3 style="margin-top:0;">{t('export.period_label')}</h3>
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:12px;">
         <div>
-          <label>Von</label><br>
+          <label>{t('common.from')}</label><br>
           <div class="dt-wrap">
             <input type="text" id="exp-from-txt" class="dt-text" placeholder="TT.MM.JJJJ"
                    value="{default_from_de}" maxlength="10" oninput="dt_text(this)">
@@ -7520,7 +7858,7 @@ def export_home():
           </div>
         </div>
         <div>
-          <label>Bis</label><br>
+          <label>{t('common.to')}</label><br>
           <div class="dt-wrap">
             <input type="text" id="exp-to-txt" class="dt-text" placeholder="TT.MM.JJJJ"
                    value="{default_to_de}" maxlength="10" oninput="dt_text(this)">
@@ -7530,48 +7868,48 @@ def export_home():
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
-        <button class="btn" type="button" onclick="setExpRange('month')">Akt. Monat</button>
-        <button class="btn" type="button" onclick="setExpRange('lastmonth')">Letzter Monat</button>
-        <button class="btn" type="button" onclick="setExpRange('year')">Akt. Jahr</button>
-        <button class="btn" type="button" onclick="setExpRange('lastyear')">Letztes Jahr</button>
+        <button class="btn" type="button" onclick="setExpRange('month')">{t('export.curr_month_btn')}</button>
+        <button class="btn" type="button" onclick="setExpRange('lastmonth')">{t('export.last_month_btn')}</button>
+        <button class="btn" type="button" onclick="setExpRange('year')">{t('export.curr_year_btn')}</button>
+        <button class="btn" type="button" onclick="setExpRange('lastyear')">{t('export.last_year_btn')}</button>
       </div>
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0;">Download (CSV)</h3>
-      <p class="small">Trennzeichen <b>;</b> – Excel-freundlich. Dateiname enthält den gewählten Zeitraum.</p>
+      <h3 style="margin-top:0;">{t('export.download_title')}</h3>
+      <p class="small">{t('export.csv_hint')}</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn" type="button" onclick="dlExport('/export/time_blocks.csv',true)">Zeitblöcke</button>
-        <button class="btn" type="button" onclick="dlExport('/export/absences.csv',true)">Abwesenheiten</button>
-        <button class="btn" type="button" onclick="dlExport('/export/trips.csv',true)">Dienstreisen</button>
-        <button class="btn" type="button" onclick="dlExport('/export/balance.csv',true)">Gleitzeitkonto</button>
-        <button class="btn" type="button" onclick="dlExport('/export/calendar_days.csv',false)">Feiertage</button>
+        <button class="btn" type="button" onclick="dlExport('/export/time_blocks.csv',true)">{t('export.time_blocks')}</button>
+        <button class="btn" type="button" onclick="dlExport('/export/absences.csv',true)">{t('export.absences')}</button>
+        <button class="btn" type="button" onclick="dlExport('/export/trips.csv',true)">{t('export.trips')}</button>
+        <button class="btn" type="button" onclick="dlExport('/export/balance.csv',true)">{t('export.balance')}</button>
+        <button class="btn" type="button" onclick="dlExport('/export/calendar_days.csv',false)">{t('export.holidays_btn')}</button>
         {admin_btn}
       </div>
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0;">Per E-Mail senden</h3>
-      <p class="small">Der gewählte Zeitraum wird als CSV-Anhang gesendet.</p>
+      <h3 style="margin-top:0;">{t('export.send_mail')}</h3>
+      <p class="small">{t('export.mail_hint')}</p>
       <form method="post" action="/export/mail" onsubmit="return injectMailDates(this)">
         <input type="hidden" name="date_from" id="mail-date-from" value="{default_from}">
         <input type="hidden" name="date_to"   id="mail-date-to"   value="{default_to}">
         {admin_user_select}
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;">
           <div style="flex:1;min-width:200px;">
-            <label>Empfänger-E-Mail</label><br>
+            <label>{t('export.recipient')}</label><br>
             <input type="email" name="recipient_email" value="{user_email}"
                    placeholder="empfaenger@beispiel.de" required style="max-width:360px;width:100%;">
           </div>
           <div>
-            <label>Exporttyp</label><br>
+            <label>{t('export.type_label')}</label><br>
             <select name="export_type">
-              <option value="time_blocks">Zeitblöcke</option>
-              <option value="absences">Abwesenheiten</option>
+              <option value="time_blocks">{t('export.time_blocks')}</option>
+              <option value="absences">{t('export.absences')}</option>
             </select>
           </div>
         </div>
-        <button class="btn primary" type="submit">Export senden</button>
+        <button class="btn primary" type="submit">{t('export.send_btn')}</button>
       </form>
     </div>
 
@@ -7595,28 +7933,28 @@ def export_home():
     }}
     function syncMailDates(from,to){{
       var f=document.getElementById('mail-date-from');
-      var t=document.getElementById('mail-date-to');
+      var tt=document.getElementById('mail-date-to');
       if(f)f.value=from||'';
-      if(t)t.value=to||'';
+      if(tt)tt.value=to||'';
     }}
     function dlExport(base,withRange){{
       if(!withRange){{window.location=base;return;}}
       var from=document.getElementById('exp-from-iso').value;
       var to=document.getElementById('exp-to-iso').value;
-      if(!from||!to){{alert('Bitte Von- und Bis-Datum auswählen.');return;}}
+      if(!from||!to){{alert('{_js_select_dates}');return;}}
       window.location=base+'?from='+from+'&to='+to;
     }}
     function injectMailDates(form){{
       var from=document.getElementById('exp-from-iso').value;
       var to=document.getElementById('exp-to-iso').value;
-      if(!from||!to){{alert('Bitte Von- und Bis-Datum auswählen.');return false;}}
+      if(!from||!to){{alert('{_js_select_dates}');return false;}}
       document.getElementById('mail-date-from').value=from;
       document.getElementById('mail-date-to').value=to;
       return true;
     }}
     </script>
     """
-    return render_template_string(layout("Export", body, u, APP_VERSION))
+    return render_template_string(layout(t("export.title"), body, u, APP_VERSION))
 
 
 def _export_date_range(user_id: int = 0):
@@ -7924,6 +8262,7 @@ def export_users_csv():
 @login_required
 def help_page():
     u = current_user()
+    lang = session.get('lang', 'de') if u else 'de'
     is_admin = bool(u and u.get("is_admin"))
 
     admin_section = ""
@@ -7934,12 +8273,23 @@ def help_page():
           <div class="help-entry">
             <b>🔧 Rollen: Systemadmin &amp; Zeitmanager</b>
             <p><b>Systemadmin</b> hat vollen Zugriff auf beide Admin-Bereiche. Kann Benutzer anlegen, löschen und Rollen vergeben. Zugriff auf Maileinstellungen, Bot, Backup, Update und Erscheinungsbild.</p>
-            <p><b>Zeitmanager</b> hat Zugriff auf den Bereich <em>Benutzerübersichten</em>: Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Urlaubsübertrag-Ausnahmen. Kann Identität normaler User annehmen. Kein Zugriff auf Systemeinstellungen.</p>
-            <p>Rollenvergabe: <em>Admin → Benutzerübersichten → Benutzer bearbeiten → Rolle</em> (nur für Systemadmin).</p>
+            <p><b>Zeitmanager</b> hat Zugriff auf den Bereich <em>Benutzerübersichten</em>: Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Urlaubsübertrag-Ausnahmen. Kann Identität normaler Nutzer annehmen (👤 Identität-Schaltfläche). Kein Zugriff auf Systemeinstellungen.</p>
+            <p>Rollenvergabe: <em>Admin → Benutzerübersichten → Benutzer bearbeiten → Rolle</em> (nur Systemadmin). Beim Anlegen eines neuen Nutzers kann die Rolle direkt im Formular gewählt werden.</p>
+          </div>
+          <div class="help-entry">
+            <b>👤 Admin ohne Zeiterfassung (Nur Verwaltung)</b>
+            <p>Systemadmins und Zeitmanager können als <em>„Nur Verwaltung"</em> markiert werden. Diese Nutzer erfassen keine eigenen Arbeitszeiten: Die Übersicht, der Kalender und die Zeiterfassungs-Seiten sind für sie ausgeblendet – sie landen direkt im Admin-Bereich.</p>
+            <p><b>Wo die Einstellung vorgenommen wird:</b></p>
+            <ul>
+              <li><b>Erstkonfiguration (Setup):</b> Beim allerersten Einrichten der App wird gefragt, ob der Systemadmin selbst Zeiten erfasst oder nur verwaltet.</li>
+              <li><b>Onboarding (Schritt 0):</b> Wenn ein neuer Systemadmin das Onboarding durchläuft, erscheint als erster Schritt die Frage nach der Nutzungsart (Zeiterfassung oder Nur Verwaltung).</li>
+              <li><b>Nachträglich:</b> Unter <em>Einstellungen → Admin-Einstellungen → Zeiterfassung aktiv/deaktiviert</em> (nur für den eigenen Account, nur Systemadmin). Für andere Nutzer: <em>Admin → Benutzerübersichten → Benutzer bearbeiten → „Nur Verwaltung"</em>.</li>
+              <li><b>Beim Anlegen:</b> Im Formular „Neuer Nutzer" ist die Checkbox <em>„Nur Verwaltung"</em> verfügbar, sobald eine Admin-Rolle gewählt wird.</li>
+            </ul>
           </div>
           <div class="help-entry">
             <b>Benutzerverwaltung (Systemadmin)</b>
-            <p>Neue User anlegen, bestehende bearbeiten, Rollen vergeben und User löschen. Felder: Benutzername, Anzeigename, E-Mail, Rolle, Aktiv-Status, Arbeitsbeginn-Datum.</p>
+            <p>Neue User anlegen, bestehende bearbeiten, Rollen vergeben und User löschen. Felder: Benutzername, Anzeigename, E-Mail, Rolle, Aktiv-Status, Arbeitsbeginn-Datum, Nur Verwaltung. Beim Anlegen kann direkt ein Passwort generiert und per E-Mail verschickt werden.</p>
           </div>
           <div class="help-entry">
             <b>Maileinstellungen (Systemadmin)</b>
@@ -7966,7 +8316,12 @@ def help_page():
           {_sysadmin_help}
           <div class="help-entry">
             <b>Identität annehmen (Impersonation)</b>
-            <p>Im Admin-Bereich bei einem normalen User auf <em>👤 Identität</em> klicken. Alle Seiten werden aus Sicht dieses Users angezeigt. Über den orangen Banner oben zurückwechseln.</p>
+            <p>Systemadmins und Zeitmanager können die Sicht eines normalen Nutzers übernehmen, um Einträge in dessen Namen zu prüfen oder zu erfassen.</p>
+            <ul>
+              <li><b>Systemadmin:</b> Im Admin-Bereich (<em>Benutzerverwaltung</em>-Tab) bei einem Nutzer auf <em>👤 Identität</em> klicken.</li>
+              <li><b>Zeitmanager:</b> Im Bereich <em>Benutzerübersichten</em> bei einem normalen Nutzer auf <em>👤 Identität</em> klicken. Zeitmanager können nur Identitäten normaler Nutzer annehmen, nicht die anderer Admins.</li>
+            </ul>
+            <p>Alle Seiten werden dann aus Sicht dieses Nutzers angezeigt. Über den orangen Banner oben zurückwechseln.</p>
             <p>Im Telegram-Bot: <code>/als &lt;username&gt;</code> wechselt den Kontext, <code>/als ich</code> setzt zurück.</p>
           </div>
           <div class="help-entry">
@@ -8427,7 +8782,441 @@ function filterHelp(q){{
 
 {admin_section}
 """
-    return render_template_string(layout("Hilfe", body, u, APP_VERSION))
+    if lang == 'en':
+        _sysadmin_help_en = ""
+        if _is_sysadm_help:
+            _sysadmin_help_en = """
+          <div class="help-entry">
+            <b>🔧 Roles: System Admin &amp; Time Manager</b>
+            <p><b>System admin</b> has full access to both admin areas. Can create, delete and assign roles to users. Access to mail settings, bot, backup, update and appearance.</p>
+            <p><b>Time manager</b> has access to the <em>User overviews</em> area: vacation overview, absences, flex time, schedules, carryover exceptions. Can impersonate regular users (👤 Impersonate). No access to system settings.</p>
+            <p>Role assignment: <em>Admin → User overviews → Edit user → Role</em> (system admin only).</p>
+          </div>
+          <div class="help-entry">
+            <b>👤 Admin without time tracking (Admin only)</b>
+            <p>System admins and time managers marked as <em>"Admin only"</em> do not record their own hours: the overview, calendar and time tracking pages are hidden — they land directly in the admin area.</p>
+          </div>
+          <div class="help-entry">
+            <b>User management (System admin)</b>
+            <p>Create new users, edit existing ones, assign roles and delete users. When creating a user, a password can be generated and sent by e-mail directly.</p>
+          </div>
+          <div class="help-entry">
+            <b>Mail settings (System admin)</b>
+            <p>SMTP server, port, sender and credentials under <em>Admin → System settings → Mail settings</em>. Use <em>Send test</em> to verify.</p>
+          </div>
+          <div class="help-entry">
+            <b>Backup &amp; Restore (System admin)</b>
+            <p><b>Full backup</b>: complete database as SQLite file.<br>
+            <b>Settings backup</b>: mail and bot configuration as JSON (without passwords).<br>
+            <b>User export/import</b>: transfer individual users with time entries and absences.</p>
+          </div>"""
+        admin_section_en = ""
+        if is_admin or is_timemanager(_u_for_help):
+            admin_section_en = f"""
+    <div class="acc help-acc">
+      <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+        <span>🛠 Admin Area</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body">
+        <div class="acc-inner">
+          {_sysadmin_help_en}
+          <div class="help-entry">
+            <b>Impersonation</b>
+            <p>System admins and time managers can view the app from another user's perspective to check or record entries on their behalf.</p>
+            <ul>
+              <li><b>System admin:</b> In <em>Admin → User management</em>, click 👤 next to a user.</li>
+              <li><b>Time manager:</b> In <em>User overviews</em>, click 👤 next to a regular user. Time managers cannot impersonate other admins.</li>
+            </ul>
+            <p>Use the orange banner at the top to switch back. In the bot: <code>/als &lt;username&gt;</code> / <code>/als ich</code>.</p>
+          </div>
+          <div class="help-entry">
+            <b>Schedule management</b>
+            <p>Multiple schedules with different valid-from dates per user. Under <em>Admin → User overviews → Schedules → Edit</em>.</p>
+          </div>
+          <div class="help-entry">
+            <b>Vacation carryover exception</b>
+            <p>Under <em>Admin → User overviews → Vacation</em>, disable the 31 March expiry rule for individual users.</p>
+          </div>
+          <div class="help-entry">
+            <b>Flex time overview &amp; limits</b>
+            <p>Under <em>Admin → User overviews → Flex Time</em>, current balances for all users are shown. Configure plus/minus limits and notification e-mails per user.</p>
+          </div>
+          <div class="help-entry">
+            <b>Vacation overview &amp; limit</b>
+            <p>Under <em>Admin → User overviews → Vacation</em>, all users are listed with entitlement, carryover, used and remaining vacation.</p>
+          </div>
+        </div>
+      </div>
+    </div>"""
+        body = f"""
+<style>
+.acc{{border:1px solid var(--bd);border-radius:var(--r);margin-bottom:10px;overflow:hidden;background:var(--bg);}}
+.acc-hdr{{width:100%;display:flex;justify-content:space-between;align-items:center;
+  padding:14px 16px;background:var(--sf);border:none;cursor:pointer;
+  font-size:15px;font-weight:600;color:var(--tx);text-align:left;gap:10px;}}
+.acc-hdr:hover{{background:var(--bd);}}
+.acc-hdr.open{{border-bottom:1px solid var(--bd);}}
+.acc-arr{{font-size:12px;flex-shrink:0;color:var(--mu);}}
+.acc-body{{max-height:0;overflow:hidden;transition:max-height .3s ease;}}
+.acc-body.open{{max-height:99999px;}}
+.acc-inner{{padding:16px;display:flex;flex-direction:column;gap:0;}}
+.help-entry{{padding:12px 0;border-bottom:1px solid var(--bd);}}
+.help-entry:last-child{{border-bottom:none;padding-bottom:0;}}
+.help-entry b{{display:block;margin-bottom:4px;font-size:14px;}}
+.help-entry p{{font-size:13px;color:var(--mu);margin:3px 0;line-height:1.5;}}
+.help-entry code{{background:var(--bd);padding:1px 5px;border-radius:4px;font-size:12px;font-family:monospace;}}
+.help-entry ul{{font-size:13px;color:var(--mu);padding-left:18px;margin:4px 0;line-height:1.6;}}
+.info-box{{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;color:#1e40af;}}
+.warn-box{{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin:10px 0;font-size:13px;color:#92400e;}}
+@media(prefers-color-scheme:dark){{
+  .info-box{{background:#1e3a5f;border-color:#1e40af;color:#93c5fd;}}
+  .warn-box{{background:#3d2b00;border-color:#d97706;color:#fcd34d;}}
+}}
+</style>
+<script>
+function haccToggle(btn){{
+  var body=btn.nextElementSibling;
+  var arr=btn.querySelector('.acc-arr');
+  var op=body.classList.contains('open');
+  body.classList.toggle('open',!op);
+  btn.classList.toggle('open',!op);
+  if(arr)arr.textContent=op?'▼':'▲';
+}}
+function filterHelp(q){{
+  q=q.toLowerCase().trim();
+  document.querySelectorAll('.help-acc').forEach(function(acc){{
+    var txt=acc.textContent.toLowerCase();
+    var match=!q||txt.includes(q);
+    acc.style.display=match?'':'none';
+    if(q&&match){{
+      var body=acc.querySelector('.acc-body');
+      var btn=acc.querySelector('.acc-hdr');
+      var arr=acc.querySelector('.acc-arr');
+      if(body&&!body.classList.contains('open')){{
+        body.classList.add('open');
+        if(btn)btn.classList.add('open');
+        if(arr)arr.textContent='▲';
+      }}
+    }}
+  }});
+}}
+</script>
+
+<h2 style="margin:0 0 14px 0;font-size:18px;">❓ Help</h2>
+<div style="margin-bottom:16px;">
+  <input type="search" id="help-search" placeholder="Search help …"
+         style="width:100%;max-width:420px;"
+         oninput="filterHelp(this.value)">
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🏠 Overview (Home)</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Flex Time Widget</b>
+      <p>Shows your current flex time balance: <b style="color:#16a34a;">green</b> = surplus hours, <b style="color:#dc2626;">red</b> = deficit. Balance = sum of all (actual − target) days since your tracking start date plus your opening balance.</p>
+    </div>
+    <div class="help-entry">
+      <b>Vacation remaining</b>
+      <p>Annual entitlement + effective carryover − vacation days taken. Only working days count (weekends and public holidays are excluded).</p>
+      <div class="warn-box">⚠️ <b>Carryover rule:</b> Unused annual leave expires on 31 March of the following year. Leave must have <em>started</em> by 31 March. Exceptions can be set by an admin.</div>
+    </div>
+    <div class="help-entry">
+      <b>Missing entries</b>
+      <p>Past working days (per your schedule) with neither a time entry nor an absence. Today is never counted as missing.</p>
+    </div>
+    <div class="help-entry">
+      <b>Time booking</b>
+      <p>Shows how many recorded working days have not yet been booked to a project or cost centre. Only visible if time booking is enabled in settings.</p>
+    </div>
+    <div class="help-entry">
+      <b>Absence card</b>
+      <p>Compact overview of current and upcoming absences (vacation, sick, flex day, other) in the current period.</p>
+    </div>
+    <div class="help-entry">
+      <b>Retirement countdown</b>
+      <p>Time remaining until retirement (years, months, days, working days). Only visible if a date of birth is stored in settings. Configurable under <em>Settings → Personal settings</em> (default age: 67).</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>⏱ Time Tracking</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Opening the day view</b>
+      <p>Click on a day in the calendar, use the Today tile on the overview, or use the bot command <code>/heute</code>.</p>
+    </div>
+    <div class="help-entry">
+      <b>Logging a time block</b>
+      <p>Enter <em>Start</em>, <em>End</em> and optional <em>Break</em> in minutes. Multiple blocks per day are supported. Each block is saved separately and summed in the flex time report.</p>
+      <div class="info-box">ℹ️ Times are recorded in <b>15-minute steps</b>. Inputs are rounded to the nearest quarter hour.</div>
+    </div>
+    <div class="help-entry">
+      <b>Multiple time blocks per day</b>
+      <p>Simply add another block. The delta and balance are calculated from the <em>sum of all blocks</em> minus the target.</p>
+    </div>
+    <div class="help-entry">
+      <b>Editing and deleting entries</b>
+      <p>In the day view, click the edit icon or Delete next to a block. In the calendar, use the context menu (three dots) of the day.</p>
+    </div>
+    <div class="help-entry">
+      <b>Weekend / public holiday</b>
+      <p>No target hours on weekends and public holidays. If you worked anyway, a time block can be recorded – target stays 0 and delta equals actual hours.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📅 Calendar</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Navigation</b>
+      <p>Use the ‹ › arrows to switch months. Click the month name to jump directly to a month.</p>
+    </div>
+    <div class="help-entry">
+      <b>List view</b>
+      <p>Switch between tile and list view using the toggle at the top right. List view is best for longer periods.</p>
+    </div>
+    <div class="help-entry">
+      <b>Colour coding and symbols</b>
+      <ul>
+        <li>🟡 <b>Amber dot</b> = day is booked</li>
+        <li>❌ <b>Red X</b> = missing time entry</li>
+        <li>🟢 <b>Green badge</b> = vacation</li>
+        <li>✈ <b>Plane</b> = business trip recorded</li>
+        <li>🟦 <b>Blue background</b> = today</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Context menu (three dots)</b>
+      <p>Click the three dots of a day to log time, add an absence, log a business trip, or edit/delete existing entries.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📊 Flex Time</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Balance calculation</b>
+      <p>Balance = opening balance + sum of all (actual − target) since your tracking start date. The balance is updated daily; future days are not included.</p>
+    </div>
+    <div class="help-entry">
+      <b>Report columns</b>
+      <ul>
+        <li><b>Target</b> = contractual hours per your schedule</li>
+        <li><b>Actual</b> = recorded hours (sum of all blocks)</li>
+        <li><b>Delta</b> = actual − target (green = plus, red = minus)</li>
+        <li><b>Balance</b> = cumulative balance up to that day</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Flex day deduction</b>
+      <p>On a flex day, target = 0 but the <em>originally planned</em> target hours are still deducted from flex time. A flex day is economically equivalent to a vacation day without affecting the vacation balance.</p>
+    </div>
+    <div class="help-entry">
+      <b>RTF report via bot</b>
+      <p>The bot command <code>/bericht</code> or <code>/bericht year</code> generates a colour-coded RTF report (green/red) when the report is longer than one screen page.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🏖 Absences</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Vacation</b>
+      <p>Counts working days per your schedule (excluding weekends and public holidays). Affects the vacation balance. Target = 0, no flex time deduction.</p>
+      <div class="warn-box">⚠️ <b>Carryover rule:</b> Unused carryover from the previous year expires on 31 March. Leave must have started by 31 March.</div>
+    </div>
+    <div class="help-entry">
+      <b>Sick</b>
+      <p>No effect on flex time or vacation balance. Target = 0 for the sick period.</p>
+    </div>
+    <div class="help-entry">
+      <b>Flex day</b>
+      <p>Time off from the flex time balance. Target = 0, but the <em>originally planned</em> hours are deducted from flex time. No vacation consumption.</p>
+      <div class="info-box">ℹ️ Flex day via bot: type "Flex day on Aug 3"</div>
+    </div>
+    <div class="help-entry">
+      <b>Other</b>
+      <p>Other special absences. Like sick: target = 0, no flex time effect. The comment is shown as the label.</p>
+    </div>
+    <div class="help-entry">
+      <b>Adding a new absence</b>
+      <p>Via <em>Absences → New</em>, the calendar context menu, or Telegram bot free text: <em>"Vacation from Jul 1 to Jul 15"</em></p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>✈ Business Trips</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>What is a business trip?</b>
+      <p>An informational entry showing you were on a business trip on certain days. <b>Important:</b> Working hours are <em>not</em> recorded automatically – time blocks must be entered separately.</p>
+    </div>
+    <div class="help-entry">
+      <b>Fields</b>
+      <p>From/to date and destination (free text). The destination appears in the calendar as a tooltip on the ✈ symbol.</p>
+    </div>
+    <div class="help-entry">
+      <b>Display in calendar</b>
+      <p>Days with a business trip are marked with ✈. In the flex time report the destination appears in the time column.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📋 Time Booking</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>What does booking mean?</b>
+      <p>Posting recorded working hours to projects or cost centres. A working day is only fully closed once it has been booked.</p>
+    </div>
+    <div class="help-entry">
+      <b>Book individually</b>
+      <p>Click the <em>Book</em> button in the day view. The day then receives the 🟡 amber dot in the calendar.</p>
+    </div>
+    <div class="help-entry">
+      <b>Bulk booking</b>
+      <p>Under <em>Booking</em>, select multiple days at once. Practical after vacation or longer absences.</p>
+    </div>
+    <div class="help-entry">
+      <b>Enable / Disable</b>
+      <p>In settings under <em>Booking</em>, enable the feature with a start date. Days before the start date are not shown for booking.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🔒 Lock Periods</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Monthly close</b>
+      <p>Locks all time entries and absences for the month. No further changes are possible. The balance is frozen.</p>
+    </div>
+    <div class="help-entry">
+      <b>Annual close</b>
+      <p>Locks all months of the year at once. Recommended at year-end after a full review.</p>
+      <div class="info-box">ℹ️ Only months from your tracking start date need to be closed.</div>
+    </div>
+    <div class="help-entry">
+      <b>Unlock</b>
+      <p>Only admins can unlock locked periods. Under <em>Admin → Lock Periods</em>.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>⚙️ Settings</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Personal settings</b>
+      <p><b>Display name</b>: shown in the header and in reports.<br>
+      <b>E-mail</b>: for notifications.<br>
+      <b>Date of birth</b>: enables retirement countdown on the overview.<br>
+      <b>Retirement age</b>: default 67, range 60–72.<br>
+      <b>Telegram ID</b>: for bot access (see Telegram Bot section).</p>
+    </div>
+    <div class="help-entry">
+      <b>Vacation</b>
+      <p><b>Annual entitlement</b>: total vacation days for the year (half days possible, e.g. 27.5).<br>
+      <b>Carryover</b>: remaining leave from the previous year. Expires 31 March unless an admin exception applies.</p>
+    </div>
+    <div class="help-entry">
+      <b>Work schedule</b>
+      <p><b>Weekly mode</b>: same daily target distributed across all working days.<br>
+      <b>Daily mode</b>: different target per weekday (e.g. Mon–Thu 8h, Fri 6h).<br>
+      <b>Valid from</b>: multiple schedules with different start dates – the most recently valid one applies.</p>
+    </div>
+    <div class="help-entry">
+      <b>Time booking</b>
+      <p>Enable the feature with a start date. Days from this date must be booked. Disabling resets all unbooked days.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🤖 Telegram Bot</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Setup</b>
+      <p>1. Send any message to <b>@userinfobot</b> in Telegram → it replies with your Telegram ID (a numeric number).<br>
+      2. Enter this ID under <em>Settings → Telegram ID</em>.<br>
+      3. Send the bot <code>/start</code> – all commands are now available.</p>
+    </div>
+    <div class="help-entry">
+      <b>Commands</b>
+      <ul>
+        <li><code>/saldo</code> — current flex time balance</li>
+        <li><code>/urlaub</code> — vacation overview</li>
+        <li><code>/heute</code> — today's entries and daily balance</li>
+        <li><code>/fehlend</code> — missing entries in the current year</li>
+        <li><code>/kontierung</code> — unbooked days</li>
+        <li><code>/abwesenheiten</code> — absence list current year</li>
+        <li><code>/bericht</code> — flex time current month (text or RTF)</li>
+        <li><code>/bericht jahr</code> — flex time whole year as RTF</li>
+        <li><code>/bericht 5</code> — flex time May (any month 1–12)</li>
+        <li><code>/user</code> — currently active user</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Free-text input</b>
+      <p>Just type natural language:</p>
+      <ul>
+        <li><em>"Today worked from 7:30 to 13:00"</em></li>
+        <li><em>"On May 15 from 8 to 16:00"</em></li>
+        <li><em>"Vacation from Jul 1 to Jul 15"</em></li>
+        <li><em>"Sick from Jun 10 to Jun 12"</em></li>
+        <li><em>"Flex day on Aug 3"</em></li>
+      </ul>
+      <p>Times are rounded to 15-minute steps. If an entry exists, the bot asks for confirmation.</p>
+    </div>
+    <div class="help-entry">
+      <b>Evening reminder</b>
+      <p>The bot sends a message in the evening if no time entry or absence exists for today.</p>
+      <ul>
+        <li>Enable: <em>Settings → Personal settings → 📱 Telegram Reminder</em></li>
+        <li>Time: configurable between 15:00 and 23:00 (default: 20:00)</li>
+        <li>Only on actual working days – no reminders on weekends, holidays or locked periods</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Admin commands</b>
+      <ul>
+        <li><code>/als &lt;username&gt;</code> — switch context to another user</li>
+        <li><code>/als ich</code> — return to your own context</li>
+        <li><code>/users</code> — list all active users</li>
+      </ul>
+    </div>
+  </div></div>
+</div>
+
+{admin_section_en}
+"""
+    return render_template_string(layout(t("help.title"), body, u, APP_VERSION))
 
 
 @app.get("/admin/users")
@@ -8465,7 +9254,7 @@ def admin_users():
         if not r["is_admin"] and r["is_active"] and r["id"] != u["id"]:
             impersonate_btn = (
                 f'<form method="post" action="/admin/impersonate/{r["id"]}" style="display:inline;margin-left:8px;">'
-                f'<button class="btn btn-sm" type="submit" title="Identität annehmen">👤 Identität</button></form>'
+                f'<button class="btn btn-sm" type="submit" title="{t("admin.identity_btn")}">{t("admin.identity_btn")}</button></form>'
             )
         carryover_exc_badge = ""
         if r["vacation_carryover_exception"]:
@@ -8501,7 +9290,7 @@ def admin_users():
       <p class="small">Benutzernamen sind nicht änderbar. Eigener Account kann nicht gelöscht werden.</p>
     </div>
     '''
-    return render_template_string(layout("Admin: Benutzer", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('admin.users_title')}", body, u, APP_VERSION))
 
 
 @app.get("/admin/users/new")
@@ -8532,25 +9321,35 @@ def admin_users_new():
       </form>
     </div>
     '''
-    return render_template_string(layout("Admin: Benutzer anlegen", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('admin.new_user')}", body, u, APP_VERSION))
 
 
 @app.post("/admin/users/new")
 @sysadmin_required
 def admin_users_new_post():
     bootstrap()
+    u = current_user()
     username = (request.form.get("username") or "").strip()
-    password = (request.form.get("password") or "").strip()
-    is_admin = (request.form.get("is_admin") or "0") == "1"
+    new_role = (request.form.get("admin_role") or "").strip()
+    if new_role not in ("", "timemanager", "sysadmin"):
+        new_role = ""
+    is_admin = new_role in ("timemanager", "sysadmin")
     is_active = (request.form.get("is_active") or "0") == "1"
+    admin_only_val = 1 if (request.form.get("admin_only") or "0") == "1" and is_admin else 0
     tracking_start_date = _parse_date_input(request.form.get("tracking_start_date") or "")
+    send_pw_email = (request.form.get("send_pw_email") or "0") == "1"
+
+    if send_pw_email:
+        password = _generate_password()
+    else:
+        password = (request.form.get("password") or "").strip()
 
     if not username or not password:
-        add_flash("Bitte Username/Passwort angeben.", "error")
+        add_flash("Bitte Username und Passwort angeben.", "error")
         return redirect(url_for("admin_users_new"))
 
     try:
-        create_user(
+        new_id = create_user(
             username,
             password,
             is_admin=is_admin,
@@ -8562,8 +9361,37 @@ def admin_users_new_post():
         add_flash("Benutzer konnte nicht angelegt werden (evtl. Username bereits vorhanden).", "error")
         return redirect(url_for("admin_users_new"))
 
-    add_flash("Benutzer angelegt. Der Nutzer wird beim Login durch den Einrichtungs-Wizard geführt.", "success")
-    return redirect(url_for("admin_users"))
+    # Set role, admin_only, must_change_password
+    db = connect()
+    db.execute(
+        "UPDATE users SET admin_role=?, admin_only=?, must_change_password=1, updated_at=datetime('now') WHERE id=?",
+        (new_role or None, admin_only_val, new_id),
+    )
+    db.commit()
+    db.close()
+
+    if send_pw_email:
+        _edb = connect()
+        _erow = _edb.execute("SELECT email FROM users WHERE id=?", (new_id,)).fetchone()
+        _edb.close()
+        email = (_erow["email"] or "").strip() if _erow else ""
+        if email:
+            try:
+                _send_mail_simple(
+                    email,
+                    "Zeiterfassung: Dein Zugangsdaten",
+                    f"Hallo {username},\n\nDein Konto wurde angelegt.\n\n"
+                    f"Benutzername: {username}\nTemporäres Passwort: {password}\n\n"
+                    f"Bitte ändere das Passwort nach dem ersten Login.\n\nDein Zeiterfassung-Team",
+                )
+                add_flash(f"Benutzer angelegt und Zugangsdaten per Mail an {_html.escape(email)} gesendet.", "success")
+            except Exception:
+                add_flash(f"Benutzer angelegt. Mail-Versand fehlgeschlagen. Temporäres Passwort: <b>{_html.escape(password)}</b>", "success")
+        else:
+            add_flash(f"Benutzer angelegt (keine E-Mail). Temporäres Passwort: <b>{_html.escape(password)}</b>", "success")
+    else:
+        add_flash("Benutzer angelegt. Der Nutzer wird beim Login durch den Einrichtungs-Wizard geführt.", "success")
+    return redirect("/admin#acc-user")
 
 
 @app.get("/admin/users/<int:user_id>/edit")
@@ -8572,14 +9400,63 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types FROM users WHERE id=?", (user_id,)).fetchone()
     db.close()
     if not r:
         abort(404)
 
     active_checked = "checked" if r["is_active"] else ""
+    admin_only_checked = "checked" if r["admin_only"] else ""
     tsd_val = str(r["tracking_start_date"] or "")[:10]
+    cur_holiday_region = r["holiday_region"] or ""
     _can_edit_role = is_sysadmin(u) and user_id != u["id"]
+
+    # Load absence type settings for this user
+    _eat_str = r["enabled_absence_types"] or ""
+    _eat_ids = {int(x) for x in _eat_str.split(",") if x.strip().isdigit()} if _eat_str else None
+    _db2 = connect()
+    _all_abs_types = _db2.execute("SELECT id, name FROM absence_types WHERE active=1 ORDER BY name").fetchall()
+    _db2.close()
+    _type_by_name: dict[str, int] = {t["name"]: t["id"] for t in _all_abs_types}
+
+    def _eat_checked(type_name: str) -> str:
+        tid = _type_by_name.get(type_name)
+        if not tid:
+            return ""
+        if _eat_ids is None:
+            return "checked" if type_name in _STANDARD_TYPE_NAMES else ""
+        return "checked" if tid in _eat_ids else ""
+
+    _flextag_id = _type_by_name.get("Flextag")
+    _verdi_id = _type_by_name.get("Verdi")
+    _sonstige_id_eat = _type_by_name.get("Sonstige")
+    _verdi_row = f"""<label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+      <input type="checkbox" name="at_verdi" value="1" {_eat_checked("Verdi")}{"" if _verdi_id else " disabled"}>
+      <span>Verdi</span>
+    </label>""" if _verdi_id else ""
+
+    _absence_types_html = f"""
+        <div style="margin-bottom:14px;">
+          <label style="font-size:12px;font-weight:600;">Abwesenheitstypen</label>
+          <div class="small" style="color:var(--mu);margin-bottom:6px;">Urlaub und Krank sind immer aktiv.</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" checked disabled> Urlaub
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" checked disabled> Krank
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+              <input type="checkbox" name="at_flextag" value="1" {_eat_checked("Flextag")}{"" if _flextag_id else " disabled"}>
+              <span>Flextag</span>
+            </label>
+            {_verdi_row}
+            <label style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" name="at_sonstige" value="1" {_eat_checked("Sonstige")}{"" if _sonstige_id_eat else " disabled"}>
+              <span>Sonstige</span>
+            </label>
+          </div>
+        </div>"""
 
     # role options for sysadmin dropdown
     def _role_opt(val, label, cur):
@@ -8594,6 +9471,12 @@ def admin_users_edit(user_id: int):
             {_role_opt("timemanager","📋 Zeitmanager",cur_role)}
             {_role_opt("sysadmin","🔧 Systemadmin",cur_role)}
           </select>
+        </div>""" if _can_edit_role else ""
+    admin_only_field = f"""
+        <div style="margin-bottom:12px;">
+          <label style="font-weight:400;"><input type="checkbox" name="admin_only" value="1" {admin_only_checked}>
+          Nur Admin (kein eigenes Zeitkonto)</label>
+          <div class="small" style="color:var(--mu);margin-top:2px;">Aktivieren für Admins ohne eigene Zeiterfassung.</div>
         </div>""" if _can_edit_role else ""
 
     # Schedule list for this user
@@ -8645,6 +9528,7 @@ def admin_users_edit(user_id: int):
       <h3>Benutzer bearbeiten: {r["username"]}</h3>
       <form method="post" action="/admin/users/{user_id}/edit">
         {role_dropdown}
+        {admin_only_field}
         <label><input type="checkbox" name="is_active" value="1" {active_checked}> aktiv</label><br><br>
 
         <div><label>Arbeitsbeginn (start_date)</label><br>
@@ -8652,13 +9536,26 @@ def admin_users_edit(user_id: int):
           <div class="small" style="color:#777;margin-top:3px;">Kein Eintrag vor diesem Datum möglich.</div>
         </div><br>
 
-        <div><label>Neues Passwort (optional)</label><br>
+        <div><label>Neues Passwort <span class="small" style="color:var(--mu);">(optional – leer = unverändert)</span></label><br>
           <input type="password" name="new_password" placeholder="leer lassen = unverändert">
         </div><br>
+
+        <div><label>Region <span class="small" style="color:var(--mu);">(leer = Standard verwenden)</span></label><br>
+          <div style="margin-top:4px;">{_region_picker("holiday_region", cur_holiday_region, include_default=True)}</div>
+        </div><br>
+
+        {_absence_types_html}
 
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/admin/users">Zurück</a>
       </form>
+      <hr style="margin:16px 0;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span class="small" style="color:var(--mu);">Zufallspasswort generieren, "Passwort ändern" setzen und per Mail versenden:</span>
+        <form method="post" action="/admin/users/{user_id}/reset-password" style="display:inline;">
+          <button class="btn btn-sm" type="submit">🔑 Passwort zurücksetzen</button>
+        </form>
+      </div>
     </div>
 
     <div class="card">
@@ -8672,7 +9569,7 @@ def admin_users_edit(user_id: int):
       </table>
     </div>
     '''
-    return render_template_string(layout("Admin: Benutzer bearbeiten", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('admin.edit_user')}", body, u, APP_VERSION))
 
 
 @app.post("/admin/users/<int:user_id>/edit")
@@ -8715,7 +9612,48 @@ def admin_users_edit_post(user_id: int):
     if new_pw:
         set_password(user_id, new_pw)
 
-    add_flash("Benutzer gespeichert.", "success")
+    new_region = (request.form.get("holiday_region") or "").strip()
+    if new_region and new_region not in ALL_REGIONS:
+        new_region = ""
+    db = connect()
+    db.execute(
+        "UPDATE users SET holiday_region=?, updated_at=datetime('now') WHERE id=?",
+        (new_region or None, user_id),
+    )
+    db.commit()
+    db.close()
+
+    # Absence types: save enabled_absence_types
+    _db3 = connect()
+    _abt = _db3.execute("SELECT id, name FROM absence_types WHERE active=1").fetchall()
+    _db3.close()
+    _tbyn = {t["name"]: t["id"] for t in _abt}
+    _always = {_tbyn[n] for n in ("Urlaub", "Krank") if n in _tbyn}
+    _eat_set = set(_always)
+    for _at_name, _field in (("Flextag", "at_flextag"), ("Verdi", "at_verdi"), ("Sonstige", "at_sonstige")):
+        if request.form.get(_field) and _tbyn.get(_at_name):
+            _eat_set.add(_tbyn[_at_name])
+    # Store NULL if it matches the standard set exactly, else store explicit list
+    _std_ids = {_tbyn[n] for n in _STANDARD_TYPE_NAMES if n in _tbyn}
+    _new_eat = None if _eat_set == _std_ids else ",".join(str(i) for i in sorted(_eat_set))
+    _db4 = connect()
+    _db4.execute("UPDATE users SET enabled_absence_types=?, updated_at=datetime('now') WHERE id=?",
+                 (_new_eat, user_id))
+    _db4.commit()
+    _db4.close()
+
+    # admin_only: sysadmin only, not self
+    if is_sysadmin(u) and user_id != u["id"]:
+        new_admin_only = 1 if request.form.get("admin_only") == "1" else 0
+        db = connect()
+        db.execute(
+            "UPDATE users SET admin_only=?, updated_at=datetime('now') WHERE id=?",
+            (new_admin_only, user_id),
+        )
+        db.commit()
+        db.close()
+
+    add_flash(t("admin.user_saved"), "success")
     return redirect("/admin#acc-user")
 
 
@@ -8751,6 +9689,58 @@ def admin_users_delete(user_id: int):
     db.close()
     add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
     return redirect(url_for("admin_users"))
+
+
+@app.post("/admin/users/<int:user_id>/reset-password")
+@timemanager_required
+def admin_users_reset_password(user_id: int):
+    bootstrap()
+    u = current_user()
+
+    db = connect()
+    target = db.execute(
+        "SELECT id, username, display_name, email, admin_role, is_admin FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    db.close()
+    if not target:
+        abort(404)
+
+    # Timemanagers may not reset sysadmin passwords
+    if not is_sysadmin(u) and target["admin_role"] == "sysadmin":
+        add_flash("Kein Zugriff: Systemadmin-Passwort kann nur von einem Systemadmin zurückgesetzt werden.", "error")
+        return redirect("/admin")
+
+    new_pw = _generate_password()
+    set_password(user_id, new_pw)
+    set_must_change_password(user_id, True)
+
+    display = target["display_name"] or target["username"]
+    email = (target["email"] or "").strip()
+    mail_sent = False
+    if email:
+        try:
+            _send_mail_simple(
+                email,
+                "Zeiterfassung: Passwort zurückgesetzt",
+                f"Hallo {display},\n\nDein Passwort wurde zurückgesetzt.\n\n"
+                f"Neues Passwort: {new_pw}\n\n"
+                f"Bitte ändere es nach dem Login unter Einstellungen → Passwort.\n\n"
+                f"Dein Zeiterfassung-Team",
+            )
+            mail_sent = True
+        except Exception:
+            mail_sent = False
+
+    if mail_sent:
+        add_flash(f"Passwort für {display} zurückgesetzt und per Mail an {_html.escape(email)} gesendet.", "success")
+    else:
+        add_flash(
+            f"Passwort für {display} zurückgesetzt. "
+            f"{'Keine E-Mail hinterlegt – ' if not email else 'Mail-Versand fehlgeschlagen – '}"
+            f"Temporäres Passwort: <b>{_html.escape(new_pw)}</b>",
+            "success",
+        )
+    return redirect(f"/admin/users/{user_id}/edit")
 
 
 @app.get("/admin/users/<int:user_id>/vacation-carryover")
@@ -8845,7 +9835,7 @@ def admin_vacation_carryover(user_id: int):
       </form>
     </div>
     """
-    return render_template_string(layout("Urlaubsübertrag-Ausnahme", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('admin.carryover_tab')}", body, u, APP_VERSION))
 
 
 @app.post("/admin/users/<int:user_id>/vacation-carryover")
@@ -8886,7 +9876,7 @@ def admin_vacation_carryover_delete(user_id: int, year: int):
 
 
 @app.post("/admin/impersonate/<int:user_id>")
-@admin_required
+@timemanager_required
 def admin_impersonate(user_id: int):
     bootstrap()
     u = current_user()
@@ -8899,10 +9889,10 @@ def admin_impersonate(user_id: int):
         abort(404)
     if target["is_admin"]:
         add_flash("Admin-Identität kann nicht angenommen werden.", "error")
-        return redirect(url_for("admin_users"))
+        return redirect(url_for("admin"))
     if not target["is_active"]:
         add_flash("Inaktive Benutzer können nicht angenommen werden.", "error")
-        return redirect(url_for("admin_users"))
+        return redirect(url_for("admin"))
     session["impersonator_id"] = u["id"]
     session["user_id"] = user_id
     return redirect("/")
@@ -8915,7 +9905,7 @@ def admin_impersonate_stop():
         return redirect("/")
     session["user_id"] = impersonator_id
     session.pop("impersonator_id", None)
-    return redirect(url_for("admin_users"))
+    return redirect(url_for("admin"))
 
 
 # ─── Admin: Zeitschema bearbeiten / löschen ──────────────────────────────────
@@ -9067,7 +10057,7 @@ def admin_periods():
         elif n_locked == 12 or year_lk:
             status_txt = "<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
         else:
-            names = ", ".join(MONTH_NAMES_DE[m][:3] for m in locked_months)
+            names = ", ".join(_t_month_short(m) for m in locked_months)
             status_txt = f"<span style='color:var(--ok);'>🔒 {n_locked} Monate ({names})</span>"
 
         unlock_form = (
@@ -9098,7 +10088,7 @@ def admin_periods():
       </table>
     </div>
     """
-    return render_template_string(layout("Admin: Abschlüsse", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('periods.title')}", body, u, APP_VERSION))
 
 
 @app.post("/admin/periods/unlock")
@@ -9139,7 +10129,8 @@ def admin_home():
     db = connect()
     all_users = db.execute(
         "SELECT id, username, display_name, is_admin, is_active, admin_role, "
-        "vacation_carryover_exception, contouring_enabled, created_at FROM users ORDER BY username"
+        "vacation_carryover_exception, contouring_enabled, created_at, holiday_region, "
+        "email, admin_only FROM users ORDER BY username"
     ).fetchall()
     locks_raw = db.execute(
         "SELECT pl.*, u.username AS locked_by_name FROM period_locks pl "
@@ -9165,6 +10156,7 @@ def admin_home():
     user_trs = ""
     sched_trs = ""
     vac_trs = ""
+    tm_user_trs = ""
     for r in all_users:
         uid = r["id"]
         display = r["display_name"] or r["username"]
@@ -9173,12 +10165,17 @@ def admin_home():
         # Role badge
         role = r["admin_role"]
         if role == "sysadmin":
-            role_badge = " <span class='small' style='color:#6366f1;'>🔧 Systemadmin</span>"
+            role_badge = f" <span class='small' style='color:#6366f1;'>{t('admin.role_sysadmin_badge')}</span>"
         elif role == "timemanager":
-            role_badge = " <span class='small' style='color:#0891b2;'>📋 Zeitmanager</span>"
+            role_badge = f" <span class='small' style='color:#0891b2;'>{t('admin.role_tm_badge')}</span>"
         else:
             role_badge = ""
-        inact_badge = " <span class='small' style='color:var(--mu);'>· inaktiv</span>" if not r["is_active"] else ""
+        inact_badge = f" <span class='small' style='color:var(--mu);'>· {t('admin.inactive_badge')}</span>" if not r["is_active"] else ""
+        admin_only_badge = f" <span class='small' style='color:#7c3aed;'>{t('admin.admin_only_badge')}</span>" if r["admin_only"] else ""
+        _hr = r["holiday_region"] or ""
+        _bl_label = _REGION_LABEL.get(_hr, "")
+        bl_badge = (f" <span class='small' style='color:var(--mu);'>📍 {_html.escape(_bl_label)}</span>"
+                    if _hr and _bl_label else "")
 
         # delete / impersonate buttons (sysadmin only for delete)
         del_btn = ""
@@ -9193,15 +10190,38 @@ def admin_home():
         if not r["is_admin"] and r["is_active"] and uid != u["id"]:
             imp_btn = (
                 f'<form method="post" action="/admin/impersonate/{uid}" style="display:contents;">'
-                f'<button class="btn btn-sm" type="submit">👤 Identität</button></form>'
+                f'<button class="btn btn-sm" type="submit">{t("admin.identity_btn")}</button></form>'
             )
         user_trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{role_badge}{inact_badge}</td>'
+            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}{bl_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
             f'<td><div style="display:flex;gap:4px;flex-wrap:wrap;">'
-            f'<a class="btn btn-sm" href="/admin/users/{uid}/edit">Bearbeiten</a>'
+            f'<a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("btn.edit")}</a>'
             f'{imp_btn}{del_btn}</div></td>'
+            f'</tr>'
+        )
+
+        # Timemanager user list row
+        email_disp = _html.escape(r["email"] or "")
+        email_html = f'<span class="small" style="color:var(--mu);">{email_disp}</span>' if email_disp else '<span class="small" style="color:var(--mu);">–</span>'
+        pw_reset_btn = ""
+        if uid != u["id"]:
+            pw_reset_btn = (
+                f'<form method="post" action="/admin/users/{uid}/reset-password" style="display:contents;">'
+                f'<button class="btn btn-sm" type="submit" title="{t("admin.pw_reset_title")}">{t("admin.pw_reset_btn")}</button></form>'
+            )
+        imp_tm_btn = ""
+        if not r["is_admin"] and r["is_active"] and uid != u["id"]:
+            imp_tm_btn = (
+                f'<form method="post" action="/admin/impersonate/{uid}" style="display:contents;">'
+                f'<button class="btn btn-sm" type="submit" title="{t("admin.identity_btn")}">{t("admin.identity_btn")}</button></form>'
+            )
+        tm_user_trs += (
+            f'<tr>'
+            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}</td>'
+            f'<td>{email_html}</td>'
+            f'<td style="white-space:nowrap;"><div style="display:flex;gap:4px;flex-wrap:wrap;">{imp_tm_btn}{pw_reset_btn}</div></td>'
             f'</tr>'
         )
 
@@ -9210,26 +10230,28 @@ def admin_home():
         mode = (sched.get("mode") or "weekly").lower()
         if mode == "daily":
             dp = []
-            for dk, lbl in [("mon_minutes","Mo"),("tue_minutes","Di"),("wed_minutes","Mi"),
-                             ("thu_minutes","Do"),("fri_minutes","Fr"),("sat_minutes","Sa"),("sun_minutes","So")]:
+            for dk, lbl in [("mon_minutes",t("schedule.mo")),("tue_minutes",t("schedule.tu")),
+                             ("wed_minutes",t("schedule.we")),("thu_minutes",t("schedule.th")),
+                             ("fri_minutes",t("schedule.fr")),("sat_minutes",t("schedule.sa")),
+                             ("sun_minutes",t("schedule.su"))]:
                 v = int(sched.get(dk) or 0)
                 if v: dp.append(f"{lbl}:{_fmt_minutes(v)}")
             soll_str = " ".join(dp) if dp else "–"
         else:
             wm = int(sched.get("weekly_minutes") or 0)
-            soll_str = f"{wm/60:g} h/Woche" if wm else "–"
+            soll_str = f"{wm/60:g} {t('schedule.hours_week')}" if wm else "–"
         sched_trs += (
             f'<tr><td>{display}{sub_html}</td>'
             f'<td class="small">{soll_str}</td>'
-            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">Zeitschemata</a></td></tr>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("admin.acc_schedules")}</a></td></tr>'
         )
 
         # Vacation row
         exc_on = int(r["vacation_carryover_exception"] or 0)
-        exc_badge = " <span class='small' style='color:#d97706;'>⚡ Ausnahme</span>" if exc_on else ""
+        exc_badge = f" <span class='small' style='color:#d97706;'>{t('admin.carryover_exception_badge')}</span>" if exc_on else ""
         vac_trs += (
             f'<tr><td>{display}{sub_html}{exc_badge}</td>'
-            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/vacation-carryover">Übertrag verwalten</a></td></tr>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/vacation-carryover">{t("admin.carryover_manage_btn")}</a></td></tr>'
         )
 
     # ── Section 4: Periods ────────────────────────────────────────────────────
@@ -9247,17 +10269,17 @@ def admin_home():
         locked_months = [m for m in range(1, 13) if year_lk or f"{sel_year}-{m:02d}" in ulocks]
         n = len(locked_months)
         if n == 0:
-            status = "<span class='small' style='color:var(--mu);'>Keine Abschlüsse</span>"
+            status = f"<span class='small' style='color:var(--mu);'>{t('admin.no_periods')}</span>"
         elif n == 12 or year_lk:
-            status = "<span style='color:var(--ok);'>🔒 Jahr abgeschlossen</span>"
+            status = f"<span style='color:var(--ok);'>{t('periods.year_closed_status')}</span>"
         else:
-            names = ", ".join(MONTH_NAMES_DE[m][:3] for m in locked_months)
-            status = f"<span style='color:var(--ok);'>🔒 {n} Monate ({names})</span>"
+            names = ", ".join(_t_month_short(m) for m in locked_months)
+            status = f"<span style='color:var(--ok);'>🔒 {n} {t('periods.months')} ({names})</span>"
         unlock_form = (
             f"<form method='post' action='/admin/periods/unlock' style='display:contents;'>"
             f"<input type='hidden' name='target_user_id' value='{uid}'>"
             f"<input type='hidden' name='year' value='{sel_year}'>"
-            f"<button class='btn danger btn-sm'>Entsperren</button></form>"
+            f"<button class='btn danger btn-sm'>{t('periods.unlock')}</button></form>"
         ) if ulocks else ""
         periods_trs += (
             f"<tr><td><b>{display}</b></td><td>{status}</td>"
@@ -9270,11 +10292,11 @@ def admin_home():
     )
     mail_status_html = (
         f"<table style='width:auto;margin-bottom:12px;'>"
-        f"{mail_status_row('Server', mail_cfg.get('mail_server') or '–')}"
-        f"{mail_status_row('Port', mail_cfg.get('mail_port') or '587')}"
-        f"{mail_status_row('User', mail_cfg.get('mail_username') or '–')}"
-        f"{mail_status_row('Passwort', '<span style=\"color:var(--ok);\">gesetzt</span>' if pw_set else '<span style=\"color:var(--danger);\">nicht gesetzt</span>')}"
-        f"{mail_status_row('Absender', mail_cfg.get('mail_from') or '–')}"
+        f"{mail_status_row(t('admin.smtp_host'), mail_cfg.get('mail_server') or '–')}"
+        f"{mail_status_row(t('admin.smtp_port'), mail_cfg.get('mail_port') or '587')}"
+        f"{mail_status_row(t('admin.smtp_user'), mail_cfg.get('mail_username') or '–')}"
+        f"{mail_status_row(t('admin.smtp_pass'), '<span style=\"color:var(--ok);\">' + t('admin.set_hint') + '</span>' if pw_set else '<span style=\"color:var(--danger);\">' + t('admin.empty_hint') + '</span>')}"
+        f"{mail_status_row(t('admin.smtp_from'), mail_cfg.get('mail_from') or '–')}"
         f"</table>"
     )
 
@@ -9285,14 +10307,34 @@ def admin_home():
         return html.replace('<div class="acc"', f'<div class="acc" data-tab="{tab}"', 1)
 
     _html_absences  = _tab(_render_admin_absences_section(), "users")
+    _html_per_user  = _render_per_user_settings_section()
     _html_overtime  = _tab(_render_admin_overtime_section(), "users")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
+    _html_regional  = _tab(_render_regional_section(), "system") if _is_sysadm else ""
     _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
     _html_bot       = _tab(_render_bot_section(), "system") if _is_sysadm else ""
     _html_update    = _tab(_render_update_section(), "system") if _is_sysadm else ""
     _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
-    _new_user_btn   = '<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">+ Neuer Benutzer</button>' if _is_sysadm else ""
+    _new_user_btn   = f'<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">{t("admin.new_user_btn")}</button>' if _is_sysadm else ""
     _default_tab    = "system" if _is_sysadm else "users"
+
+    _html_tm_users = f"""
+    <div class="acc" data-tab="users" id="acc-tm-users">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-tm-users-body')">
+        <span>{t('admin.acc_tm_users')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-tm-users-body">
+        <div class="acc-inner">
+          <p class="small" style="margin-bottom:10px;">{t('admin.pw_reset_hint')}</p>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.email')}</th><th></th></tr></thead>
+              <tbody>{tm_user_trs}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>"""
 
     body = f"""
     {flash_html()}
@@ -9328,6 +10370,19 @@ function toggleNewUser(){{
   if(!p)return;
   p.style.display=(p.style.display==='none'||!p.style.display)?'block':'none';
 }}
+function nuRoleChange(){{
+  var role=document.getElementById('nu-role').value;
+  var aoRow=document.getElementById('nu-admin-only-row');
+  if(aoRow)aoRow.style.display=(role==='sysadmin'||role==='timemanager')?'':'none';
+}}
+function nuSendChange(){{
+  var send=document.getElementById('nu-send');
+  var pwWrap=document.getElementById('nu-pw-wrap');
+  var pw=document.getElementById('nu-pw');
+  if(!send||!pw)return;
+  pw.required=!send.checked;
+  if(pwWrap)pwWrap.style.opacity=send.checked?'0.4':'1';
+}}
 var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl'];
 var _DEFAULT_TAB='{_default_tab}';
 function switchTab(tab){{
@@ -9362,64 +10417,80 @@ window.addEventListener('DOMContentLoaded',function(){{
 </script>
 
 <div class="tab-bar">
-  {"" if not _is_sysadm else '<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">⚙ Systemeinstellungen</button>'}
-  <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">👥 Benutzerübersichten</button>
+  {"" if not _is_sysadm else f'<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">{t("admin.tab_system")}</button>'}
+  <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">{t('admin.tab_users')}</button>
 </div>
 
     <!-- Section 1: Benutzerverwaltung -->
     <div class="acc" id="acc-user" data-tab="system">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-user-body')">
-        <span>👥 Benutzerverwaltung</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_user_mgmt')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-user-body">
         <div class="acc-inner">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-            <span class="small">{len(all_users)} Benutzer</span>
+            <span class="small">{len(all_users)} {t('admin.users_title')}</span>
             {_new_user_btn}
           </div>
 
           <div id="new-user-panel" style="display:none;border:1px solid var(--bd);border-radius:var(--rs);padding:12px;margin-bottom:12px;background:var(--sf);">
-            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Neuen Benutzer anlegen</div>
-            <form method="post" action="/admin/users/new">
+            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.new_user_title')}</div>
+            <form method="post" action="/admin/users/new" id="nu-form">
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
-                <div><label style="font-size:12px;">Username</label><br><input name="username" required style="font-size:13px;padding:5px 8px;"></div>
-                <div><label style="font-size:12px;">Temporäres Passwort</label><br><input type="password" name="password" required style="font-size:13px;padding:5px 8px;"></div>
-                <div><label style="font-size:12px;">Erfassung ab</label><br>{_date_input("tracking_start_date", today_iso)}</div>
+                <div><label style="font-size:12px;">{t('admin.user_name')}</label><br><input name="username" required style="font-size:13px;padding:5px 8px;" id="nu-user"></div>
+                <div id="nu-pw-wrap"><label style="font-size:12px;">{t('admin.temp_password')}</label><br><input type="password" name="password" id="nu-pw" style="font-size:13px;padding:5px 8px;"></div>
+                <div><label style="font-size:12px;">{t('admin.tracking_start_col')}</label><br>{_date_input("tracking_start_date", today_iso)}</div>
               </div>
-              <div style="display:flex;gap:16px;margin-bottom:10px;">
-                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="is_admin" value="1"> Admin</label>
-                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="is_active" value="1" checked> aktiv</label>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+                <div>
+                  <label style="font-size:12px;">{t('admin.role')}</label>
+                  <select name="admin_role" id="nu-role" onchange="nuRoleChange()" style="font-size:13px;padding:5px 8px;width:auto;">
+                    <option value="">{t('admin.role_user')}</option>
+                    <option value="timemanager">{t('admin.role_tm_badge')}</option>
+                    <option value="sysadmin">{t('admin.role_sysadmin_badge')}</option>
+                  </select>
+                </div>
+                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="is_active" value="1" checked> {t('admin.active')}</label>
+              </div>
+              <div id="nu-admin-only-row" style="display:none;margin-bottom:8px;">
+                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="admin_only" value="1" id="nu-ao"> {t('admin.admin_only_label')}</label>
+              </div>
+              <div style="margin-bottom:8px;">
+                <label style="font-size:13px;font-weight:400;"><input type="checkbox" name="send_pw_email" value="1" id="nu-send" onchange="nuSendChange()"> {t('admin.send_pw_email_label')}</label>
               </div>
               <div style="display:flex;gap:6px;">
-                <button class="btn primary btn-sm" type="submit">Anlegen</button>
-                <button class="btn btn-sm" type="button" onclick="toggleNewUser()">Abbrechen</button>
+                <button class="btn primary btn-sm" type="submit">{t('admin.create_btn')}</button>
+                <button class="btn btn-sm" type="button" onclick="toggleNewUser()">{t('btn.cancel')}</button>
               </div>
-              <div class="small" style="margin-top:6px;color:var(--mu);">Nutzer wird beim ersten Login durch den Einrichtungs-Wizard geführt.</div>
+              <div class="small" style="margin-top:6px;color:var(--mu);">{t('admin.onboarding_hint')}</div>
             </form>
           </div>
 
           <div class="table-scroll">
             <table>
-              <thead><tr><th>Benutzer</th><th>Angelegt</th><th></th></tr></thead>
+              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.col_created')}</th><th></th></tr></thead>
               <tbody>{user_trs}</tbody>
             </table>
           </div>
-          <div class="small" style="color:var(--mu);margin-top:6px;">Eigener Account kann nicht gelöscht werden.</div>
+          <div class="small" style="color:var(--mu);margin-top:6px;">{t('admin.cant_delete_own')}</div>
         </div>
       </div>
     </div>
 
+    <!-- Section 1b: Benutzer & Passwort-Reset (Benutzerübersichten tab) -->
+    {_html_tm_users}
+
     <!-- Section 2: Zeitschemas -->
     <div class="acc" id="acc-zeit" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit-body')">
-        <span>🕐 Zeitschemas</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_schedules')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-zeit-body">
         <div class="acc-inner">
-          <p class="small" style="margin-bottom:8px;">Zeitschemata werden pro Benutzer unter "Bearbeiten" verwaltet.</p>
+          <p class="small" style="margin-bottom:8px;">{t('admin.schedules_hint')}</p>
           <div class="table-scroll">
             <table>
-              <thead><tr><th>Benutzer</th><th>Aktuelles Soll</th><th></th></tr></thead>
+              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.col_target')}</th><th></th></tr></thead>
               <tbody>{sched_trs}</tbody>
             </table>
           </div>
@@ -9430,14 +10501,14 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 3: Urlaubsverwaltung -->
     <div class="acc" id="acc-urlaub" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
-        <span>🏖 Urlaubsverwaltung</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_vacation')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-urlaub-body">
         <div class="acc-inner">
-          <p class="small" style="margin-bottom:8px;">Übertrag-Ausnahmen steuern, ob Resturlaub am 31.03. verfällt.</p>
+          <p class="small" style="margin-bottom:8px;">{t('admin.vacation_hint')}</p>
           <div class="table-scroll">
             <table>
-              <thead><tr><th>Benutzer</th><th></th></tr></thead>
+              <thead><tr><th>{t('admin.users_title')}</th><th></th></tr></thead>
               <tbody>{vac_trs}</tbody>
             </table>
           </div>
@@ -9448,19 +10519,19 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 4: Abschlüsse -->
     <div class="acc" id="acc-abschl" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-abschl-body')">
-        <span>🔒 Abschlüsse</span><span class="acc-arr">▼</span>
+        <span>{t('periods.title')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-abschl-body">
         <div class="acc-inner">
           <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
             <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;">
-              <div><label style="font-size:12px;">Jahr</label><br><select name="y" style="font-size:13px;padding:4px 8px;">{year_opts}</select></div>
-              <button class="btn btn-sm" type="submit">Anzeigen</button>
+              <div><label style="font-size:12px;">{t('periods.year_label')}</label><br><select name="y" style="font-size:13px;padding:4px 8px;">{year_opts}</select></div>
+              <button class="btn btn-sm" type="submit">{t('periods.show_btn')}</button>
             </form>
           </div>
           <div class="table-scroll">
             <table>
-              <thead><tr><th>Benutzer</th><th>Status {sel_year}</th><th></th></tr></thead>
+              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.update_current_state')} {sel_year}</th><th></th></tr></thead>
               <tbody>{periods_trs}</tbody>
             </table>
           </div>
@@ -9471,7 +10542,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 5: Maileinstellungen -->
     <div class="acc" id="acc-mail" data-tab="system">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-mail-body')">
-        <span>✉ Maileinstellungen</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_mail')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-mail-body">
         <div class="acc-inner">
@@ -9479,37 +10550,37 @@ window.addEventListener('DOMContentLoaded',function(){{
           <form method="post" action="/admin/mail-settings" style="margin-bottom:16px;">
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
               <div style="flex:2;min-width:180px;">
-                <label style="font-size:12px;">Mailserver (SMTP)</label>
+                <label style="font-size:12px;">{t('admin.smtp_host')}</label>
                 <input type="text" name="mail_server" value="{mail_cfg.get('mail_server','')}" placeholder="mail.beispiel.de" required style="font-size:13px;padding:5px 8px;">
               </div>
               <div style="flex:0 0 90px;">
-                <label style="font-size:12px;">Port</label>
+                <label style="font-size:12px;">{t('admin.smtp_port')}</label>
                 <input type="number" name="mail_port" value="{mail_cfg.get('mail_port','587')}" min="1" max="65535" required style="width:80px;font-size:13px;padding:5px 8px;">
               </div>
             </div>
             <div style="margin-bottom:8px;">
-              <label style="font-size:12px;">Benutzername</label>
+              <label style="font-size:12px;">{t('admin.smtp_user')}</label>
               <input type="text" name="mail_username" value="{mail_cfg.get('mail_username','')}" placeholder="user@beispiel.de" required style="font-size:13px;padding:5px 8px;">
             </div>
             <div style="margin-bottom:8px;">
-              <label style="font-size:12px;">Passwort {"<span style='font-weight:400;color:var(--mu);'>(leer = nicht ändern)</span>" if pw_set else ""}</label>
-              <input type="password" name="mail_password" value="" placeholder="{'nicht ändern' if pw_set else 'Passwort'}" style="font-size:13px;padding:5px 8px;">
+              <label style="font-size:12px;">{t('admin.smtp_pass')} {"<span style='font-weight:400;color:var(--mu);'>(" + t('admin.smtp_pass_hint') + ")</span>" if pw_set else ""}</label>
+              <input type="password" name="mail_password" value="" placeholder="{'**' if pw_set else t('admin.smtp_pass')}" style="font-size:13px;padding:5px 8px;">
             </div>
             <div style="margin-bottom:10px;">
-              <label style="font-size:12px;">Absender</label>
+              <label style="font-size:12px;">{t('admin.smtp_from')}</label>
               <input type="text" name="mail_from" value="{mail_cfg.get('mail_from','')}" placeholder="Zeiterfassung &lt;noreply@beispiel.de&gt;" style="font-size:13px;padding:5px 8px;">
             </div>
-            <button class="btn primary btn-sm" type="submit">Speichern</button>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
           </form>
           <hr style="margin:12px 0;">
-          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Verbindung testen</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.smtp_test')}</div>
           <form method="post" action="/admin/mail-settings/test">
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
               <div>
-                <label style="font-size:12px;">Test-Empfänger</label>
+                <label style="font-size:12px;">{t('admin.smtp_test_recipient')}</label>
                 <input type="email" name="test_recipient" value="{admin_email}" placeholder="admin@beispiel.de" required style="font-size:13px;padding:5px 8px;">
               </div>
-              <button class="btn btn-sm" type="submit">Test-Mail senden</button>
+              <button class="btn btn-sm" type="submit">{t('admin.smtp_test')}</button>
             </div>
           </form>
         </div>
@@ -9519,11 +10590,17 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 6: Urlaubsübersicht -->
     {_html_absences}
 
+    <!-- Section 6b: Abwesenheitstypen & Regionen pro User -->
+    {_html_per_user}
+
     <!-- Section 7: Gleitzeitkonto Übersicht -->
     {_html_overtime}
 
     <!-- Section 8: Erscheinungsbild -->
     {_html_appearance}
+
+    <!-- Section 8b: Regionale Einstellungen -->
+    {_html_regional}
 
     <!-- Section 9: Überstunden-Defaults -->
     {_html_ot_defs}
@@ -9537,7 +10614,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     <!-- Section 12: System Update -->
     {_html_update}
     """
-    return render_template_string(layout("Admin", body, u, APP_VERSION))
+    return render_template_string(layout(t("admin.title"), body, u, APP_VERSION))
 
 
 def _render_backup_section() -> str:
@@ -9569,7 +10646,7 @@ def _render_backup_section() -> str:
             f"</tr>"
         )
     if not backup_rows:
-        backup_rows = "<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>Keine lokalen Backups vorhanden.</td></tr>"
+        backup_rows = f"<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>{t('admin.backup_none_local')}</td></tr>"
 
     # Users for export/import dropdowns
     _db = connect()
@@ -9586,54 +10663,55 @@ def _render_backup_section() -> str:
         for u in _all_users
     )
 
+    _restore_confirm = t('admin.backup_restore_confirm')
     return f"""
     <div class="acc" id="acc-backup">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-backup-body')">
-        <span>💾 Backup &amp; Restore</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_backup')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-backup-body">
         <div class="acc-inner">
 
           <!-- ── 1. Vollständiges Backup ── -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Vollständiges Backup</div>
-          <p class="small" style="color:var(--mu);margin-bottom:10px;">Komplette Datenbank inkl. aller Nutzer, Zeiteinträge und Einstellungen (.db.gz).</p>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_full_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_full_hint')}</p>
           <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
-            <a class="btn primary btn-sm" href="/admin/backup/download">&#11015; Jetzt sichern &amp; herunterladen</a>
+            <a class="btn primary btn-sm" href="/admin/backup/download">&#11015; {t('admin.backup_download_btn')}</a>
             <div class="small" style="color:var(--mu);padding-top:5px;">
-              {"Letztes Backup: <b>" + last_ts + "</b>" if last_ts else "Noch kein Backup erstellt."}
+              {t('admin.backup_last') + " <b>" + last_ts + "</b>" if last_ts else t('admin.backup_none')}
             </div>
           </div>
           <form method="post" action="/admin/backup/auto-config" style="margin-bottom:12px;">
             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
               <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
-                <input type="checkbox" name="auto_enabled" value="1" {auto_checked}> Automatisches Backup
+                <input type="checkbox" name="auto_enabled" value="1" {auto_checked}> {t('admin.backup_auto')}
               </label>
               <div>
-                <label style="font-size:12px;">Uhrzeit</label>
+                <label style="font-size:12px;">{t('common.time')}</label>
                 <input type="time" name="auto_time" value="{auto_time}" style="font-size:13px;padding:4px 8px;width:110px;">
               </div>
-              <button class="btn btn-sm" type="submit">Speichern</button>
+              <button class="btn btn-sm" type="submit">{t('btn.save')}</button>
             </div>
-            <p class="small" style="margin-top:6px;color:var(--mu);">Maximal 7 Backups werden lokal behalten.</p>
+            <p class="small" style="margin-top:6px;color:var(--mu);">{t('admin.backup_keep_hint')}</p>
           </form>
 
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Vollständiges Backup wiederherstellen</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_restore_title')}</div>
           <form method="post" action="/admin/backup/restore" enctype="multipart/form-data"
-                onsubmit="return confirm('Datenbank wirklich wiederherstellen?\\n\\nAlle Daten werden durch den Stand der Backup-Datei ersetzt.\\nDer aktuelle Stand wird vorher automatisch gesichert.');">
+                onsubmit="return confirm('{_restore_confirm}');">
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
               <div>
-                <label style="font-size:12px;">Backup-Datei (.db oder .db.gz)</label>
+                <label style="font-size:12px;">{t('admin.backup_file_label')}</label>
                 <input type="file" name="backup_file" accept=".db,.db.gz,.gz" required style="font-size:13px;">
               </div>
-              <button class="btn danger btn-sm" type="submit">&#11014; Wiederherstellen</button>
+              <button class="btn danger btn-sm" type="submit">&#11014; {t('btn.import')}</button>
             </div>
           </form>
-          <p class="small" style="color:var(--mu);margin-bottom:12px;">Vor dem Restore wird automatisch ein Sicherungs-Backup erstellt. Alle Einstellungen inkl. Tokens werden wiederhergestellt.</p>
+          <p class="small" style="color:var(--mu);margin-bottom:12px;">{t('admin.backup_restore_hint')}</p>
 
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Lokale Backups ({len(backups)})</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_local_title')} ({len(backups)})</div>
           <div class="table-scroll" style="margin-bottom:0;">
             <table>
-              <thead><tr><th>Datum</th><th>Größe</th><th>Dateiname</th><th></th></tr></thead>
+              <thead><tr><th>{t('common.date')}</th><th>{t('admin.backup_size')}</th><th>{t('admin.backup_filename')}</th><th></th></tr></thead>
               <tbody>{backup_rows}</tbody>
             </table>
           </div>
@@ -9641,58 +10719,58 @@ def _render_backup_section() -> str:
           <hr style="margin:20px 0;">
 
           <!-- ── 2. Einstellungen-Backup ── -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Einstellungen-Backup</div>
-          <p class="small" style="color:var(--mu);margin-bottom:10px;">Enthält Mail- und Bot-Konfiguration als JSON. Passwörter und API-Keys werden <b>nicht</b> exportiert und müssen nach dem Import neu gesetzt werden.</p>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_settings_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_settings_hint')}</p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
-            <a class="btn btn-sm" href="/admin/backup/settings/export">&#11015; Einstellungen exportieren (.json)</a>
+            <a class="btn btn-sm" href="/admin/backup/settings/export">&#11015; {t('admin.backup_settings_export_btn')}</a>
           </div>
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Einstellungen importieren</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_settings_import_title')}</div>
           <form method="post" action="/admin/backup/settings/import" enctype="multipart/form-data">
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
               <div>
-                <label style="font-size:12px;">Einstellungs-Datei (.json)</label>
+                <label style="font-size:12px;">{t('admin.backup_settings_file_label')}</label>
                 <input type="file" name="settings_file" accept=".json" required style="font-size:13px;">
               </div>
-              <button class="btn btn-sm" type="submit">&#11014; Importieren</button>
+              <button class="btn btn-sm" type="submit">&#11014; {t('btn.import')}</button>
             </div>
           </form>
-          <p class="small" style="color:var(--mu);">Nach dem Import Passwörter unter Mail- und Bot-Einstellungen neu setzen.</p>
+          <p class="small" style="color:var(--mu);">{t('admin.backup_settings_import_hint')}</p>
 
           <hr style="margin:20px 0;">
 
           <!-- ── 3. User-Export / Import ── -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">User-Export / Import</div>
-          <p class="small" style="color:var(--mu);margin-bottom:10px;">Exportiert Zeiteinträge, Abwesenheiten, Dienstreisen und Zeitschemas eines Benutzers als JSON. Nützlich für Transfers zwischen Instanzen.</p>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_user_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_user_hint')}</p>
 
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">User exportieren</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_export_title')}</div>
           <form method="get" action="/admin/backup/user/export" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px;">
             <div>
-              <label style="font-size:12px;">Benutzer</label><br>
+              <label style="font-size:12px;">{t('admin.users_title')}</label><br>
               <select name="uid" style="font-size:13px;padding:4px 8px;">{user_export_opts}</select>
             </div>
-            <button class="btn btn-sm" type="submit">&#11015; Exportieren (.json)</button>
+            <button class="btn btn-sm" type="submit">&#11015; {t('btn.export')} (.json)</button>
           </form>
 
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">User importieren</div>
-          <p class="small" style="color:var(--mu);margin-bottom:8px;">Ziel-Benutzer muss bereits existieren. Duplikate (gleicher Tag) werden übersprungen.</p>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_import_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:8px;">{t('admin.backup_user_import_hint')}</p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
             <div>
-              <label style="font-size:12px;">Export-Datei (.json)</label><br>
+              <label style="font-size:12px;">{t('admin.backup_user_file_label')}</label><br>
               <input type="file" id="user-import-file" accept=".json" style="font-size:13px;">
             </div>
             <div>
-              <label style="font-size:12px;">Ziel-Benutzer</label><br>
+              <label style="font-size:12px;">{t('admin.backup_user_target')}</label><br>
               <select id="user-import-target" style="font-size:13px;padding:4px 8px;">{user_import_opts}</select>
             </div>
             <div style="padding-top:18px;">
-              <button class="btn btn-sm" type="button" onclick="userImportPreview()">Vorschau anzeigen</button>
+              <button class="btn btn-sm" type="button" onclick="userImportPreview()">{t('admin.backup_preview_btn')}</button>
             </div>
           </div>
           <div id="user-import-preview" style="display:none;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;margin-bottom:10px;font-size:13px;"></div>
           <form method="post" action="/admin/backup/user/import" enctype="multipart/form-data" id="user-import-form">
             <input type="hidden" name="target_uid" id="user-import-target-hidden">
             <input type="file" name="user_file" id="user-import-file-hidden" style="display:none;" accept=".json">
-            <button class="btn primary btn-sm" type="submit" id="user-import-confirm" style="display:none;" onclick="return prepareUserImport()">&#11014; Jetzt importieren</button>
+            <button class="btn primary btn-sm" type="submit" id="user-import-confirm" style="display:none;" onclick="return prepareUserImport()">&#11014; {t('btn.import')}</button>
           </form>
 
         </div>
@@ -9950,72 +11028,72 @@ def _render_bot_section() -> str:
     svc_exists = _bot_service_exists()
 
     if status == "active":
-        status_badge = "<span style='color:var(--ok);font-weight:600;'>● Läuft</span>"
+        status_badge = f"<span style='color:var(--ok);font-weight:600;'>● {t('admin.bot_running')}</span>"
     elif status in ("inactive", "failed", "activating"):
         status_badge = f"<span style='color:var(--danger);font-weight:600;'>● {status.capitalize()}</span>"
     elif status == "not-found":
-        status_badge = "<span style='color:var(--mu);font-weight:600;'>● Nicht eingerichtet</span>"
+        status_badge = f"<span style='color:var(--mu);font-weight:600;'>{t('admin.bot_not_configured')}</span>"
     else:
         status_badge = f"<span style='color:var(--mu);'>● {_h.escape(status)}</span>"
 
     setup_btn = ""
     if not svc_exists:
-        setup_btn = """
+        setup_btn = f"""
           <form method="post" action="/admin/bot/setup-service" style="display:inline;">
-            <button class="btn btn-sm" type="submit">⚙ Service einrichten</button>
+            <button class="btn btn-sm" type="submit">{t('admin.bot_setup_service_btn')}</button>
           </form>"""
 
-    tok_hint = "<span style='color:var(--ok);font-size:11px;'>gesetzt</span>" if tok_set else "<span style='color:var(--mu);font-size:11px;'>leer</span>"
-    api_hint = "<span style='color:var(--ok);font-size:11px;'>gesetzt</span>" if api_set else "<span style='color:var(--mu);font-size:11px;'>leer</span>"
+    tok_hint = f"<span style='color:var(--ok);font-size:11px;'>{t('admin.set_hint')}</span>" if tok_set else f"<span style='color:var(--mu);font-size:11px;'>{t('admin.empty_hint')}</span>"
+    api_hint = f"<span style='color:var(--ok);font-size:11px;'>{t('admin.set_hint')}</span>" if api_set else f"<span style='color:var(--mu);font-size:11px;'>{t('admin.empty_hint')}</span>"
 
     return f"""
     <div class="acc" id="acc-bot">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-bot-body')">
-        <span>🤖 Telegram Bot</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_bot')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-bot-body">
         <div class="acc-inner">
 
-          <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Bot-Konfiguration</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:10px;">{t('admin.bot_config')}</div>
           <form method="post" action="/admin/bot-config/save" style="margin-bottom:18px;">
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
               <div style="flex:1;min-width:220px;">
-                <label style="font-size:12px;">Bot-Token {tok_hint}</label>
-                <input type="password" name="bot_token" value="" placeholder="{'nicht ändern' if tok_set else 'Token von @BotFather'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
-                <div class="small" style="color:var(--mu);margin-top:3px;">Token von @BotFather in Telegram</div>
+                <label style="font-size:12px;">{t('admin.bot_token')} {tok_hint}</label>
+                <input type="password" name="bot_token" value="" placeholder="{'**' if tok_set else 'Token von @BotFather'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
+                <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.bot_token_hint')}</div>
               </div>
               <div style="flex:1;min-width:220px;">
-                <label style="font-size:12px;">Anthropic API Key {api_hint}</label>
-                <input type="password" name="anthropic_api_key" value="" placeholder="{'nicht ändern' if api_set else 'sk-ant-...'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
-                <div class="small" style="color:var(--mu);margin-top:3px;">Von console.anthropic.com – optional, für Spracheingabe</div>
+                <label style="font-size:12px;">{t('admin.anthropic_api_key')} {api_hint}</label>
+                <input type="password" name="anthropic_api_key" value="" placeholder="{'**' if api_set else 'sk-ant-...'}" autocomplete="new-password" style="font-size:13px;padding:5px 8px;width:100%;">
+                <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.api_key_hint')}</div>
               </div>
             </div>
             <div style="margin-bottom:10px;">
-              <label style="font-size:12px;">Admin Telegram-IDs (kommagetrennt)</label>
+              <label style="font-size:12px;">{t('admin.admin_tg_ids')}</label>
               <input type="text" name="admin_telegram_ids" value="{_h.escape(admin_ids)}" placeholder="z.B. 123456789, 987654321" style="font-size:13px;padding:5px 8px;min-width:280px;">
-              <div class="small" style="color:var(--mu);margin-top:3px;">Telegram-IDs der Bot-Admins – bei @userinfobot erfragen</div>
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.admin_tg_ids_hint')}</div>
             </div>
-            <button class="btn primary btn-sm" type="submit">Speichern</button>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
           </form>
 
           <hr style="margin:12px 0;">
 
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Bot-Status</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.bot_status')}</div>
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
-            <div>Status: {status_badge}</div>
+            <div>{t('admin.bot_status')}: {status_badge}</div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             <form method="post" action="/admin/bot/control" style="display:inline;">
               <input type="hidden" name="action" value="start">
-              <button class="btn btn-sm" type="submit">▶ Starten</button>
+              <button class="btn btn-sm" type="submit">{t('admin.bot_start_btn')}</button>
             </form>
             <form method="post" action="/admin/bot/control" style="display:inline;">
               <input type="hidden" name="action" value="stop">
-              <button class="btn btn-sm" type="submit">■ Stoppen</button>
+              <button class="btn btn-sm" type="submit">{t('admin.bot_stop_btn')}</button>
             </form>
             <form method="post" action="/admin/bot/control" style="display:inline;">
               <input type="hidden" name="action" value="restart">
-              <button class="btn btn-sm" type="submit">↺ Neu starten</button>
+              <button class="btn btn-sm" type="submit">{t('admin.bot_restart_btn')}</button>
             </form>
             {setup_btn}
           </div>
@@ -10036,63 +11114,72 @@ def _render_update_section() -> str:
     py_ver = _h.escape(_sys.version.split()[0])
     os_info = _h.escape(_plat.platform())
 
+    _check_btn_lbl = t('admin.update_check_btn')
+    _checking_lbl = t('admin.update_checking')
+    _up_to_date_lbl = t('admin.update_up_to_date')
+    _avail_lbl = t('admin.update_available_js')
+    _update_confirm = t('admin.update_confirm')
     return f"""
     <div class="acc" id="acc-update">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-update-body')">
-        <span>🔄 System Update</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_update')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-update-body">
         <div class="acc-inner">
 
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Aktueller Stand</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.update_current_state')}</div>
           <table style="width:auto;margin-bottom:12px;">
-            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">Version</td><td style="font-size:13px;">{APP_VERSION}</td></tr>
-            <tr><td style="color:var(--mu);font-size:12px;">Letzter Commit</td><td style="font-size:12px;font-family:monospace;">{last_commit}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">{t('admin.update_version')}</td><td style="font-size:13px;">{APP_VERSION}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">{t('admin.update_last_commit')}</td><td style="font-size:12px;font-family:monospace;">{last_commit}</td></tr>
           </table>
 
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;">
-            <button class="btn btn-sm" type="button" onclick="checkUpdates(this)">🔍 Auf Updates prüfen</button>
+            <button class="btn btn-sm" type="button" onclick="checkUpdates(this)">{_check_btn_lbl}</button>
             <span id="update-check-result" style="font-size:13px;"></span>
           </div>
 
           <hr style="margin:12px 0;">
 
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Update durchführen</div>
-          <p class="small" style="color:var(--mu);">Führt git pull + pip install aus und startet den Service neu.</p>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.update_section')}</div>
+          <p class="small" style="color:var(--mu);">{t('admin.update_hint')}</p>
           <form method="post" action="/admin/update/run"
-                onsubmit="return confirm('System wirklich aktualisieren?\\n\\nDer Service wird nach dem Update neu gestartet.');">
-            <button class="btn primary btn-sm" type="submit">⬆ Jetzt aktualisieren</button>
+                onsubmit="return confirm('{_update_confirm}');">
+            <button class="btn primary btn-sm" type="submit">{t('admin.update_run_btn')}</button>
           </form>
 
           <hr style="margin:12px 0;">
 
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">System-Info</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.update_sys_info')}</div>
           <table style="width:auto;">
-            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">Python</td><td style="font-size:12px;">{py_ver}</td></tr>
-            <tr><td style="color:var(--mu);font-size:12px;">Betriebssystem</td><td style="font-size:12px;">{os_info}</td></tr>
-            <tr><td style="color:var(--mu);font-size:12px;">Web-Service seit</td><td style="font-size:12px;">{started_web}</td></tr>
-            <tr><td style="color:var(--mu);font-size:12px;">Bot-Service seit</td><td style="font-size:12px;">{started_bot}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;padding-right:14px;">{t('admin.update_python')}</td><td style="font-size:12px;">{py_ver}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">{t('admin.update_os')}</td><td style="font-size:12px;">{os_info}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">{t('admin.update_web_since')}</td><td style="font-size:12px;">{started_web}</td></tr>
+            <tr><td style="color:var(--mu);font-size:12px;">{t('admin.update_bot_since')}</td><td style="font-size:12px;">{started_bot}</td></tr>
           </table>
 
         </div>
       </div>
     </div>
     <script>
+    var _UPD_CHECK_LBL = {repr(_check_btn_lbl)};
+    var _UPD_CHECKING_LBL = {repr(_checking_lbl)};
+    var _UPD_OK_LBL = {repr(_up_to_date_lbl)};
+    var _UPD_AVAIL_LBL = {repr(_avail_lbl)};
     function checkUpdates(btn) {{
       btn.disabled = true;
-      btn.textContent = '⏳ Prüfe…';
+      btn.textContent = _UPD_CHECKING_LBL;
       var el = document.getElementById('update-check-result');
       el.textContent = '';
       fetch('/admin/update/check')
         .then(function(r){{return r.json();}})
         .then(function(d){{
           btn.disabled = false;
-          btn.textContent = '🔍 Auf Updates prüfen';
+          btn.textContent = _UPD_CHECK_LBL;
           if(d.error) {{el.textContent = '⚠ ' + d.error; el.style.color='var(--danger)';}}
-          else if(d.count === 0) {{el.textContent = '✓ Aktuell'; el.style.color='var(--ok)';}}
-          else {{el.innerHTML = '<b style="color:var(--danger);">' + d.count + ' Update(s) verfügbar</b>: ' + d.commits.slice(0,3).map(function(c){{return '<code>'+c+'</code>';}}).join(', ');}}
+          else if(d.count === 0) {{el.textContent = _UPD_OK_LBL; el.style.color='var(--ok)';}}
+          else {{el.innerHTML = '<b style="color:var(--danger);">' + d.count + ' ' + _UPD_AVAIL_LBL + '</b>: ' + d.commits.slice(0,3).map(function(c){{return '<code>'+c+'</code>';}}).join(', ');}}
         }})
-        .catch(function(){{btn.disabled=false;btn.textContent='🔍 Auf Updates prüfen';el.textContent='⚠ Fehler';el.style.color='var(--danger)';}});
+        .catch(function(){{btn.disabled=false;btn.textContent=_UPD_CHECK_LBL;el.textContent='⚠ Fehler';el.style.color='var(--danger)';}});
     }}
     </script>"""
 
@@ -10266,7 +11353,7 @@ def admin_mail_settings():
       </table>
     </div>
     """
-    return render_template_string(layout("Admin: Maileinstellungen", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('admin.mail_settings')}", body, u, APP_VERSION))
 
 
 @app.post("/admin/mail-settings")
@@ -10285,7 +11372,7 @@ def admin_mail_settings_save():
 
     update_pw = bool(mail_password)
     _save_mail_config(mail_server, mail_port, mail_username, mail_password, mail_from, update_pw)
-    add_flash("Maileinstellungen gespeichert.", "success")
+    add_flash(t("admin.smtp_saved"), "success")
     return redirect("/admin#acc-mail")
 
 
@@ -10409,15 +11496,15 @@ def _render_admin_absences_section() -> str:
             )
         if type_sums:
             sum_parts = " &nbsp;·&nbsp; ".join(
-                f"<b>{_html.escape(t)}:</b> {_fmt_vac_days(v)}"
-                for t, v in sorted(type_sums.items())
+                f"<b>{_html.escape(tk)}:</b> {_fmt_vac_days(tv)}"
+                for tk, tv in sorted(type_sums.items())
             )
             detail_rows += (
                 f"<tr><td colspan='5' style='font-size:12px;font-weight:600;"
                 f"border-top:2px solid var(--bd);padding-top:8px;'>Summe: {sum_parts}</td></tr>"
             )
     if not detail_rows:
-        detail_rows = "<tr><td colspan='5' style='color:var(--mu);font-size:13px;'>Keine Abwesenheiten im gewählten Zeitraum.</td></tr>"
+        detail_rows = f"<tr><td colspan='5' style='color:var(--mu);font-size:13px;'>{t('admin.no_data')}</td></tr>"
 
     # --- Section 3: compact overview all users ---
     db = connect()
@@ -10447,9 +11534,9 @@ def _render_admin_absences_section() -> str:
             user_type_sums[uid_ab]["Urlaub"] += days
         elif tname == "Krank":
             user_type_sums[uid_ab]["Krank"] += days
-        elif tname == "Sonstige" and cmt == "flextag":
+        elif tname == "Flextag" or (tname == "Sonstige" and cmt == "flextag"):
             user_type_sums[uid_ab]["Flextag"] += days
-        elif tname == "Sonstige" and cmt == "verdi":
+        elif tname == "Verdi" or (tname == "Sonstige" and cmt == "verdi"):
             user_type_sums[uid_ab]["Verdi"] += days
         else:
             user_type_sums[uid_ab]["Sonstige"] += days
@@ -10467,10 +11554,12 @@ def _render_admin_absences_section() -> str:
 
     export_url = f"/admin/absences/export?uid={sel_uid or ''}&from={abs_from}&to={abs_to}"
 
+    _no_users_row = f"<tr><td colspan='7' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
+    _no_data_row = f"<tr><td colspan='6' style='color:var(--mu);'>{t('admin.no_data')}</td></tr>"
     return f"""
     <div class="acc" id="acc-absoverview">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-absoverview-body')">
-        <span>🏖 Urlaubsübersicht</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_absences')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-absoverview-body">
         <div class="acc-inner">
@@ -10480,49 +11569,49 @@ def _render_admin_absences_section() -> str:
             <input type="hidden" name="abs_uid" value="{_html.escape(sel_uid_str)}">
             <input type="hidden" name="abs_from" value="{_html.escape(abs_from)}">
             <input type="hidden" name="abs_to" value="{_html.escape(abs_to)}">
-            <div><label style="font-size:12px;">Urlaubsstatus Jahr</label><br>
+            <div><label style="font-size:12px;">{t('admin.vac_status_year')}</label><br>
               <select name="abs_year" style="font-size:13px;padding:4px 8px;">{year_opts}</select>
             </div>
-            <button class="btn btn-sm" type="submit">Anzeigen</button>
+            <button class="btn btn-sm" type="submit">{t('periods.show_btn')}</button>
           </form>
           <div class="table-scroll" style="margin-bottom:16px;">
             <table>
               <thead><tr>
-                <th>Name</th>
-                <th style="text-align:center;">Anspruch</th>
-                <th style="text-align:center;">Übertrag</th>
-                <th style="text-align:center;">Gesamt</th>
-                <th style="text-align:center;">Genommen</th>
-                <th style="text-align:center;">Geplant</th>
-                <th style="text-align:center;">Verfügbar</th>
+                <th>{t('common.name')}</th>
+                <th style="text-align:center;">{t('admin.vac_entitlement')}</th>
+                <th style="text-align:center;">{t('admin.vac_carryover')}</th>
+                <th style="text-align:center;">{t('admin.vac_total')}</th>
+                <th style="text-align:center;">{t('admin.vac_taken')}</th>
+                <th style="text-align:center;">{t('admin.vac_planned')}</th>
+                <th style="text-align:center;">{t('admin.vac_available')}</th>
               </tr></thead>
-              <tbody>{vac_rows or "<tr><td colspan='7' style='color:var(--mu);'>Keine Benutzer.</td></tr>"}</tbody>
+              <tbody>{vac_rows or _no_users_row}</tbody>
             </table>
           </div>
 
           <hr style="margin:14px 0;">
 
           <!-- Abwesenheiten je User -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Abwesenheiten je Benutzer</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.abs_per_user')}</div>
           <form method="get" action="/admin" onsubmit="sessionStorage.setItem('openAcc','acc-absoverview')" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
             <input type="hidden" name="abs_year" value="{abs_year}">
-            <div><label style="font-size:12px;">Benutzer</label><br>
+            <div><label style="font-size:12px;">{t('admin.users_title')}</label><br>
               <select name="abs_uid" style="font-size:13px;padding:4px 8px;">{user_opts}</select>
             </div>
-            <div><label style="font-size:12px;">Von</label><br>
+            <div><label style="font-size:12px;">{t('absences.from')}</label><br>
               {_date_input("abs_from", abs_from)}
             </div>
-            <div><label style="font-size:12px;">Bis</label><br>
+            <div><label style="font-size:12px;">{t('absences.to')}</label><br>
               {_date_input("abs_to", abs_to)}
             </div>
             <div style="padding-bottom:2px;display:flex;gap:6px;align-items:flex-end;">
-              <button class="btn btn-sm" type="submit">Anzeigen</button>
+              <button class="btn btn-sm" type="submit">{t('periods.show_btn')}</button>
               <a class="btn btn-sm" href="{_html.escape(export_url)}">CSV ↓</a>
             </div>
           </form>
           <div class="table-scroll" style="margin-bottom:16px;">
             <table>
-              <thead><tr><th>Von</th><th>Bis</th><th>Typ</th><th style="text-align:center;">Tage</th><th>Bemerkung</th></tr></thead>
+              <thead><tr><th>{t('absences.from')}</th><th>{t('absences.to')}</th><th>{t('absences.type')}</th><th style="text-align:center;">{t('common.days')}</th><th>{t('absences.comment')}</th></tr></thead>
               <tbody>{detail_rows}</tbody>
             </table>
           </div>
@@ -10531,20 +11620,20 @@ def _render_admin_absences_section() -> str:
 
           <!-- Kompakte Übersicht alle User -->
           <div style="font-size:13px;font-weight:700;margin-bottom:6px;">
-            Abwesenheiten alle Benutzer
+            {t('admin.abs_all_users')}
             <span style="font-size:11px;font-weight:400;color:var(--mu);">{_fmt_date_de(abs_from)} – {_fmt_date_de(abs_to)}</span>
           </div>
           <div class="table-scroll">
             <table>
               <thead><tr>
-                <th>Name</th>
+                <th>{t('common.name')}</th>
                 <th style="text-align:center;">Urlaub</th>
                 <th style="text-align:center;">Krank</th>
                 <th style="text-align:center;">Flextag</th>
                 <th style="text-align:center;">Verdi</th>
                 <th style="text-align:center;">Sonstige</th>
               </tr></thead>
-              <tbody>{overview_rows or "<tr><td colspan='6' style='color:var(--mu);'>Keine Daten.</td></tr>"}</tbody>
+              <tbody>{overview_rows or _no_data_row}</tbody>
             </table>
           </div>
 
@@ -10560,25 +11649,25 @@ def _render_overtime_defaults_section() -> str:
     return f"""
     <div class="acc" id="acc-overtime-defaults">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-defaults-body')">
-        <span>⏱ Überstunden-Limits (Defaults)</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_ot_defaults')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-overtime-defaults-body">
         <div class="acc-inner">
-          <p class="small" style="color:var(--mu);margin-bottom:12px;">Globale Standardwerte. Individuelle Limits pro Nutzer überschreiben diese.</p>
+          <p class="small" style="color:var(--mu);margin-bottom:12px;">{t('admin.ot_defaults_hint')}</p>
           <form method="post" action="/admin/overtime/save-defaults" onsubmit="sessionStorage.setItem('openAcc','acc-overtime-defaults')">
             <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
               <div>
-                <label style="font-size:12px;">Default Plus-Limit (h)</label>
+                <label style="font-size:12px;">{t('admin.ot_default_plus')}</label>
                 <input type="number" name="def_plus" value="{_html.escape(def_plus_h)}" placeholder="–" step="0.5"
                   style="width:80px;font-size:13px;padding:4px 8px;">
               </div>
               <div>
-                <label style="font-size:12px;">Default Minus-Limit (h)</label>
+                <label style="font-size:12px;">{t('admin.ot_default_minus')}</label>
                 <input type="number" name="def_minus" value="{_html.escape(def_minus_h)}" placeholder="–" step="0.5"
                   style="width:80px;font-size:13px;padding:4px 8px;">
               </div>
             </div>
-            <button class="btn primary btn-sm" type="submit">Speichern</button>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
           </form>
         </div>
       </div>
@@ -10640,16 +11729,16 @@ def _render_admin_overtime_section() -> str:
         eff_lm = lm if lm is not None else def_minus_mins
 
         if eff_lp is not None and saldo > eff_lp:
-            status = "<span style='color:var(--danger);font-weight:600;'>⛔ Plus-Limit</span>"
+            status = f"<span style='color:var(--danger);font-weight:600;'>{t('admin.ot_over_plus')}</span>"
             row_bg = "background:rgba(220,38,38,.04);"
         elif eff_lm is not None and saldo < -(eff_lm):
-            status = "<span style='color:var(--danger);font-weight:600;'>⛔ Minus-Limit</span>"
+            status = f"<span style='color:var(--danger);font-weight:600;'>{t('admin.ot_over_minus')}</span>"
             row_bg = "background:rgba(220,38,38,.04);"
         elif eff_lp is not None and saldo > eff_lp * 0.9:
-            status = "<span style='color:#d97706;'>⚠️ Nahe Plus-Limit</span>"
+            status = f"<span style='color:#d97706;'>{t('admin.ot_near_plus')}</span>"
             row_bg = "background:rgba(251,191,36,.05);"
         elif eff_lm is not None and saldo < -(eff_lm) * 0.9:
-            status = "<span style='color:#d97706;'>⚠️ Nahe Minus-Limit</span>"
+            status = f"<span style='color:#d97706;'>{t('admin.ot_near_minus')}</span>"
             row_bg = "background:rgba(251,191,36,.05);"
         else:
             status = "<span style='color:var(--ok);'>✓ OK</span>"
@@ -10681,7 +11770,7 @@ def _render_admin_overtime_section() -> str:
         iv   = u_row["overtime_notify_interval"] or "once"
 
         def _iv_sel(val):
-            opts = [("once","Einmalig"),("daily","Täglich"),("weekly","Wöchentlich")]
+            opts = [("once",t("admin.ot_once")),("daily",t("admin.ot_daily")),("weekly",t("admin.ot_weekly"))]
             return "".join(
                 f'<option value="{v}" {"selected" if v==val else ""}>{l}</option>'
                 for v, l in opts
@@ -10691,63 +11780,64 @@ def _render_admin_overtime_section() -> str:
         <tr>
           <td style="font-size:12px;">{name}</td>
           <td><input type="number" name="lp_{uid}" value="{lp}" placeholder="–" step="0.5"
-            style="width:70px;font-size:12px;padding:3px 6px;" title="Stunden, leer = kein Limit"></td>
+            style="width:70px;font-size:12px;padding:3px 6px;" title="{t('admin.ot_limits_hint')}"></td>
           <td><input type="number" name="lm_{uid}" value="{lm}" placeholder="–" step="0.5"
-            style="width:70px;font-size:12px;padding:3px 6px;" title="Stunden, leer = kein Limit"></td>
+            style="width:70px;font-size:12px;padding:3px 6px;" title="{t('admin.ot_limits_hint')}"></td>
           <td style="text-align:center;"><input type="checkbox" name="en_{uid}" value="1" {en}></td>
           <td><select name="iv_{uid}" style="font-size:12px;padding:3px 5px;">{_iv_sel(iv)}</select></td>
-          <td><input type="email" name="sup_{uid}" value="{sup}" placeholder="Vorgesetzter E-Mail"
+          <td><input type="email" name="sup_{uid}" value="{sup}" placeholder="{t('admin.supervisor_email')}"
             style="font-size:12px;padding:3px 6px;width:200px;"></td>
         </tr>"""
 
+    _no_users_ot = f"<tr><td colspan='5' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
     return f"""
     <div class="acc" id="acc-overtime">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-body')">
-        <span>⏱ Gleitzeitkonto Übersicht</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_balance')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-overtime-body">
         <div class="acc-inner">
 
           <!-- Salden alle User -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Aktuelle Salden – Stand heute</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.balance_current_title')}</div>
           <div class="table-scroll" style="margin-bottom:16px;">
             <table>
               <thead><tr>
-                <th>Name</th>
-                <th style="text-align:center;">Saldo</th>
-                <th style="text-align:center;">Limit+</th>
-                <th style="text-align:center;">Limit−</th>
-                <th>Status</th>
+                <th>{t('common.name')}</th>
+                <th style="text-align:center;">{t('admin.col_saldo')}</th>
+                <th style="text-align:center;">{t('admin.col_limit_plus')}</th>
+                <th style="text-align:center;">{t('admin.col_limit_minus')}</th>
+                <th>{t('common.status')}</th>
               </tr></thead>
-              <tbody>{saldo_rows or "<tr><td colspan='5' style='color:var(--mu);'>Keine Benutzer.</td></tr>"}</tbody>
+              <tbody>{saldo_rows or _no_users_ot}</tbody>
             </table>
           </div>
 
           <hr style="margin:14px 0;">
 
           <!-- Limits + Benachrichtigungen konfigurieren -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">Limits &amp; Benachrichtigungen</div>
-          <p class="small" style="color:var(--mu);margin-bottom:10px;">Limits in Stunden (z.B. 40 = 40h). Leer = kein Limit. Individuell überschreibt den globalen Default.</p>
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">{t('admin.ot_limits_notify')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.ot_limits_hint')}</p>
 
           <form method="post" action="/admin/overtime/save" onsubmit="sessionStorage.setItem('openAcc','acc-overtime')">
             <div class="table-scroll" style="margin-bottom:12px;">
               <table>
                 <thead><tr>
-                  <th>Name</th>
-                  <th style="text-align:center;">Plus-Limit (h)</th>
-                  <th style="text-align:center;">Minus-Limit (h)</th>
-                  <th style="text-align:center;">Benachrichtigen</th>
-                  <th>Intervall</th>
-                  <th>Vorgesetzter E-Mail</th>
+                  <th>{t('common.name')}</th>
+                  <th style="text-align:center;">{t('admin.ot_plus_limit')}</th>
+                  <th style="text-align:center;">{t('admin.ot_minus_limit')}</th>
+                  <th style="text-align:center;">{t('admin.ot_notify')}</th>
+                  <th>{t('admin.ot_interval')}</th>
+                  <th>{t('admin.supervisor_email')}</th>
                 </tr></thead>
                 <tbody>{form_rows}</tbody>
               </table>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn primary btn-sm" type="submit">Speichern</button>
+              <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
               <button class="btn btn-sm" type="submit" formaction="/admin/overtime/check"
                 onclick="sessionStorage.setItem('openAcc','acc-overtime')">
-                Jetzt prüfen &amp; benachrichtigen
+                {t('admin.ot_check_now')}
               </button>
             </div>
           </form>
@@ -10954,6 +12044,309 @@ def _run_overtime_notifications() -> tuple[int, int]:
     return sent, errors
 
 
+# Flat label lookup: region code → display label (for badges etc.)
+_REGION_LABEL: dict[str, str] = {
+    code: label
+    for _, _, entries in REGION_GROUPS
+    for code, label in entries
+}
+
+# Standard types available to all users by default (everything except Verdi)
+_STANDARD_TYPE_NAMES = {"Urlaub", "Krank", "Flextag", "Sonstige"}
+
+
+def _get_user_enabled_absence_type_ids(user_id: int) -> list[int]:
+    """Return absence type IDs enabled for this user.
+    NULL enabled_absence_types = standard set (all active except Verdi)."""
+    db = connect()
+    try:
+        user_row = db.execute(
+            "SELECT enabled_absence_types FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if user_row and user_row["enabled_absence_types"]:
+            return [int(x) for x in user_row["enabled_absence_types"].split(",") if x.strip().isdigit()]
+        rows = db.execute(
+            "SELECT id FROM absence_types WHERE active=1 AND name != 'Verdi' ORDER BY id"
+        ).fetchall()
+        return [r["id"] for r in rows]
+    finally:
+        db.close()
+
+
+def _region_country_key(entries: list) -> str:
+    """Derive the JS country key from a REGION_GROUPS entries list."""
+    c = entries[0][0]
+    return c.split("-")[0] if "-" in c else c
+
+
+def _region_picker(field_name: str, current: str, include_default: bool = False) -> str:
+    """Two-step country → region picker. Submits region code as field_name."""
+    # Find which group the current region belongs to
+    current_country = ""
+    for _, _, entries in REGION_GROUPS:
+        if any(code == current for code, _ in entries):
+            current_country = _region_country_key(entries)
+            break
+
+    # Build JS region data {country_key: [[code, label], ...]}
+    data: dict = {}
+    for _, _, entries in REGION_GROUPS:
+        ck = _region_country_key(entries)
+        data[ck] = [[c, l] for c, l in entries]
+    regions_json = _json.dumps(data, ensure_ascii=False)
+
+    # Build country dropdown
+    country_opts = ""
+    if include_default:
+        sel = " selected" if not current else ""
+        country_opts += f'<option value=""{sel}>— Standard verwenden —</option>'
+    for flag, group_label, entries in REGION_GROUPS:
+        ck = _region_country_key(entries)
+        sel = " selected" if ck == current_country and current else ""
+        country_opts += f'<option value="{ck}"{sel}>{_html.escape(flag + " " + group_label)}</option>'
+
+    # Build initial region dropdown options for current country
+    region_opts = ""
+    region_display = "none" if (include_default and not current) else ""
+    if current_country:
+        for _, _, entries in REGION_GROUPS:
+            if _region_country_key(entries) == current_country:
+                if include_default:
+                    sel = " selected" if not current else ""
+                    region_opts += f'<option value=""{sel}>— Standard verwenden —</option>'
+                for code, label in entries:
+                    sel = " selected" if code == current else ""
+                    region_opts += f'<option value="{code}"{sel}>{_html.escape(label)}</option>'
+                break
+
+    # Unique JS function name (replace non-alphanumeric with _)
+    uniq = re.sub(r'[^a-zA-Z0-9]', '_', field_name)
+    inc_default_js = "true" if include_default else "false"
+    cur_js = _json.dumps(current)
+
+    return (
+        f'<select id="{uniq}_c" style="font-size:13px;padding:5px 8px;" '
+        f'onchange="_rp_{uniq}(this.value)">{country_opts}</select>'
+        f'<br><select name="{field_name}" id="{uniq}_r" '
+        f'style="font-size:13px;padding:5px 8px;margin-top:6px;display:{region_display};">'
+        f'{region_opts}</select>'
+        f'<script>(function(){{'
+        f'var _d={regions_json};'
+        f'var _inc={inc_default_js};'
+        f'var _cur={cur_js};'
+        f'window["_rp_{uniq}"]=function(c){{'
+        f'var r=document.getElementById("{uniq}_r");'
+        f'if(!c){{r.style.display="none";r.innerHTML="";return;}}'
+        f'var opts="";'
+        f'if(_inc)opts+=\'<option value="">— Standard verwenden —</option>\';'
+        f'(_d[c]||[]).forEach(function(e){{'
+        f'var s=e[0]===_cur?" selected":"";'
+        f'opts+=\'<option value="\'+e[0]+\'"\'+s+\'>\'+e[1]+\'</option>\';}});'
+        f'r.innerHTML=opts;r.style.display="";'
+        f'if(!r.value&&r.options.length>0)r.selectedIndex=0;'
+        f'}};'
+        f'_rp_{uniq}(document.getElementById("{uniq}_c").value);'
+        f'}})();</script>'
+    )
+
+
+def _bundesland_select(name: str, current: str, include_default: bool = False) -> str:
+    html = f'<select name="{name}" style="font-size:13px;padding:5px 8px;">'
+    if include_default:
+        sel = " selected" if not current else ""
+        html += f'<option value=""{sel}>— Standard verwenden —</option>'
+    for flag, group_label, entries in REGION_GROUPS:
+        html += f'<optgroup label="{_html.escape(flag + " " + group_label)}">'
+        for code, label in entries:
+            sel = " selected" if code == current else ""
+            html += f'<option value="{_html.escape(code)}"{sel}>{_html.escape(label)}</option>'
+        html += "</optgroup>"
+    html += "</select>"
+    return html
+
+
+def _render_regional_section() -> str:
+    cfg = _get_app_config()
+    default_region = cfg.get("default_holiday_region") or "DE-NW"
+    return f"""
+    <div class="acc" id="acc-regional">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-regional-body')">
+        <span>{t('admin.acc_regional')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-regional-body">
+        <div class="acc-inner">
+          <form method="post" action="/admin/regional">
+            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">{t('admin.regional_holidays')}</div>
+            <div style="margin-bottom:14px;">
+              <label style="font-size:12px;">{t('admin.regional_default_label')}
+                <span style="font-weight:400;color:var(--mu);">{t('admin.regional_default_hint')}</span>
+              </label><br>
+              <div style="margin-top:6px;">{_region_picker("default_holiday_region", default_region, include_default=False)}</div>
+            </div>
+            <div>
+              <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def _render_per_user_settings_section() -> str:
+    """Accordion: per-user region and absence type configuration."""
+    cfg = _get_app_config()
+    default_region_code = cfg.get("default_holiday_region") or "DE-NW"
+    default_region_label = _REGION_LABEL.get(default_region_code, default_region_code)
+
+    db = connect()
+    active_users = db.execute(
+        "SELECT id, username, display_name, holiday_region, enabled_absence_types "
+        "FROM users WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    all_types = db.execute(
+        "SELECT id, name FROM absence_types WHERE active=1 ORDER BY name"
+    ).fetchall()
+    db.close()
+
+    _tbyn = {t["name"]: t["id"] for t in all_types}
+    _has_verdi = bool(_tbyn.get("Verdi"))
+    _has_flextag = bool(_tbyn.get("Flextag"))
+
+    # --- Per-user region rows ---
+    region_rows = ""
+    for urow in active_users:
+        uid = urow["id"]
+        uname = _html.escape(urow["display_name"] or urow["username"])
+        cur_r = urow["holiday_region"] or ""
+        cur_label = _REGION_LABEL.get(cur_r, "—")
+        flag_txt = ""
+        for fla, _, entries in REGION_GROUPS:
+            if any(c == cur_r for c, _ in entries):
+                flag_txt = fla + " "
+                break
+        region_rows += (
+            f"<tr>"
+            f"<td style='font-size:13px;'>{uname}</td>"
+            f"<td style='font-size:12px;color:var(--mu);'>"
+            f"{t('admin.regional_standard') + ' (' + _html.escape(default_region_label) + ')' if not cur_r else flag_txt + _html.escape(cur_label)}"
+            f"</td>"
+            f"<td><a class='btn btn-sm' href='/admin/users/{uid}/edit'>{t('btn.edit')}</a></td>"
+            f"</tr>"
+        )
+
+    # --- Per-user absence types rows ---
+    at_headers = "<th>Urlaub</th><th>Krank</th>"
+    if _has_flextag:
+        at_headers += "<th>Flextag</th>"
+    if _has_verdi:
+        at_headers += "<th>Verdi</th>"
+    at_headers += "<th>Sonstige</th>"
+
+    at_rows = ""
+    for urow in active_users:
+        uid = urow["id"]
+        uname = _html.escape(urow["display_name"] or urow["username"])
+        eat_str = urow["enabled_absence_types"] or ""
+        eat_ids = {int(x) for x in eat_str.split(",") if x.strip().isdigit()} if eat_str else None
+
+        def _chk(name: str) -> str:
+            tid = _tbyn.get(name)
+            if not tid:
+                return "<td>–</td>"
+            if name in ("Urlaub", "Krank"):
+                return f"<td style='text-align:center;'>✓</td>"
+            if eat_ids is None:
+                checked = "checked" if name in _STANDARD_TYPE_NAMES else ""
+            else:
+                checked = "checked" if tid in eat_ids else ""
+            field_id = f"eat_{uid}_{name.lower()}"
+            return (f"<td style='text-align:center;'>"
+                    f"<input type='checkbox' name='eat_{uid}_{name.lower()}' value='1' {checked}>"
+                    f"</td>")
+
+        at_rows += f"<tr><td style='font-size:13px;'>{uname}</td>"
+        at_rows += f"<td style='text-align:center;'>✓</td><td style='text-align:center;'>✓</td>"
+        if _has_flextag:
+            at_rows += _chk("Flextag")
+        if _has_verdi:
+            at_rows += _chk("Verdi")
+        at_rows += _chk("Sonstige")
+        at_rows += "</tr>"
+
+    _no_users_row = f"<tr><td colspan='3' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
+    _no_users_at  = f"<tr><td colspan='6' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
+    return f"""
+    <div class="acc" data-tab="users" id="acc-per-user-settings">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-per-user-settings-body')">
+        <span>{t('admin.acc_per_user')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-per-user-settings-body">
+        <div class="acc-inner">
+
+          <!-- Default region info -->
+          <div style="font-size:12px;color:var(--mu);margin-bottom:16px;">
+            {t('admin.regional_default_label')} <b>{_html.escape(default_region_label)}</b>
+          </div>
+
+          <!-- Per-user regions -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.regional_per_user')}</div>
+          <div class="table-scroll" style="margin-bottom:20px;">
+            <table>
+              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.regional')}</th><th></th></tr></thead>
+              <tbody>{region_rows or _no_users_row}</tbody>
+            </table>
+          </div>
+
+          <!-- Per-user absence types -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">{t('admin.abs_types_per_user')}</div>
+          <div class="small" style="color:var(--mu);margin-bottom:8px;">{t('admin.abs_types_always')}</div>
+          <form method="post" action="/admin/batch/absence-types">
+            <div class="table-scroll" style="margin-bottom:10px;">
+              <table>
+                <thead><tr><th>{t('admin.users_title')}</th>{at_headers}</tr></thead>
+                <tbody>{at_rows or _no_users_at}</tbody>
+              </table>
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+          </form>
+
+        </div>
+      </div>
+    </div>"""
+
+
+@app.post("/admin/batch/absence-types")
+@admin_required
+def admin_batch_absence_types():
+    bootstrap()
+    db = connect()
+    active_users = db.execute(
+        "SELECT id FROM users WHERE is_active=1"
+    ).fetchall()
+    all_types = db.execute("SELECT id, name FROM absence_types WHERE active=1").fetchall()
+    db.close()
+    _tbyn = {t["name"]: t["id"] for t in all_types}
+    _std_ids = {_tbyn[n] for n in _STANDARD_TYPE_NAMES if n in _tbyn}
+
+    for urow in active_users:
+        uid = urow["id"]
+        _always = {_tbyn[n] for n in ("Urlaub", "Krank") if n in _tbyn}
+        _eat_set = set(_always)
+        for _at_name, _field_sfx in (("Flextag", "flextag"), ("Verdi", "verdi"), ("Sonstige", "sonstige")):
+            if request.form.get(f"eat_{uid}_{_field_sfx}") and _tbyn.get(_at_name):
+                _eat_set.add(_tbyn[_at_name])
+        _new_eat = None if _eat_set == _std_ids else ",".join(str(i) for i in sorted(_eat_set))
+        _db = connect()
+        _db.execute("UPDATE users SET enabled_absence_types=?, updated_at=datetime('now') WHERE id=?",
+                    (_new_eat, uid))
+        _db.commit()
+        _db.close()
+
+    add_flash("Abwesenheitstypen gespeichert.", "success")
+    return redirect("/admin#acc-per-user-settings")
+
+
 def _render_appearance_section() -> str:
     cfg = _get_app_config()
     accent    = cfg.get("accent_color") or "#2563eb"
@@ -10965,24 +12358,24 @@ def _render_appearance_section() -> str:
         f'<span style="background:{_html.escape(lbl_color)};color:#fff;'
         f'font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;'
         f'letter-spacing:.07em;text-transform:uppercase;" id="lbl-preview">'
-        f'{_html.escape(app_label) or "VORSCHAU"}</span>'
+        f'{_html.escape(app_label) or "PREVIEW"}</span>'
     )
 
     return f"""
     <div class="acc" id="acc-appearance">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-appearance-body')">
-        <span>🎨 Erscheinungsbild</span><span class="acc-arr">▼</span>
+        <span>{t('admin.acc_appearance')}</span><span class="acc-arr">▼</span>
       </button>
       <div class="acc-body" id="acc-appearance-body">
         <div class="acc-inner">
           <form method="post" action="/admin/appearance" id="appearance-form">
 
             <!-- App-Farben -->
-            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">App-Farben</div>
+            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">{t('admin.appearance_colors')}</div>
 
             <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
               <div>
-                <label style="font-size:12px;">Akzentfarbe</label>
+                <label style="font-size:12px;">{t('admin.appearance_accent')}</label>
                 <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
                   <input type="color" name="accent_color" id="inp-accent" value="{_html.escape(accent)}"
                     style="width:44px;height:36px;padding:2px;border-radius:6px;cursor:pointer;border:1px solid var(--bd);"
@@ -10993,14 +12386,14 @@ def _render_appearance_section() -> str:
                 </div>
               </div>
               <div>
-                <label style="font-size:12px;">Navigationsleiste</label>
+                <label style="font-size:12px;">{t('admin.appearance_nav')}</label>
                 <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
                   <input type="color" name="nav_color" id="inp-nav" value="{_html.escape(nav_color) or '#f9fafb'}"
                     style="width:44px;height:36px;padding:2px;border-radius:6px;cursor:pointer;border:1px solid var(--bd);"
                     oninput="applyPreview()">
                   <input type="text" id="inp-nav-txt" value="{_html.escape(nav_color)}"
                     style="width:90px;font-size:13px;padding:5px 8px;"
-                    placeholder="Standard"
+                    placeholder="{t('admin.appearance_preset_default')}"
                     oninput="syncColor('inp-nav','inp-nav-txt')">
                 </div>
               </div>
@@ -11008,30 +12401,30 @@ def _render_appearance_section() -> str:
 
             <!-- Schnellauswahl -->
             <div style="margin-bottom:14px;">
-              <label style="font-size:12px;margin-bottom:6px;display:block;">Schnellauswahl</label>
+              <label style="font-size:12px;margin-bottom:6px;display:block;">{t('admin.appearance_presets')}</label>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <button type="button" class="btn btn-sm"
                   onclick="setPreset('#2563eb','','','#f59e0b')"
-                  style="border-left:4px solid #2563eb;">Standard</button>
+                  style="border-left:4px solid #2563eb;">{t('admin.appearance_preset_default')}</button>
                 <button type="button" class="btn btn-sm"
                   onclick="setPreset('#16a34a','#f0fdf4','PROD','#16a34a')"
-                  style="border-left:4px solid #16a34a;">Produktion</button>
+                  style="border-left:4px solid #16a34a;">{t('admin.appearance_preset_prod')}</button>
                 <button type="button" class="btn btn-sm"
                   onclick="setPreset('#ea580c','#fff7ed','DEV','#ea580c')"
-                  style="border-left:4px solid #ea580c;">Entwicklung</button>
+                  style="border-left:4px solid #ea580c;">{t('admin.appearance_preset_dev')}</button>
                 <button type="button" class="btn btn-sm"
                   onclick="setPreset('#7c3aed','#faf5ff','TEST','#7c3aed')"
-                  style="border-left:4px solid #7c3aed;">Test</button>
+                  style="border-left:4px solid #7c3aed;">{t('admin.appearance_preset_test')}</button>
               </div>
             </div>
 
             <hr style="margin:14px 0;">
 
             <!-- App-Label -->
-            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">App-Label</div>
+            <div style="font-size:13px;font-weight:700;margin-bottom:12px;">{t('admin.appearance_label_section')}</div>
             <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
               <div>
-                <label style="font-size:12px;">Umgebungsbezeichnung <span style="font-weight:400;color:var(--mu);">(max. 10 Zeichen, leer = kein Label)</span></label>
+                <label style="font-size:12px;">{t('admin.appearance_label_text')} <span style="font-weight:400;color:var(--mu);">{t('admin.appearance_label_hint')}</span></label>
                 <input type="text" name="app_label" id="inp-label" maxlength="10"
                   value="{_html.escape(app_label)}"
                   placeholder="z. B. DEV, TEST, STAGING"
@@ -11039,7 +12432,7 @@ def _render_appearance_section() -> str:
                   oninput="updateLabelPreview()">
               </div>
               <div>
-                <label style="font-size:12px;">Label-Farbe</label>
+                <label style="font-size:12px;">{t('admin.appearance_label_color')}</label>
                 <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
                   <input type="color" name="app_label_color" id="inp-lbl-color"
                     value="{_html.escape(lbl_color)}"
@@ -11051,7 +12444,7 @@ def _render_appearance_section() -> str:
                 </div>
               </div>
               <div style="padding-bottom:4px;">
-                <label style="font-size:12px;">Vorschau in der Navigation</label>
+                <label style="font-size:12px;">{t('admin.appearance_preview')}</label>
                 <div style="margin-top:6px;background:var(--nav-bg);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;display:inline-flex;align-items:center;gap:8px;">
                   <span style="font-size:13px;font-weight:700;">Zeiterfassung</span>
                   {lbl_preview}
@@ -11062,10 +12455,10 @@ def _render_appearance_section() -> str:
             <hr style="margin:14px 0;">
 
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn primary btn-sm" type="submit">Speichern</button>
+              <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
               <button class="btn btn-sm" type="button"
                 onclick="setPreset('#2563eb','','','#f59e0b');document.getElementById('inp-label').value='';updateLabelPreview();document.getElementById('appearance-form').submit();">
-                Auf Standard zurücksetzen
+                {t('admin.appearance_reset')}
               </button>
             </div>
           </form>
@@ -11139,7 +12532,7 @@ def admin_absences():
         ((_html.escape(r["display_name"] or r["username"])) for r in active_users if r["id"] == sel_uid), "–"
     )
     body = f"{flash_html()}{_render_admin_absences_section()}"
-    return render_template_string(layout("Admin: Abschlüsse", body, u, APP_VERSION))
+    return render_template_string(layout(f"{t('admin.title')}: {t('periods.title')}", body, u, APP_VERSION))
 
 
 @app.get("/admin/absences/export")
@@ -11211,7 +12604,6 @@ def admin_appearance_save():
     nav_color = (request.form.get("nav_color") or "").strip()
     app_label = (request.form.get("app_label") or "").strip()[:10]
     lbl_color = (request.form.get("app_label_color") or "").strip()
-
     db = connect()
     for key, val in [
         ("accent_color", accent if _HEX_COLOR_RE.match(accent) else "#2563eb"),
@@ -11227,6 +12619,27 @@ def admin_appearance_save():
     db.close()
     add_flash("Erscheinungsbild gespeichert.", "success")
     return redirect("/admin#acc-appearance")
+
+
+@app.post("/admin/regional")
+@sysadmin_required
+def admin_regional_save():
+    bootstrap()
+    region = (request.form.get("default_holiday_region") or "DE-NW").strip()
+    if region not in ALL_REGIONS:
+        region = "DE-NW"
+    db = connect()
+    db.execute(
+        "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+        ("default_holiday_region", region),
+    )
+    db.commit()
+    db.close()
+    from flask import g as _g
+    if hasattr(_g, "_app_config_cache"):
+        del _g._app_config_cache
+    add_flash("Regionale Einstellungen gespeichert.", "success")
+    return redirect("/admin#acc-regional")
 
 
 if __name__ == "__main__":

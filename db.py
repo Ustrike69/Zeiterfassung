@@ -39,6 +39,33 @@ def init_db():
     )""")
     db.execute("CREATE INDEX IF NOT EXISTS idx_calendar_days_region ON calendar_days(region, day)")
 
+    # Migrate calendar_days from single-column PK (day) to composite PK (day, region)
+    _pk_cols = [r["name"] for r in db.execute("PRAGMA table_info(calendar_days)").fetchall() if r["pk"] > 0]
+    if _pk_cols == ["day"]:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS _calendar_days_new (
+                day TEXT NOT NULL,
+                region TEXT NOT NULL DEFAULT 'DE-NW',
+                is_weekend INTEGER NOT NULL DEFAULT 0,
+                is_holiday INTEGER NOT NULL DEFAULT 0,
+                holiday_name TEXT,
+                is_school_holiday INTEGER NOT NULL DEFAULT 0,
+                school_holiday_name TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (day, region)
+            )
+        """)
+        db.execute("""
+            INSERT OR IGNORE INTO _calendar_days_new
+            (day, region, is_weekend, is_holiday, holiday_name, is_school_holiday, school_holiday_name, updated_at)
+            SELECT day, COALESCE(NULLIF(region,''),'DE-NW'), is_weekend, is_holiday, holiday_name,
+                   COALESCE(is_school_holiday,0), school_holiday_name, COALESCE(updated_at,datetime('now'))
+            FROM calendar_days
+        """)
+        db.execute("DROP TABLE calendar_days")
+        db.execute("ALTER TABLE _calendar_days_new RENAME TO calendar_days")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_calendar_days_region ON calendar_days(region, day)")
+
     # migrations for older DBs
     if not _col_exists(db, "calendar_days", "is_weekend"):
         db.execute("ALTER TABLE calendar_days ADD COLUMN is_weekend INTEGER NOT NULL DEFAULT 0")
@@ -169,17 +196,20 @@ def init_db():
     # Rename legacy 'Sonstiges' → 'Sonstige'
     db.execute("UPDATE absence_types SET name='Sonstige', updated_at=datetime('now') WHERE name='Sonstiges'")
 
-    # Ensure only the three fixed types exist; remap absences of other types to Sonstige then delete
+    # Ensure only the allowed types exist; remap absences of unknown types to Sonstige then delete
+    # Verdi kept here so init_db doesn't strip it before seed_defaults migration can run
+    _allowed_types = ('Urlaub', 'Krank', 'Sonstige', 'Flextag', 'Verdi')
     sonstige_row = db.execute("SELECT id FROM absence_types WHERE name='Sonstige'").fetchone()
     if sonstige_row:
         sonstige_id = sonstige_row["id"]
+        placeholders = ",".join("?" * len(_allowed_types))
         others = db.execute(
-            "SELECT id FROM absence_types WHERE name NOT IN ('Urlaub','Krank','Sonstige')"
+            f"SELECT id FROM absence_types WHERE name NOT IN ({placeholders})", _allowed_types
         ).fetchall()
         for o in others:
             db.execute("UPDATE absences SET type_id=? WHERE type_id=?", (sonstige_id, o["id"]))
         if others:
-            db.execute("DELETE FROM absence_types WHERE name NOT IN ('Urlaub','Krank','Sonstige')")
+            db.execute(f"DELETE FROM absence_types WHERE name NOT IN ({placeholders})", _allowed_types)
 
     db.execute("""
     CREATE TABLE IF NOT EXISTS business_trips (
@@ -299,6 +329,20 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN admin_role TEXT")
         db.execute("UPDATE users SET admin_role='sysadmin' WHERE is_admin=1")
 
+    if not _col_exists(db, "users", "holiday_region"):
+        db.execute("ALTER TABLE users ADD COLUMN holiday_region TEXT")
+
+    if not _col_exists(db, "users", "must_change_password"):
+        db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+
+    if not _col_exists(db, "users", "admin_only"):
+        db.execute("ALTER TABLE users ADD COLUMN admin_only INTEGER NOT NULL DEFAULT 0")
+
+    if not _col_exists(db, "users", "language"):
+        db.execute("ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'en'")
+        # Existing users were German-only — set their language to 'de'
+        db.execute("UPDATE users SET language='de'")
+
     db.execute("""CREATE TABLE IF NOT EXISTS vacation_carryover_overrides(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -347,6 +391,9 @@ def init_db():
         ("app_label_color", "#f59e0b"),
         ("overtime_default_limit_plus", ""),
         ("overtime_default_limit_minus", ""),
+        ("default_holiday_region", "DE-NW"),
+        ("default_language", "en"),
+        ("available_languages", "de,en"),
     ):
         db.execute(
             "INSERT OR IGNORE INTO app_config(key, value) VALUES(?, ?)",
@@ -381,6 +428,8 @@ def init_db():
         db.execute("ALTER TABLE telegram_users ADD COLUMN wizard_enabled INTEGER NOT NULL DEFAULT 1")
     if not _col_exists(db, "telegram_users", "reminder_time"):
         db.execute("ALTER TABLE telegram_users ADD COLUMN reminder_time TEXT NOT NULL DEFAULT '20:00'")
+    if not _col_exists(db, "users", "enabled_absence_types"):
+        db.execute("ALTER TABLE users ADD COLUMN enabled_absence_types TEXT")
 
 
 
@@ -393,11 +442,12 @@ def init_db():
 
 def seed_defaults():
     db = connect()
-    # default absence types (Feiertag removed – handled via calendar_seed)
+    # default absence types (Feiertag removed – handled via calendar_seed; Verdi NOT auto-created)
     absence_defaults = [
-        ('Urlaub', '#198754', 1),
-        ('Krank', '#dc3545', 1),
-        ('Sonstige', '#6c757d', 1),
+        ('Urlaub',  '#198754', 1),
+        ('Krank',   '#dc3545', 1),
+        ('Flextag', '#3b82f6', 1),
+        ('Sonstige','#6c757d', 1),
     ]
     for name, color, active in absence_defaults:
         db.execute(
@@ -415,6 +465,43 @@ def seed_defaults():
         ).fetchone()
         if not in_use:
             db.execute("DELETE FROM absence_types WHERE id=?", (row["id"],))
+
+    # Migration: Sonstige+comment=Flextag → Flextag type (clear comment)
+    flextag_row = db.execute("SELECT id FROM absence_types WHERE name='Flextag'").fetchone()
+    sonstige_row = db.execute("SELECT id FROM absence_types WHERE name='Sonstige'").fetchone()
+    if flextag_row and sonstige_row:
+        db.execute(
+            "UPDATE absences SET type_id=?, comment=NULL, updated_at=datetime('now') "
+            "WHERE type_id=? AND LOWER(TRIM(COALESCE(comment,'')))='flextag'",
+            (flextag_row["id"], sonstige_row["id"])
+        )
+
+    # v1.4.6.8 reverse migration: Verdi dedicated type → Sonstige+comment='Verdi'
+    verdi_row = db.execute("SELECT id FROM absence_types WHERE name='Verdi'").fetchone()
+    if verdi_row and sonstige_row:
+        db.execute(
+            "UPDATE absences SET type_id=?, comment='Verdi', updated_at=datetime('now') "
+            "WHERE type_id=?",
+            (sonstige_row["id"], verdi_row["id"])
+        )
+        db.execute("DELETE FROM absence_types WHERE name='Verdi'")
+        # Remove Verdi ID from enabled_absence_types for all users
+        verdi_id_str = str(verdi_row["id"])
+        for urow in db.execute("SELECT id, enabled_absence_types FROM users WHERE enabled_absence_types IS NOT NULL").fetchall():
+            ids = [x for x in urow["enabled_absence_types"].split(",") if x.strip() != verdi_id_str]
+            std_ids = db.execute(
+                "SELECT id FROM absence_types WHERE name IN ('Urlaub','Krank','Flextag','Sonstige') AND active=1"
+            ).fetchall()
+            std_set = {str(r["id"]) for r in std_ids}
+            new_val = ",".join(i for i in ids if i.strip())
+            # If result matches the standard set exactly → store NULL
+            if set(new_val.split(",")) == std_set:
+                new_val = None
+            db.execute("UPDATE users SET enabled_absence_types=?, updated_at=datetime('now') WHERE id=?",
+                       (new_val, urow["id"]))
+
+    # Clean up absence_remarks that are now dedicated types
+    db.execute("DELETE FROM absence_remarks WHERE LOWER(TRIM(remark)) IN ('flextag', 'verdi')")
 
     db.commit()
     db.close()

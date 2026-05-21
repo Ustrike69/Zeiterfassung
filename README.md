@@ -1,6 +1,8 @@
-# Zeiterfassung v1.4.5
+# Zeiterfassung v2.0.0
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail, Telegram-Bot und einem umfassenden Admin-Bereich mit Rollentrennung.
+
+Vollständig mehrsprachig (Deutsch / Englisch), europäische Feiertagsdatenbank für 20 Länder.
 
 ---
 
@@ -49,14 +51,15 @@ docker run -d -p 5000:5000 -v ze_data:/data \
 
 ### Login
 
-Aufruf der App im Browser. Beim ersten Start wird ein Admin-Konto über `/setup` angelegt. Anmeldung unter `/login`.
+Aufruf der App im Browser. Beim ersten Start wird ein Admin-Konto über `/setup` angelegt – inklusive Sprach- und Regionsauswahl. Anmeldung unter `/login`.
 
 ### Einrichtungs-Wizard (Onboarding)
 
-Neue Nutzer werden beim ersten Login durch einen 6-stufigen Wizard geführt (`/onboarding`).
+Neue Nutzer werden beim ersten Login durch einen Wizard geführt (`/onboarding`).
 
 | Schritt | Inhalt |
 |---------|--------|
+| 0 | **Nutzungsart** – Zeitkonto oder nur Verwaltung (Systemadmin-Setup) |
 | 1 | **Passwort ändern** – Pflicht |
 | 2 | **Profil** – Anzeigename und E-Mail |
 | 3 | **Zeitschema** – Wochenstunden, Modus, Arbeitstage |
@@ -64,9 +67,9 @@ Neue Nutzer werden beim ersten Login durch einen 6-stufigen Wizard geführt (`/o
 | 5 | **Startsaldo & Erfassung ab** – Gleitzeitguthaben und frühestes Erfassungsdatum |
 | 6 | **Zusammenfassung** – Bestätigung |
 
-### Sprache und Format
+### Sprache
 
-Vollständig auf Deutsch. Datum: **TT.MM.JJJJ**, Uhrzeiten: **HH:MM** (15-Minuten-Schritte). Die App ist ab **01.01.2026** ausgelegt – Einträge vor dem `tracking_start_date` eines Users sind nicht möglich.
+Die App unterstützt **Deutsch** (Standard) und **Englisch**. Die Sprache ist pro Nutzer in den Einstellungen wählbar. Administratoren können eine systemweite Standardsprache festlegen. Die Telegram-Bot-Nachrichten folgen ebenfalls der Nutzersprache.
 
 ---
 
@@ -88,7 +91,7 @@ Vollständig auf Deutsch. Datum: **TT.MM.JJJJ**, Uhrzeiten: **HH:MM** (15-Minute
 
 ### Abwesenheitskarte
 
-Übersicht Urlaub / Krank / Flextag / Verdi. Button „Alle Abwesenheiten".
+Übersicht Urlaub / Krank / Flextag / Sonstige. Button „Alle Abwesenheiten".
 
 ---
 
@@ -106,7 +109,7 @@ Mehrere Zeitblöcke pro Tag möglich. Formular: Kommen + Gehen + Pause in einer 
 
 ### Abwesenheit
 
-Typ-Auswahl und ½-Tag-Checkbox in einer Zeile. Bestehende Abwesenheit wird nicht überschrieben.
+Typ-Auswahl (gefiltert nach nutzerindividuellen Abwesenheitstypen) und ½-Tag-Checkbox in einer Zeile. Bestehende Abwesenheit wird nicht überschrieben.
 
 ### Wochenende / Feiertage
 
@@ -120,7 +123,7 @@ Ort + Datum + Mehrtägig-Checkbox in einer Zeile. Zeiten (Abreise, Ziel, Rückre
 
 ## Kalender
 
-Monatsansicht mit Navigation. Wechsel zwischen Monat- und Listen-Ansicht.
+Monatsansicht mit Navigation. Wechsel zwischen Monat-, Listen- und Jahresansicht.
 
 ### Zelleninhalt
 
@@ -148,7 +151,7 @@ Tag | Datum | Beginn | Ende | Pause | Soll | Delta | (Desktop: kum. Saldo + Stat
 
 ### Saldo-Berechnung
 
-Iteriert über alle Tage ab `tracking_start_date` bis heute. Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
+Iteriert über alle Tage ab `tracking_start_date` bis gestern (Stand gestern). Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
 
 ---
 
@@ -160,9 +163,10 @@ Aufruf unter `/absences`.
 |-----|-------------|
 | **Urlaub** | Gegen Urlaubskontingent; Limit-Prüfung verhindert Überschreitung |
 | **Krank** | Krankheitstage |
-| **Sonstige** | Pflichtfeld Bemerkung (Flextag, Verdi, freie Eingabe) |
+| **Flextag** | Eigener Typ (blau); Setzt Soll auf 0 und zieht Sollzeit zusätzlich vom Gleitzeitkonto ab |
+| **Sonstige** | Pflichtfeld Bemerkung (freie Eingabe) |
 
-**Flextag:** Setzt Soll auf 0 und zieht Sollzeit zusätzlich vom Gleitzeitkonto ab.
+**Nutzerindividuelle Typen:** Pro Nutzer konfigurierbar, welche Abwesenheitstypen verfügbar sind (Urlaub und Krank immer aktiv).
 
 **Urlaubslimit-Validierung:** Ist das Urlaubskontingent erschöpft, können normale User keinen weiteren Urlaub eintragen. Admins erhalten eine Warnung, können aber trotzdem eintragen.
 
@@ -195,13 +199,16 @@ Separate Buchhaltungsfunktion: Zeiten als „kontiert" (gebucht) markieren.
 
 ## Einstellungen
 
-Aufruf unter `/settings`. 4 Accordion-Bereiche:
+Aufruf unter `/settings`. Accordion-Bereiche:
 
 | Bereich | Inhalt |
 |---------|--------|
-| **Persönliche Einstellungen** | Name, E-Mail, Passwort, Geburtsdatum, Renteneintrittsalter, Telegram-ID |
+| **Persönliche Einstellungen** | Name, E-Mail, Geburtsdatum, Renteneintrittsalter, Telegram-ID |
+| **Passwort** | Passwortänderung mit Stärke-Anzeige |
+| **Sprache** | Deutsch / Englisch wählbar |
 | **Urlaub** | Jahresanspruch, Übertrag-Regelung (Standard 31.03. oder Ausnahme) |
 | **Zeitschema** | Aktuelle + alle Schemas, Bearbeiten/Löschen/Neu anlegen |
+| **Gleitzeitkonto** | Aktivieren/Deaktivieren + Startsaldo |
 | **Kontierung** | Aktivieren/Deaktivieren + Startdatum |
 
 ---
@@ -212,13 +219,13 @@ Aufruf unter `/export`.
 
 ### Download (CSV)
 
-Zeitraum wählbar (Datepicker + Schnellwahl: Akt. Monat / Letzter Monat / Akt. Jahr / Letztes Jahr).
+Zeitraum wählbar (Datepicker + Schnellwahl: Akt. Monat / Letzter Monat / Akt. Jahr).
 
 Verfügbare Exporte: Zeitblöcke · Abwesenheiten · Dienstreisen · Gleitzeitkonto · Feiertage · Benutzer (Systemadmin)
 
 ### CSV-Format (Zeitblöcke)
 
-Spalten wie im Gleitzeitkonto: **Wochentag | Datum | Beginn | Ende | Pause (min) | Soll | Delta | Bemerkung**
+Spalten: **Wochentag | Datum | Beginn | Ende | Pause (min) | Soll | Delta | Bemerkung**
 
 - Bemerkung: Feiertagsname, Abwesenheitstyp, Dienstreise-Ort (kombinierbar mit `|`)
 - Mehrere Blöcke pro Tag: erste Zeile mit Soll/Delta/Bemerkung, Folgezeilen nur Beginn/Ende/Pause
@@ -248,30 +255,35 @@ Aufruf unter `/admin`. Accordion-Layout mit zwei Tabs.
 
 | Rolle | Beschreibung |
 |-------|-------------|
-| **🔧 Systemadmin** (`admin_role='sysadmin'`) | Voller Zugriff auf beide Tabs. Benutzerverwaltung, Rollenvergabe, Maileinstellungen, Bot, Backup, Update, Erscheinungsbild |
-| **📋 Zeitmanager** (`admin_role='timemanager'`) | Nur Tab „Benutzerübersichten". Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Urlaubsübertrag-Ausnahmen, Identität annehmen (nur normale User) |
+| **🔧 Systemadmin** (`admin_role='sysadmin'`) | Voller Zugriff auf beide Tabs; Benutzerverwaltung, Rollenvergabe, alle Systemeinstellungen |
+| **📋 Zeitmanager** (`admin_role='timemanager'`) | Nur Tab „Benutzerübersichten"; Urlaubsübersicht, Abwesenheiten, Gleitzeitkonto, Zeitschemas, Abschlüsse, Identitätswechsel |
+
+**Admin-Only-Nutzer:** Konten ohne Zeitkonto – ausschließlich im Admin-Bereich tätig. Kein Zugriff auf Kalender, Gleitzeitkonto oder Abwesenheitsseiten.
 
 ### Tab: ⚙ Systemeinstellungen (nur Systemadmin)
 
 | Accordion | Inhalt |
 |-----------|--------|
-| **Benutzerverwaltung** | User anlegen, Rollen vergeben, löschen. Badges: 🔧 Systemadmin, 📋 Zeitmanager |
+| **Benutzerverwaltung** | User anlegen (inkl. Rollen-Dropdown, Admin-Only-Flag, Passwort-Mail), bearbeiten, löschen |
 | **Maileinstellungen** | SMTP-Konfiguration; STARTTLS Port 587; Test-Mail senden |
 | **Überstunden-Limits (Defaults)** | Globale Standard-Plus/Minus-Limits für alle User |
-| **Erscheinungsbild** | Akzentfarbe, Navigationsfarbe, App-Label für Dev/Prod-Unterscheidung |
-| **Backup & Restore** | Vollständig / Einstellungen / User-Daten; automatisches Backup mit Zeitplan |
-| **Telegram Bot** | Bot-Token, API-Key, Admin-IDs; Service starten/stoppen |
-| **System Update** | Git pull + Neustart direkt aus der App |
+| **Regionale Einstellungen** | Standard-Region (System) + zweistufige Länder/Region-Auswahl |
+| **Erscheinungsbild** | Akzentfarbe, Navigationsfarbe, App-Label für Dev/Prod-Unterscheidung; Schnell-Presets |
+| **Backup & Restore** | Vollständig (.db.gz) / Einstellungen (.json) / User-Daten (.json); automatisches Backup mit Zeitplan |
+| **Telegram Bot** | Bot-Token, Anthropic API Key, Admin-IDs; Service starten/stoppen/neu starten direkt aus UI |
+| **System Update** | Git pull + pip install + Neustart direkt aus der App; Commit-Info und System-Info |
 
 ### Tab: 👥 Benutzerübersichten (beide Rollen)
 
 | Accordion | Inhalt |
 |-----------|--------|
-| **Urlaubsübersicht** | Anspruch, Übertrag, Verbrauch, Resturlaub je User; CSV-Export |
-| **Gleitzeitkonto Übersicht** | Salden aller User; individuelle Plus/Minus-Limits; Benachrichtigungen (E-Mail + Telegram); Intervall: einmalig/täglich/wöchentlich |
+| **Benutzer & Passwort-Reset** | PW-Reset per Zufallspasswort + Mail; Identitätswechsel |
+| **Urlaubsübersicht** | Anspruch, Übertrag, Verbrauch, Geplant, Resturlaub je User; CSV-Export |
+| **Gleitzeitkonto Übersicht** | Salden aller User; individuelle Plus/Minus-Limits; E-Mail + Telegram-Benachrichtigungen; Intervall: einmalig/täglich/wöchentlich |
 | **Zeitschemas** | Aktuelles Soll je User; Link zu Zeitschema-Verwaltung |
 | **Urlaubsverwaltung** | Übertrag-Ausnahmen (31.03.-Regel) je User |
 | **Abschlüsse** | Monats- und Jahresabschlüsse; Entsperren |
+| **Abwesenheitstypen & Regionen** | Nutzerindividuelle Abwesenheitstypen; Region pro Nutzer |
 
 ### Schutzregeln
 
@@ -286,7 +298,7 @@ Aufruf unter `/admin`. Accordion-Layout mit zwei Tabs.
 
 ### Voraussetzungen
 
-- Python 3.x + virtualenv unter `/opt/zeiterfassung/.venv`
+- Python 3.11+ + virtualenv unter `/opt/zeiterfassung/.venv`
 - SQLite-Datenbank (via `ZEITERFASSUNG_DB`, Standard: `zeiterfassung.db`)
 - Gunicorn via systemd (`zeiterfassung`)
 - Telegram-Bot via systemd (`zeiterfassung-bot`)
@@ -307,6 +319,10 @@ Vollständiges Backup über den Admin-Bereich (Systemeinstellungen → Backup & 
 cp /opt/zeiterfassung/zeiterfassung.db /opt/zeiterfassung/zeiterfassung.db.bak
 ```
 
+### Feiertage / Regionen
+
+20 Länder, 51 Regionen vorkonfiguriert (DE 16 Bundesländer, AT, CH, FR, NL, BE, LU, PL, CZ, IT, ES, PT, GB, IE, DK, SE, NO, FI, GR). Zweistufige Auswahl (Land → Region) in Nutzer- und Systemeinstellungen. Orthodoxes Ostern (GR), bewegliche Feiertage (Schweden, Finnland) werden korrekt berechnet.
+
 ### SMTP-Konfiguration
 
 Über den Admin-Bereich (Systemeinstellungen → Maileinstellungen) oder via Umgebungsvariablen in der systemd-Unit:
@@ -323,17 +339,33 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 | Datei | Beschreibung |
 |-------|-------------|
-| `app.py` | Alle Routes und Business-Logik (~11.000 Zeilen) |
+| `app.py` | Alle Routes und Business-Logik (~12.000 Zeilen) |
 | `db.py` | Datenbankinitialisierung und Migrationen |
 | `auth.py` | Session-basierte Authentifizierung, Rollen-Decorators |
 | `templates.py` | HTML-Layout-Wrapper (f-strings) |
+| `translations.py` | i18n-Framework: DE/EN Übersetzungen, `t(key)` Hilfsfunktion |
 | `bot.py` | Telegram-Bot mit APScheduler |
+| `bot_translations.py` | Bot-spezifische Übersetzungen DE/EN |
 | `backup.py` | Backup-Logik (full / settings / user) |
-| `calendar_seed.py` | Import NRW-Feiertage 2026 |
+| `calendar_seed.py` | Feiertags-Seeding für 20 Länder / 51 Regionen |
 
 ---
 
 ## Versionshistorie
+
+### v2.0.0
+- **Mehrsprachigkeit (DE/EN):** Vollständige i18n-Unterstützung in App und Telegram-Bot; Sprache pro Nutzer wählbar; systemweite Standardsprache konfigurierbar; `t(key)` Framework mit Fallback-Kette
+- **Europäische Feiertage:** 20 Länder, 51 Regionen (DE alle 16 Bundesländer, AT, CH, FR, NL, BE, LU, PL, CZ, IT, ES, PT, GB 4 Regionen, IE, DK, SE, NO, FI, GR); zweistufige Länder/Region-Auswahl; orthodoxes Ostern; bewegliche Feiertage
+- **Admin-Only-Modus:** Nutzerkonten ohne Zeitkonto für reine Verwaltungsaccounts; eingeschränkte Navigation
+- **Passwort-Regeln:** Stärkeprüfung bei Vergabe; Passwortänderung erzwingen (`must_change_password`); Passwortgenerierung + Versand per Mail; Passwort-Reset durch Admin
+- **Flextag als eigene Abwesenheitsart:** Eigener Typ (blau, #3b82f6); Nutzerindividuelle Aktivierung von Abwesenheitstypen
+- **Gleitzeitkonto Limits + Benachrichtigungen:** Plus/Minus-Limits global und pro Nutzer; E-Mail + Telegram-Benachrichtigung bei Überschreitung; Intervall: einmalig/täglich/wöchentlich; manuelle Prüfung aus Admin-UI
+- **Urlaubslimit-Validierung:** Normale User können nicht über ihr Kontingent hinaus buchen
+- **Bot-Einrichtung über Admin-UI:** Token, API-Key, Admin-IDs; Service-Steuerung (Start/Stop/Restart) direkt aus dem Browser
+- **System-Update über Admin-UI:** git pull + pip install + Service-Neustart; Commit-Info und System-Info direkt in der App
+- **App-Farben + Umgebungs-Label:** Akzentfarbe, Navigationsfarbe, Umgebungsbezeichnung (z. B. DEV/TEST/PROD) mit Farbwahl; Schnell-Presets
+- **Backup-Typen getrennt:** Vollständig (.db.gz) + Einstellungen (.json, ohne Passwörter) + User-Daten (.json) als separate Exports; automatisches Backup mit Zeitplan und lokalem Archiv (max. 7)
+- **Weiterer Systemadmin anlegbar:** Rollenvergabe bei Neuanlage; Schutz des letzten aktiven Sysadmins
 
 ### v1.4.5
 - Admin-Rollen: Systemadmin (voller Zugriff) und Zeitmanager (nur Benutzerübersichten)
@@ -368,4 +400,4 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ---
 
-*Zeiterfassung v1.4.5 – Flask + SQLite – NRW*
+*Zeiterfassung v2.0.0 – Flask + SQLite – 20 Länder*

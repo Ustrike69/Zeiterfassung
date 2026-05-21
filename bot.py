@@ -51,6 +51,10 @@ NLP_EXAMPLES = (
     "• Krank von 10.6. bis 12.6."
 )
 
+
+def _nlp_examples(user_id=None, lang=None):
+    return t_bot("bot.nlp_examples", user_id=user_id, lang=lang)
+
 _WEEKDAY_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 _WEEKDAY_SHORT = _WEEKDAY_DE  # Alias
 _MONTH_DE = ["Januar","Februar","März","April","Mai","Juni",
@@ -59,6 +63,7 @@ _MONTH_DE = ["Januar","Februar","März","April","Mai","Juni",
 # ── DB helpers ────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 from db import connect, init_db  # noqa: E402
+from bot_translations import t_bot, _get_user_lang  # noqa: E402
 
 
 def _load_bot_config_from_db() -> dict:
@@ -316,11 +321,33 @@ def _is_workday_for_user(iso_day: str, schedule: "dict | None") -> bool:
     return _mask_allows(mask, wd)
 
 
-def _is_holiday(iso_day: str) -> bool:
+def _get_user_holiday_region(user_id=None) -> str:
+    if user_id:
+        db = connect()
+        try:
+            row = db.execute("SELECT holiday_region FROM users WHERE id=?", (user_id,)).fetchone()
+            if row and row["holiday_region"]:
+                return row["holiday_region"]
+        except Exception:
+            pass
+        finally:
+            db.close()
+    db = connect()
+    try:
+        row = db.execute("SELECT value FROM app_config WHERE key='default_holiday_region'").fetchone()
+        return (row["value"] or "DE-NW") if row else "DE-NW"
+    except Exception:
+        return "DE-NW"
+    finally:
+        db.close()
+
+
+def _is_holiday(iso_day: str, user_id=None) -> bool:
+    region = _get_user_holiday_region(user_id)
     db = connect()
     try:
         r = db.execute(
-            "SELECT is_holiday FROM calendar_days WHERE day=?", (iso_day,)
+            "SELECT is_holiday FROM calendar_days WHERE day=? AND region=?", (iso_day, region)
         ).fetchone()
         return bool(r and r["is_holiday"])
     finally:
@@ -364,7 +391,7 @@ def _week_dates_from(iso_day: str) -> list:
 
 
 def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
-    if _is_holiday(iso_day):
+    if _is_holiday(iso_day, user_id):
         return 0
     schedule = _get_user_schedule_for_day(user_id, iso_day)
     if not schedule:
@@ -431,8 +458,10 @@ def _fetch_flextag_ranges(user_id: int) -> list:
         rows = db.execute(
             """SELECT a.date_from, a.date_to FROM absences a
                JOIN absence_types t ON t.id=a.type_id
-               WHERE a.user_id=? AND t.name='Sonstige'
-                 AND LOWER(TRIM(COALESCE(a.comment,'')))='flextag'""",
+               WHERE a.user_id=? AND (
+                   t.name='Flextag'
+                   OR (t.name='Sonstige' AND LOWER(TRIM(COALESCE(a.comment,'')))='flextag')
+               )""",
             (user_id,),
         ).fetchall()
         return [{"date_from": str(r["date_from"])[:10], "date_to": str(r["date_to"])[:10]} for r in rows]
@@ -511,7 +540,7 @@ def _vacation_used_days(user_id: int, year: int) -> float:
             total += 0.5
         else:
             for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
-                if _is_holiday(iso):
+                if _is_holiday(iso, user_id):
                     continue
                 schedule = _get_user_schedule_for_day(user_id, iso)
                 if _is_workday_for_user(iso, schedule):
@@ -539,7 +568,7 @@ def _vacation_used_days_started_by(user_id: int, year: int, deadline_iso: str) -
             total += 0.5
         else:
             for iso in _iter_days(str(row["date_from"])[:10], str(row["date_to"])[:10]):
-                if _is_holiday(iso):
+                if _is_holiday(iso, user_id):
                     continue
                 schedule = _get_user_schedule_for_day(user_id, iso)
                 if _is_workday_for_user(iso, schedule):
@@ -817,10 +846,10 @@ def _do_insert_absence(user_id: int, absence_type: str, date_from: str, date_to:
                         f"Verfügbar: {_fmt_days(available)}, Beantragt: {_fmt_days(requested)}"
                     )
 
-        _sonstige = {"Flextag", "Verdi"}
-        if absence_type in _sonstige:
+        # Flextag is a dedicated type; Verdi stays as Sonstige+comment
+        if absence_type == "Verdi":
             lookup_name = "Sonstige"
-            comment = absence_type
+            comment = "Verdi"
         else:
             lookup_name = absence_type
             comment = None
@@ -1050,8 +1079,7 @@ async def _check_auth(
     own_uid = _get_user_id(tid)
     if own_uid is None:
         await update.message.reply_text(
-            "Kein Benutzer verknüpft. Bitte Admin kontaktieren.\n"
-            f"Deine Telegram-ID: {tid}"
+            t_bot("bot.not_registered", user_id=None) + f"\nDeine Telegram-ID: {tid}"
         )
         return False, None
     if context is not None and _is_bot_admin(tid):
@@ -1106,13 +1134,13 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ok, uid = await _check_auth(update, context)
     if not ok:
         return
-    today = datetime.date.today().isoformat()
-    mins = _calc_balance_end_at(uid, today)
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    mins = _calc_balance_end_at(uid, yesterday)
     sign = "✅" if mins >= 0 else "⚠️"
     u = _get_user_row(uid)
     name = (u["display_name"] or u["username"]) if u else f"ID {uid}"
     await update.message.reply_text(
-        f"{sign} *Gleitzeitkonto – {name}*\n\nStand {_fmt_date_de(today)}: *{_fmt_minutes_signed(mins)}*",
+        f"{sign} *Gleitzeitkonto – {name}*\n\nGleitzeitkonto (Stand {_fmt_date_de(yesterday)}): *{_fmt_minutes_signed(mins)}*",
         parse_mode="Markdown",
     )
 
@@ -1243,7 +1271,7 @@ def _count_working_days(uid: int, date_from: str, date_to: str, is_half_day: boo
         return 0.5
     total = 0.0
     for iso in _iter_days(date_from, date_to):
-        if _is_holiday(iso):
+        if _is_holiday(iso, uid):
             continue
         schedule = _get_user_schedule_for_day(uid, iso)
         if _is_workday_for_user(iso, schedule):
@@ -1285,8 +1313,10 @@ def _get_abwesenheiten_liste(uid: int, year: int) -> str:
             grp = "Urlaub"
         elif "krank" in typ.lower():
             grp = "Krank"
-        elif typ == "Sonstige" and cmt.lower() == "flextag":
+        elif typ == "Flextag" or (typ == "Sonstige" and cmt.lower() == "flextag"):
             grp = "Flextag"
+        elif typ == "Verdi" or (typ == "Sonstige" and cmt.lower() == "verdi"):
+            grp = "Verdi"
         elif typ == "Sonstige" and cmt:
             grp = cmt
         else:
@@ -1416,7 +1446,7 @@ def _build_liste(uid: int, year: int, month: "int | None") -> tuple:
 
         d = datetime.date.fromisoformat(iso)
         wd = d.weekday()
-        is_hol = _is_holiday(iso)
+        is_hol = _is_holiday(iso, uid)
         is_weekend = wd >= 5
 
         if is_weekend and act == 0 and exp == 0:
@@ -1712,12 +1742,12 @@ async def cmd_alssaldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not u:
         await update.message.reply_text(f"Benutzer '{context.args[0]}' nicht gefunden.")
         return
-    today = datetime.date.today().isoformat()
-    mins = _calc_balance_end_at(u["id"], today)
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    mins = _calc_balance_end_at(u["id"], yesterday)
     sign = "✅" if mins >= 0 else "⚠️"
     name = u["display_name"] or u["username"]
     await update.message.reply_text(
-        f"{sign} *Gleitzeitkonto – {name}*\n\nStand {_fmt_date_de(today)}: *{_fmt_minutes_signed(mins)}*",
+        f"{sign} *Gleitzeitkonto – {name}*\n\nGleitzeitkonto (Stand {_fmt_date_de(yesterday)}): *{_fmt_minutes_signed(mins)}*",
         parse_mode="Markdown",
     )
 
@@ -1787,10 +1817,9 @@ def _wizard_kb_absence() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("💆 Flextag", callback_data="wizard_abs_flextag"),
-            InlineKeyboardButton("🔧 Verdi", callback_data="wizard_abs_verdi"),
+            InlineKeyboardButton("✈ Dienstreise", callback_data="wizard_abs_trip"),
         ],
         [
-            InlineKeyboardButton("✈ Dienstreise", callback_data="wizard_abs_trip"),
             InlineKeyboardButton("❌ Abbrechen", callback_data="wizard_cancel"),
         ],
     ])
@@ -1809,10 +1838,16 @@ def _wizard_expires() -> datetime.datetime:
 
 async def _wizard_send_step1(bot, telegram_id: int, today_iso: str) -> None:
     d = datetime.date.fromisoformat(today_iso)
+    user_id = _get_user_id(telegram_id)
+    lang = _get_user_lang(user_id) if user_id else "de"
+    if lang == "en":
+        _wdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    else:
+        _wdays = _WEEKDAY_DE
     text = (
         f"Guten Abend! 👋\n"
-        f"Für heute ({_WEEKDAY_DE[d.weekday()]} {_fmt_date_de(today_iso)}) fehlt noch ein Eintrag.\n\n"
-        f"Heute gearbeitet?"
+        f"Für heute ({_wdays[d.weekday()]} {_fmt_date_de(today_iso)}) fehlt noch ein Eintrag.\n\n"
+        f"{t_bot('bot.wizard_ask', user_id=user_id, lang=lang).replace('{date}', _fmt_date_de(today_iso))}"
     )
     wizard_state[telegram_id] = {
         "state": None,
@@ -1838,7 +1873,7 @@ async def trigger_wizard(
         schedule = _get_user_schedule_for_day(user_id, today_iso)
         if not _is_workday_for_user(today_iso, schedule):
             return False
-        if _is_holiday(today_iso):
+        if _is_holiday(today_iso, user_id):
             return False
         if _has_entry_today(user_id, today_iso):
             return False
@@ -2128,7 +2163,7 @@ async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data.startswith("wizard_abs_"):
         typ_key = data[len("wizard_abs_"):]
-        labels = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag", "verdi": "Verdi"}
+        labels = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag"}
         label = labels.get(typ_key, typ_key.capitalize())
         wizard_state[tid] = {
             **ws, "state": WAITING_ABSENCE_CONFIRM,
@@ -2141,7 +2176,7 @@ async def handle_wizard_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data.startswith("wizard_confirm_"):
         typ_key = data[len("wizard_confirm_"):]
-        type_map = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag", "verdi": "Verdi"}
+        type_map = {"urlaub": "Urlaub", "krank": "Krank", "flextag": "Flextag"}
         absence_type = type_map.get(typ_key, typ_key.capitalize())
         wizard_state.pop(tid, None)
         result = _do_insert_absence(own_uid, absence_type, today_iso, today_iso)
@@ -2350,7 +2385,7 @@ async def _process_nlp(
 ) -> None:
     actions = _parse_nlp(text)
     if not actions:
-        await update.message.reply_text(NLP_EXAMPLES)
+        await update.message.reply_text(_nlp_examples(user_id=uid))
         return
     await _execute_actions(actions, uid, update, context)
 

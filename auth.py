@@ -16,6 +16,25 @@ def _username_canonical(username: str) -> str:
     return (username or "").strip().lower()
 
 
+def validate_password(password: str, username: str = "") -> list:
+    """Returns list of error strings; empty list = password is valid."""
+    errors = []
+    if len(password) < 10:
+        errors.append("Mindestens 10 Zeichen")
+    if not any(c.isupper() for c in password):
+        errors.append("Mindestens ein Großbuchstabe")
+    if not any(c.islower() for c in password):
+        errors.append("Mindestens ein Kleinbuchstabe")
+    if not any(c.isdigit() for c in password):
+        errors.append("Mindestens eine Ziffer")
+    _specials = set(r"""!@#$%^&*()-_=+[]{}|;:'",.<>?/\`~""")
+    if not any(c in _specials for c in password):
+        errors.append("Mindestens ein Sonderzeichen")
+    if username and username.lower() in password.lower():
+        errors.append("Passwort darf nicht den Benutzernamen enthalten")
+    return errors
+
+
 def create_user(
     username: str,
     password: str,
@@ -82,7 +101,8 @@ def current_user():
     db = connect()
     u = db.execute(
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
-        "password_changed, onboarding_done, display_name, email, admin_role FROM users WHERE id=?",
+        "password_changed, onboarding_done, display_name, email, admin_role, "
+        "must_change_password, admin_only, language FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
@@ -126,8 +146,28 @@ def set_active(user_id: int, is_active: bool) -> None:
 def set_password(user_id: int, new_password: str) -> None:
     db = connect()
     db.execute(
-        "UPDATE users SET password_hash=?, password_changed=1, updated_at=datetime('now') WHERE id=?",
+        "UPDATE users SET password_hash=?, password_changed=1, must_change_password=0, updated_at=datetime('now') WHERE id=?",
         (generate_password_hash(new_password), user_id),
+    )
+    db.commit()
+    db.close()
+
+
+def set_language(user_id: int, lang: str) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET language=?, updated_at=datetime('now') WHERE id=?",
+        (lang, user_id),
+    )
+    db.commit()
+    db.close()
+
+
+def set_must_change_password(user_id: int, flag: bool) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET must_change_password=?, updated_at=datetime('now') WHERE id=?",
+        (1 if flag else 0, user_id),
     )
     db.commit()
     db.close()
@@ -152,7 +192,10 @@ def login_required(view):
         if not u or not u.get("is_active"):
             session.clear()
             return redirect(url_for("login"))
-        if not u.get("onboarding_done") and request.endpoint != "onboarding" and request.endpoint != "onboarding_post":
+        ep = request.endpoint
+        if u.get("must_change_password") and ep not in ("change_password", "change_password_post"):
+            return redirect(url_for("change_password"))
+        if not u.get("must_change_password") and not u.get("onboarding_done") and ep not in ("onboarding", "onboarding_post"):
             return redirect(url_for("onboarding"))
         return view(*args, **kwargs)
     return wrapped

@@ -1,13 +1,17 @@
 def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impersonation_banner: str = "", show_back: bool = True, extra_root_css: str = "", app_label: str = "", app_label_color: str = "#f59e0b") -> str:
+    from translations import t as _t
     nav_html = ""
     if user:
-        items = [("/", "Übersicht"), ("/absences", "Abwesenheiten"), ("/business_trips", "Dienstreisen"), ("/calendar", "Kalender"), ("/periods", "Abschlüsse"), ("/settings", "Einstellungen"), ("/export", "Export"), ("/help", "❓ Hilfe")]
-        if user.get("is_admin"):
-            items.append(("/admin", "Admin"))
-        items.append(("/logout", "Logout"))
+        if user.get("admin_only"):
+            items = [("/admin", _t("nav.admin")), ("/settings", _t("nav.settings")), ("/help", _t("nav.help"))]
+        else:
+            items = [("/", _t("nav.dashboard")), ("/absences", _t("nav.absences")), ("/business_trips", _t("nav.trips")), ("/calendar", _t("nav.calendar")), ("/periods", _t("nav.periods")), ("/settings", _t("nav.settings")), ("/export", _t("nav.export")), ("/help", _t("nav.help"))]
+            if user.get("is_admin"):
+                items.append(("/admin", _t("nav.admin")))
+        items.append(("/logout", _t("nav.logout")))
         li = "".join([f'<li><a class="nav-link" href="{u}">{t}</a></li>' for u, t in items])
         nav_html = f"""<nav class="app-nav">
-  <input type="checkbox" id="nav-cb" class="nav-cb">
+  <input type="checkbox" id="nav-cb" class="nav-cb" autocomplete="off">
   <label for="nav-cb" class="hamburger" aria-label="Menü">
     <span></span><span></span><span></span>
   </label>
@@ -232,6 +236,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impers
     try{{var wrap=cb.closest('form').querySelector('.multiday-fields');if(wrap)wrap.style.display=cb.checked?'':'none';}}catch(e){{}}
   }}
   document.addEventListener('DOMContentLoaded',function(){{
+    var nc=document.getElementById('nav-cb');if(nc)nc.checked=false;
     document.querySelectorAll('.dt-text.dfrom').forEach(function(inp){{dt_text(inp);}});
   }});
 </script>
