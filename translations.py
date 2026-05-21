@@ -796,6 +796,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.regional_default_hint":  "(gilt für alle User ohne eigene Einstellung)",
         "admin.regional_per_user":      "Region pro Benutzer",
         "admin.regional_standard":      "Standard",
+        "admin.server_config":          "Server-Konfiguration",
+        "admin.base_url":               "Externe Server-URL",
+        "admin.base_url_hint":          "URL unter der die App erreichbar ist, z.B. https://zeiten.firma.de. Wird für Kalender-Abonnements und Mail-Links genutzt.",
 
         # ── Admin per-user settings ───────────────────────────────────
         "admin.abs_types_per_user":  "Abwesenheitstypen pro Benutzer",
@@ -1639,6 +1642,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.regional_default_hint":  "(applies to all users without individual setting)",
         "admin.regional_per_user":      "Region per user",
         "admin.regional_standard":      "Default",
+        "admin.server_config":          "Server Configuration",
+        "admin.base_url":               "External Server URL",
+        "admin.base_url_hint":          "URL under which the app is accessible, e.g. https://time.company.com. Used for calendar subscriptions and mail links.",
 
         # ── Admin per-user settings ───────────────────────────────────
         "admin.abs_types_per_user":  "Absence types per user",

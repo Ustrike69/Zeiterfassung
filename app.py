@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.2"
+APP_VERSION = "v2.0.3"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -59,6 +59,25 @@ def _get_app_config() -> dict:
 
 
 _HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
+def _get_base_url() -> str:
+    """Return the configured external server URL, falling back to the current request origin."""
+    base = (_get_app_config().get("base_url") or "").strip().rstrip("/")
+    if not base:
+        proto = request.headers.get("X-Forwarded-Proto") or request.scheme or "http"
+        host  = request.headers.get("X-Forwarded-Host") or request.host
+        base  = f"{proto}://{host}"
+    return base
+
+
+def _get_webcal_url(token: str) -> str:
+    base = _get_base_url()
+    if base.startswith("https://"):
+        webcal = base.replace("https://", "webcal://", 1)
+    else:
+        webcal = base.replace("http://", "webcal://", 1)
+    return f"{webcal}/absences/calendar/{token}.ics"
 
 
 def layout(title, body, user, version, show_back=True):
@@ -4348,8 +4367,8 @@ def _build_ical_for_user(user_id: int, lang: str, period: str = "all") -> str:
         date_filter = ""
 
     absences = db.execute(
-        f"SELECT a.id, a.date_from, a.date_to, a.remark, at.name as type_name "
-        f"FROM absences a JOIN absence_types at ON a.absence_type_id=at.id "
+        f"SELECT a.id, a.date_from, a.date_to, a.comment, at.name as type_name "
+        f"FROM absences a JOIN absence_types at ON a.type_id=at.id "
         f"WHERE a.user_id=?{date_filter} ORDER BY a.date_from",
         (user_id,),
     ).fetchall()
@@ -4369,7 +4388,7 @@ def _build_ical_for_user(user_id: int, lang: str, period: str = "all") -> str:
         type_name = ab["type_name"] or ""
         if type_name not in wanted_names:
             continue
-        remark = (ab["remark"] or "").strip()
+        remark = (ab["comment"] or "").strip()
 
         # SUMMARY: prefix + translated type (or remark for Sonstige)
         if type_name == "Sonstige" and remark:
@@ -4449,10 +4468,13 @@ def absences_calendar_token(token: str):
     lang = row["language"] or "en"
     ical_data = _build_ical_for_user(row["id"], lang)
     from flask import Response as _Resp
-    return _Resp(
-        ical_data,
-        mimetype="text/calendar; charset=utf-8",
-    )
+    resp = _Resp(ical_data, status=200)
+    resp.headers["Content-Type"]                = "text/calendar; charset=utf-8"
+    resp.headers["Content-Disposition"]         = "inline"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"]               = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"]                      = "no-cache"
+    return resp
 
 
 # -------------------------
@@ -6442,10 +6464,13 @@ def settings_view():
     cal_types   = (_cal_row["calendar_export_types"] or "urlaub,krank,flextag").split(",") if _cal_row else ["urlaub","krank","flextag"]
     cal_prefix  = (_cal_row["calendar_export_prefix"] or "")             if _cal_row else ""
     cal_token   = (_cal_row["calendar_token"]        or "")              if _cal_row else ""
-    _base_url   = (request.host_url or "").rstrip("/")
-    _webcal_url = (_base_url.replace("https://", "webcal://").replace("http://", "webcal://")
-                   + f"/absences/calendar/{cal_token}.ics") if cal_token else ""
-    _ical_url   = _base_url + f"/absences/calendar/{cal_token}.ics" if cal_token else ""
+    if cal_token:
+        _base_url   = _get_base_url()
+        _ical_url   = _base_url + f"/absences/calendar/{cal_token}.ics"
+        _webcal_url = _get_webcal_url(cal_token)
+    else:
+        _ical_url   = ""
+        _webcal_url = ""
 
     if contouring_enabled:
         _kont_html = (
@@ -12521,6 +12546,7 @@ def _bundesland_select(name: str, current: str, include_default: bool = False) -
 def _render_regional_section() -> str:
     cfg = _get_app_config()
     default_region = cfg.get("default_holiday_region") or "DE-NW"
+    base_url_val   = _html.escape(cfg.get("base_url") or "")
     return f"""
     <div class="acc" id="acc-regional">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-regional-body')">
@@ -12528,6 +12554,21 @@ def _render_regional_section() -> str:
       </button>
       <div class="acc-body" id="acc-regional-body">
         <div class="acc-inner">
+
+          <form method="post" action="/admin/server-config" style="margin-bottom:20px;">
+            <div style="font-size:13px;font-weight:700;margin-bottom:10px;">{t('admin.server_config')}</div>
+            <div style="margin-bottom:10px;">
+              <label style="font-size:12px;">{t('admin.base_url')}</label>
+              <input type="url" name="base_url" value="{base_url_val}"
+                     placeholder="https://zeiten.firma.de"
+                     style="width:100%;max-width:400px;margin-top:4px;">
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.base_url_hint')}</div>
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+          </form>
+
+          <hr style="margin:0 0 16px 0;border:none;border-top:1px solid var(--bd);">
+
           <form method="post" action="/admin/regional">
             <div style="font-size:13px;font-weight:700;margin-bottom:12px;">{t('admin.regional_holidays')}</div>
             <div style="margin-bottom:14px;">
@@ -12972,6 +13013,25 @@ def admin_appearance_save():
     db.close()
     add_flash("Erscheinungsbild gespeichert.", "success")
     return redirect("/admin#acc-appearance")
+
+
+@app.post("/admin/server-config")
+@sysadmin_required
+def admin_server_config_save():
+    bootstrap()
+    base_url = (request.form.get("base_url") or "").strip().rstrip("/")
+    db = connect()
+    db.execute(
+        "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+        ("base_url", base_url),
+    )
+    db.commit()
+    db.close()
+    from flask import g as _g
+    if hasattr(_g, "_app_config_cache"):
+        del _g._app_config_cache
+    add_flash(t("settings.saved"), "success")
+    return redirect("/admin#acc-regional")
 
 
 @app.post("/admin/regional")

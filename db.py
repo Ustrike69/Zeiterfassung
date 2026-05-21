@@ -394,6 +394,7 @@ def init_db():
         ("default_holiday_region", "DE-NW"),
         ("default_language", "en"),
         ("available_languages", "de,en"),
+        ("base_url", ""),
     ):
         db.execute(
             "INSERT OR IGNORE INTO app_config(key, value) VALUES(?, ?)",
