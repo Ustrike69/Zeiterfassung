@@ -430,8 +430,18 @@ def init_db():
         db.execute("ALTER TABLE telegram_users ADD COLUMN reminder_time TEXT NOT NULL DEFAULT '20:00'")
     if not _col_exists(db, "users", "enabled_absence_types"):
         db.execute("ALTER TABLE users ADD COLUMN enabled_absence_types TEXT")
-
-
+    if not _col_exists(db, "users", "calendar_system"):
+        db.execute("ALTER TABLE users ADD COLUMN calendar_system TEXT NOT NULL DEFAULT 'ical'")
+    if not _col_exists(db, "users", "calendar_export_types"):
+        db.execute("ALTER TABLE users ADD COLUMN calendar_export_types TEXT NOT NULL DEFAULT 'urlaub,krank,flextag'")
+    if not _col_exists(db, "users", "calendar_export_prefix"):
+        db.execute("ALTER TABLE users ADD COLUMN calendar_export_prefix TEXT NOT NULL DEFAULT ''")
+    if not _col_exists(db, "users", "calendar_token"):
+        db.execute("ALTER TABLE users ADD COLUMN calendar_token TEXT")
+        import uuid as _uuid
+        for _row in db.execute("SELECT id FROM users").fetchall():
+            db.execute("UPDATE users SET calendar_token=? WHERE id=?",
+                       (str(_uuid.uuid4()), _row[0]))
 
 
 

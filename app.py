@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -4309,6 +4309,150 @@ def absences_delete(absence_id: int):
     return redirect(url_for("absences_list"))
 
 
+# ── iCal / Kalender-Export ─────────────────────────────────────────────────
+
+_ICAL_TYPE_MAP = {
+    "urlaub":  "Urlaub",
+    "krank":   "Krank",
+    "flextag": "Flextag",
+    "sonstige":"Sonstige",
+}
+
+def _ical_escape(s: str) -> str:
+    return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _build_ical_for_user(user_id: int, lang: str, period: str = "all") -> str:
+    import uuid as _uuid
+    db = connect()
+    row = db.execute(
+        "SELECT username, display_name, calendar_export_types, calendar_export_prefix FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        db.close()
+        return ""
+    username       = row["username"] or ""
+    display_name   = row["display_name"] or username
+    export_types   = (row["calendar_export_types"] or "urlaub,krank,flextag").split(",")
+    prefix         = (row["calendar_export_prefix"] or "").strip()
+
+    # map chosen keys to DB type names
+    wanted_names = {_ICAL_TYPE_MAP[k] for k in export_types if k in _ICAL_TYPE_MAP}
+
+    # date filter
+    today = datetime.date.today()
+    if period == "year":
+        date_filter = f" AND date_from >= '{today.year}-01-01' AND date_to <= '{today.year}-12-31'"
+    else:
+        date_filter = ""
+
+    absences = db.execute(
+        f"SELECT a.id, a.date_from, a.date_to, a.remark, at.name as type_name "
+        f"FROM absences a JOIN absence_types at ON a.absence_type_id=at.id "
+        f"WHERE a.user_id=?{date_filter} ORDER BY a.date_from",
+        (user_id,),
+    ).fetchall()
+    db.close()
+
+    cal_name = f"{t('calendar.cal_name', lang=lang)} {display_name}"
+
+    _type_label = {
+        "Urlaub":  t("absence_type.urlaub",  lang=lang),
+        "Krank":   t("absence_type.krank",   lang=lang),
+        "Flextag": t("absence_type.flextag", lang=lang),
+        "Sonstige":t("absence_type.sonstige",lang=lang),
+    }
+
+    events = []
+    for ab in absences:
+        type_name = ab["type_name"] or ""
+        if type_name not in wanted_names:
+            continue
+        remark = (ab["remark"] or "").strip()
+
+        # SUMMARY: prefix + translated type (or remark for Sonstige)
+        if type_name == "Sonstige" and remark:
+            label = remark
+        else:
+            label = _type_label.get(type_name, type_name)
+        summary = f"{prefix} {label}".strip() if prefix else label
+
+        # DTEND is exclusive (date + 1 day)
+        try:
+            dtend = (datetime.date.fromisoformat(ab["date_to"]) + datetime.timedelta(days=1)).strftime("%Y%m%d")
+        except Exception:
+            dtend = ab["date_to"].replace("-", "") + "01"  # fallback
+
+        dtstart = ab["date_from"].replace("-", "")
+        uid = f"{user_id}-{ab['id']}@zeiterfassung"
+        desc = _ical_escape(remark) if remark else ""
+
+        ev = [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTART;VALUE=DATE:{dtstart}",
+            f"DTEND;VALUE=DATE:{dtend}",
+            f"SUMMARY:{_ical_escape(summary)}",
+            "STATUS:CONFIRMED",
+            "TRANSP:TRANSPARENT",
+        ]
+        if desc:
+            ev.append(f"DESCRIPTION:{desc}")
+        ev.append("END:VEVENT")
+        events.append("\r\n".join(ev))
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Zeiterfassung//DE",
+        f"X-WR-CALNAME:{_ical_escape(cal_name)}",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+    lines.extend(events)
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+@app.get("/absences/export/calendar")
+@login_required
+def absences_export_calendar():
+    bootstrap()
+    u = current_user()
+    lang = session.get("lang", "en")
+    db = connect()
+    row = db.execute("SELECT calendar_export_types FROM users WHERE id=?", (u["id"],)).fetchone()
+    db.close()
+    period = request.args.get("period", "all")
+    ical_data = _build_ical_for_user(u["id"], lang, period)
+    filename = f"absences_{u['username']}_{datetime.date.today().year}.ics"
+    from flask import Response as _Resp
+    return _Resp(
+        ical_data,
+        mimetype="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/absences/calendar/<token>.ics")
+def absences_calendar_token(token: str):
+    bootstrap()
+    db = connect()
+    row = db.execute(
+        "SELECT id, language FROM users WHERE calendar_token=? AND is_active=1",
+        (token,),
+    ).fetchone()
+    db.close()
+    if not row:
+        abort(404)
+    lang = row["language"] or "en"
+    ical_data = _build_ical_for_user(row["id"], lang)
+    from flask import Response as _Resp
+    return _Resp(
+        ical_data,
+        mimetype="text/calendar; charset=utf-8",
+    )
 
 
 # -------------------------
@@ -6054,6 +6198,124 @@ def _contouring_settings_card(user_id: int) -> str:
     </div>"""
 
 
+def _render_calendar_integration_section(
+    cal_system: str,
+    cal_types: "list[str]",
+    cal_prefix: str,
+    cal_token: str,
+    webcal_url: str,
+    ical_url: str,
+) -> str:
+    lang = session.get("lang", "en")
+
+    # Radio buttons for calendar system
+    def _sys_radio(val: str, lbl: str) -> str:
+        chk = "checked" if cal_system == val else ""
+        return (f"<label style='display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;'>"
+                f"<input type='radio' name='calendar_system' value='{val}' {chk}> {lbl}</label>")
+
+    # Checkboxes for absence types
+    def _type_cb(key: str, lbl: str) -> str:
+        chk = "checked" if key in cal_types else ""
+        return (f"<label style='display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:pointer;'>"
+                f"<input type='checkbox' name='type_{key}' value='1' {chk}> {lbl}</label>")
+
+    # Preview text
+    _prefix_escaped = _html.escape(cal_prefix)
+    _preview_label  = _html.escape(t("absence_type.urlaub", lang=lang))
+    _preview_text   = f"{_prefix_escaped} {_preview_label}".strip() if cal_prefix else _preview_label
+
+    # Instructions per system
+    _instructions = {
+        "apple":   t("settings.calendar_instructions_apple",   lang=lang),
+        "google":  t("settings.calendar_instructions_google",  lang=lang),
+        "outlook": t("settings.calendar_instructions_outlook", lang=lang),
+        "ical":    "",
+    }.get(cal_system, "")
+
+    # URL for subscription (webcal for Apple, https for Google/Outlook/other)
+    _sub_url  = webcal_url if cal_system == "apple" else ical_url
+    _copy_lbl = _html.escape(t("btn.copy", lang=lang))
+    _dl_url_year = "/absences/export/calendar?period=year"
+    _dl_url_all  = "/absences/export/calendar?period=all"
+
+    _url_block = ""
+    if _sub_url:
+        _url_block = f"""
+        <div class="acc-sub">
+          <b style="font-size:13px;">{t('settings.calendar_token_label')}</b>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+            <input id="cal-sub-url" type="text" value="{_html.escape(_sub_url)}" readonly
+                   style="flex:1;min-width:200px;font-size:12px;font-family:monospace;">
+            <button class="btn btn-sm" type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('cal-sub-url').value)">{_copy_lbl}</button>
+          </div>
+          <div class="small" style="color:var(--mu);margin-top:4px;">{t('settings.calendar_subscribe_hint')}</div>
+          <form method="post" action="/settings/calendar/reset-token" style="margin-top:10px;"
+                onsubmit="return confirm('{_html.escape(t('settings.calendar_token_reset_warning'))}');">
+            <button class="btn btn-sm danger" type="submit">{t('settings.calendar_token_reset')}</button>
+          </form>
+        </div>"""
+
+    _instr_html = f"<p class='small' style='color:var(--mu);margin-bottom:10px;'>{_html.escape(_instructions)}</p>" if _instructions else ""
+
+    return f"""
+    <div class="acc" id="acc-cal-int">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-cal-int-body')">
+        <span>{t('settings.calendar_integration')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-cal-int-body">
+        <div class="acc-inner">
+          <form method="post" action="/settings/calendar">
+
+            <div class="acc-sub" style="margin-top:0;padding-top:0;border-top:none;">
+              <b style="font-size:13px;display:block;margin-bottom:8px;">{t('settings.calendar_system')}</b>
+              {_sys_radio('apple',   t('settings.calendar_apple'))}
+              {_sys_radio('google',  t('settings.calendar_google'))}
+              {_sys_radio('outlook', t('settings.calendar_outlook'))}
+              {_sys_radio('ical',    t('settings.calendar_other'))}
+            </div>
+
+            <div class="acc-sub">
+              <b style="font-size:13px;display:block;margin-bottom:8px;">{t('settings.calendar_entry_settings')}</b>
+              <div style="margin-bottom:10px;">
+                <label>{t('settings.calendar_prefix')}</label>
+                <input type="text" name="calendar_export_prefix" value="{_prefix_escaped}"
+                       maxlength="20" style="width:200px;margin-top:4px;" placeholder="ZE: ">
+                <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.calendar_prefix_hint')}</div>
+                <div class="small" style="margin-top:4px;">
+                  <b>{t('settings.calendar_prefix_preview')}</b> {_html.escape(_preview_text)}
+                </div>
+              </div>
+              <div>
+                <label style="display:block;margin-bottom:6px;">{t('settings.calendar_export_types')}</label>
+                {_type_cb('urlaub',  t('absence_type.urlaub',  lang=lang))}
+                {_type_cb('krank',   t('absence_type.krank',   lang=lang))}
+                {_type_cb('flextag', t('absence_type.flextag', lang=lang))}
+                {_type_cb('sonstige',t('absence_type.sonstige',lang=lang))}
+              </div>
+            </div>
+
+            <div class="acc-sub" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="btn btn-sm" type="submit">{t('common.save')}</button>
+            </div>
+          </form>
+
+          <div class="acc-sub">
+            <b style="font-size:13px;display:block;margin-bottom:8px;">{t('settings.calendar_export')}</b>
+            {_instr_html}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <a class="btn btn-sm" href="{_dl_url_year}">{t('settings.calendar_download')} ({t('settings.calendar_period_year')})</a>
+              <a class="btn btn-sm" href="{_dl_url_all}">{t('settings.calendar_download')} ({t('settings.calendar_period_all')})</a>
+            </div>
+          </div>
+
+          {_url_block}
+        </div>
+      </div>
+    </div>"""
+
+
 @app.get("/settings")
 @login_required
 def settings_view():
@@ -6168,6 +6430,22 @@ def settings_view():
     default_start = datetime.date.today().replace(day=1).isoformat()
     contouring_enabled = ci["enabled"]
     contouring_start_label = _fmt_date_de(ci["start_date"]) if ci["start_date"] else "–"
+
+    # Calendar integration settings
+    _cal_db = connect()
+    _cal_row = _cal_db.execute(
+        "SELECT calendar_system, calendar_export_types, calendar_export_prefix, calendar_token FROM users WHERE id=?",
+        (u["id"],),
+    ).fetchone()
+    _cal_db.close()
+    cal_system  = (_cal_row["calendar_system"]      or "ical")           if _cal_row else "ical"
+    cal_types   = (_cal_row["calendar_export_types"] or "urlaub,krank,flextag").split(",") if _cal_row else ["urlaub","krank","flextag"]
+    cal_prefix  = (_cal_row["calendar_export_prefix"] or "")             if _cal_row else ""
+    cal_token   = (_cal_row["calendar_token"]        or "")              if _cal_row else ""
+    _base_url   = (request.host_url or "").rstrip("/")
+    _webcal_url = (_base_url.replace("https://", "webcal://").replace("http://", "webcal://")
+                   + f"/absences/calendar/{cal_token}.ics") if cal_token else ""
+    _ical_url   = _base_url + f"/absences/calendar/{cal_token}.ics" if cal_token else ""
 
     if contouring_enabled:
         _kont_html = (
@@ -6423,6 +6701,11 @@ function wizValidate(e){{
         </div>
       </div>
     </div>
+
+    <!-- 5. Kalender-Integration -->
+    {_render_calendar_integration_section(
+        cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url
+    )}
     """
     return render_template_string(layout(t("settings.title"), body, u, APP_VERSION))
 
@@ -6615,6 +6898,45 @@ def settings_admin_only():
     msg = "Zeiterfassung deaktiviert. Du siehst ab sofort nur den Admin-Bereich." if new_val else "Zeiterfassung aktiviert."
     add_flash(msg, "success")
     return redirect("/settings")
+
+
+@app.post("/settings/calendar")
+@login_required
+def settings_calendar_post():
+    bootstrap()
+    u = current_user()
+    cal_system  = (request.form.get("calendar_system") or "ical").strip()
+    cal_prefix  = (request.form.get("calendar_export_prefix") or "").strip()[:20]
+    cal_period  = (request.form.get("calendar_period") or "all").strip()
+    # build export_types from checkboxes
+    chosen = []
+    for key in ("urlaub", "krank", "flextag", "sonstige"):
+        if request.form.get(f"type_{key}"):
+            chosen.append(key)
+    cal_types = ",".join(chosen) if chosen else "urlaub"
+    db = connect()
+    db.execute(
+        "UPDATE users SET calendar_system=?, calendar_export_types=?, calendar_export_prefix=? WHERE id=?",
+        (cal_system, cal_types, cal_prefix, u["id"]),
+    )
+    db.commit()
+    db.close()
+    add_flash(t("settings.saved"), "success")
+    return redirect("/settings#acc-cal-int")
+
+
+@app.post("/settings/calendar/reset-token")
+@login_required
+def settings_calendar_reset_token():
+    bootstrap()
+    import uuid as _uuid
+    u = current_user()
+    db = connect()
+    db.execute("UPDATE users SET calendar_token=? WHERE id=?", (str(_uuid.uuid4()), u["id"]))
+    db.commit()
+    db.close()
+    add_flash(t("settings.calendar_token_reset_warning"), "success")
+    return redirect("/settings#acc-cal-int")
 
 
 @app.post("/settings/language")
