@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.1"
+APP_VERSION = "v2.0.2"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -7288,26 +7288,29 @@ def _bot_service_exists() -> bool:
 _GIT_REMOTE_URL = "https://github.com/Ustrike69/Zeiterfassung.git"
 
 
-def _git_pending_commits() -> "list[str] | None":
+def _git_pending_commits() -> "list[str] | None | str":
     import subprocess
-    project = "/opt/zeiterfassung"
+    project = os.path.dirname(os.path.abspath(__file__))
     try:
         subprocess.run(
             ["git", "-C", project, "remote", "set-url", "origin", _GIT_REMOTE_URL],
             capture_output=True, timeout=5,
         )
-        subprocess.run(
-            ["git", "-C", project, "fetch", "origin", "main", "--quiet"],
-            capture_output=True, timeout=15,
+        r_fetch = subprocess.run(
+            ["git", "-C", project, "fetch", "origin", "main"],
+            capture_output=True, text=True, timeout=20,
         )
+        if r_fetch.returncode != 0:
+            err = r_fetch.stderr.strip() or r_fetch.stdout.strip() or "fetch failed"
+            return f"ERROR:{err}"
         r = subprocess.run(
             ["git", "-C", project, "log", "HEAD..origin/main", "--oneline"],
             capture_output=True, text=True, timeout=5,
         )
         lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
         return lines
-    except Exception:
-        return None
+    except Exception as e:
+        return f"ERROR:{e}"
 
 
 def _git_last_commit_info() -> str:
@@ -7338,7 +7341,7 @@ def _service_started_at(name: str) -> str:
 
 def _run_update() -> "tuple[bool, list[str]]":
     import subprocess
-    project = "/opt/zeiterfassung"
+    project = os.path.dirname(os.path.abspath(__file__))
     out = []
     subprocess.run(
         ["git", "-C", project, "remote", "set-url", "origin", _GIT_REMOTE_URL],
@@ -11605,7 +11608,9 @@ def admin_update_check():
     bootstrap()
     commits = _git_pending_commits()
     if commits is None:
-        return jsonify({"error": "git fetch fehlgeschlagen"})
+        return jsonify({"error": t("admin.update_fetch_failed")})
+    if isinstance(commits, str) and commits.startswith("ERROR:"):
+        return jsonify({"error": commits[6:]})
     return jsonify({"count": len(commits), "commits": commits[:5]})
 
 
