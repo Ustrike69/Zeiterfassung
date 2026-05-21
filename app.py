@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.3"
+APP_VERSION = "v2.0.4"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -10926,7 +10926,7 @@ window.addEventListener('DOMContentLoaded',function(){{
             </div>
             <div style="margin-bottom:8px;">
               <label style="font-size:12px;">{t('admin.smtp_pass')} {"<span style='font-weight:400;color:var(--mu);'>(" + t('admin.smtp_pass_hint') + ")</span>" if pw_set else ""}</label>
-              <input type="password" name="mail_password" value="" placeholder="{'**' if pw_set else t('admin.smtp_pass')}" style="font-size:13px;padding:5px 8px;">
+              <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else t('admin.smtp_pass')}" style="font-size:13px;padding:5px 8px;">
             </div>
             <div style="margin-bottom:10px;">
               <label style="font-size:12px;">{t('admin.smtp_from')}</label>
@@ -11692,8 +11692,8 @@ def admin_mail_settings():
           <input type="text" name="mail_username" value="{cfg.get('mail_username','')}" placeholder="user@beispiel.de" required>
         </div>
         <div style="margin-bottom:10px;">
-          <label>Passwort {"<span class='small' style='color:var(--mu);font-weight:400;'>(leer lassen = nicht ändern)</span>" if pw_set else ""}</label>
-          <input type="password" name="mail_password" value="" placeholder="{'Passwort nicht ändern' if pw_set else 'Passwort eingeben'}">
+          <label>Passwort {"<span class='small' style='color:var(--mu);font-weight:400;'>(leer lassen = unverändert)</span>" if pw_set else ""}</label>
+          <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else 'Passwort eingeben'}">
         </div>
         <div style="margin-bottom:14px;">
           <label>Absender (Anzeigename &lt;adresse@domain&gt;)</label>
@@ -11738,16 +11738,20 @@ def admin_mail_settings():
 @sysadmin_required
 def admin_mail_settings_save():
     bootstrap()
-    mail_server  = (request.form.get("mail_server") or "").strip()
-    mail_port    = (request.form.get("mail_port") or "587").strip()
+    mail_server   = (request.form.get("mail_server") or "").strip()
+    mail_port     = (request.form.get("mail_port") or "587").strip()
     mail_username = (request.form.get("mail_username") or "").strip()
     mail_password = (request.form.get("mail_password") or "").strip()
-    mail_from    = (request.form.get("mail_from") or "").strip()
+    mail_from     = (request.form.get("mail_from") or "").strip()
 
     if not mail_server or not mail_username:
         add_flash("Mailserver und Benutzername sind Pflichtfelder.", "error")
         return redirect("/admin/mail-settings")
 
+    # If no new password entered, persist the currently-effective password to DB
+    # (covers env-var passwords that were never in the DB and would be missing from backups)
+    if not mail_password:
+        mail_password = _get_mail_config().get("mail_password") or ""
     update_pw = bool(mail_password)
     _save_mail_config(mail_server, mail_port, mail_username, mail_password, mail_from, update_pw)
     add_flash(t("admin.smtp_saved"), "success")
