@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.5"
+APP_VERSION = "v2.0.6"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -11223,7 +11223,9 @@ def admin_impersonate_stop():
         return redirect("/")
     session["user_id"] = impersonator_id
     session.pop("impersonator_id", None)
-    return redirect(url_for("admin"))
+    session.pop("lang", None)  # reload admin's own language on next request
+    session.modified = True
+    return redirect(url_for("admin_home"))
 
 
 # ─── Admin: Zeitschema bearbeiten / löschen ──────────────────────────────────
