@@ -4,7 +4,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-**Zeiterfassung** (v2.0.0) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
+**Zeiterfassung** (v2.0.5) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
 
 ## Running the Application
 
@@ -166,6 +166,16 @@ Key tables:
 | `contouring_enabled` | INTEGER | 1 = contouring active |
 | `birth_date` | TEXT | For retirement countdown |
 | `retirement_age` | INTEGER | Default 67 |
+| `calendar_system` | TEXT | 'apple' / 'google' / 'outlook' / 'other' |
+| `calendar_export_types` | TEXT | Comma-separated absence type IDs to export (NULL = all) |
+| `calendar_export_prefix` | TEXT | Prefix string prepended to each calendar entry |
+| `calendar_token` | TEXT | UUID token for subscription URL auth |
+| `calendar_auth_mode` | TEXT | 'token' (default) / 'basic' |
+| `icloud_enabled` | INTEGER | 1 = outgoing iCloud sync active |
+| `icloud_apple_id` | TEXT | Apple ID (iCloud e-mail) |
+| `icloud_app_password` | TEXT | Fernet-encrypted app-specific password |
+| `icloud_calendar_name` | TEXT | Exact iCloud calendar name to write to |
+| `icloud_last_sync` | TEXT | Timestamp of last successful sync (YYYY-MM-DD HH:MM) |
 
 ## Schedule System
 
@@ -231,7 +241,35 @@ Admin page (`/admin`) has two tabs:
 
 Tab persistence via `sessionStorage.getItem('adminTab')`. Default: `'system'` for sysadmin, `'users'` for timemanager. Hash-based auto-open switches to the correct tab.
 
-Render functions for complex accordions: `_render_backup_section()`, `_render_bot_section()`, `_render_update_section()`, `_render_admin_absences_section()`, `_render_overtime_defaults_section()`, `_render_admin_overtime_section()`, `_render_regional_section()`, `_render_per_user_settings_section()`, `_render_appearance_section()`.
+Render functions for complex accordions: `_render_backup_section()`, `_render_bot_section()`, `_render_update_section()`, `_render_admin_absences_section()`, `_render_overtime_defaults_section()`, `_render_admin_overtime_section()`, `_render_regional_section()`, `_render_per_user_settings_section()`, `_render_appearance_section()`, `_render_calendar_integration_section()`, `_render_icloud_settings_section()`.
+
+## Calendar / iCloud Integration (v2.0.5)
+
+**iCal export helpers:**
+- `_build_ical_for_user(user_id, lang, period)` — builds full iCal string for a user's absences
+- `_ical_response(user_id, lang)` — returns Flask `Response` with correct `text/calendar` headers
+- `_ical_escape(text)` — escapes special chars for iCal strings
+
+**iCloud encryption:**
+- `_icloud_encrypt(text)` / `_icloud_decrypt(token)` — Fernet symmetric encryption using SHA-256 of `app.secret_key`
+- `_icloud_update_sync_time(user_id)` — writes current timestamp to `icloud_last_sync`
+
+**Outgoing iCloud sync:**
+- `_sync_to_icloud(user_id, absence_id, action)` — syncs one absence to iCloud; `action`: `'create'` / `'update'` / `'delete'`; never raises (all exceptions logged)
+- Called at: `absences_new_post`, `absences_edit_post`, `absences_delete`, `day_absence_add`
+- Delete path: called **before** DB delete so absence is still in scope; uses raw `httpx.delete()` to bypass iCloud CalDAV 412 precondition errors
+- Create/update path: uses `caldav.DAVClient(timeout=10)` via `cal.save_event()`; event URL = `{cal.url}/{uid}.ics` where `uid = f"zeiterfassung-{user_id}-{absence_id}@ustrike"`
+
+**CalDAV server routes** (Home Assistant integration):
+- `GET/PROPFIND /caldav/<token>/` — principal discovery (token auth)
+- `GET/PROPFIND/REPORT /caldav/<token>/calendar/` — calendar collection
+- `GET /caldav/<token>/calendar/<filename>` — single event .ics
+- Same three routes under `/caldav/basic/` for HTTP Basic Auth
+- Static segments registered before variable `<token>` routes to avoid conflicts
+
+**Calendar subscription routes:**
+- `GET /absences/calendar/<token>.ics` — token-authenticated iCal feed
+- `GET /absences/calendar/kalender.ics` — HTTP Basic Auth iCal feed (for HA)
 
 ## Overtime Notifications
 
@@ -271,4 +309,4 @@ Admin can act as another user:
 - **JS strings from Python**: Pre-compute `t()` values into Python vars (e.g., `_lbl = t('key')`), then embed via `repr(_lbl)` in `<script>` blocks to avoid quote conflicts.
 - `_calc_balance_end_at` must stay in sync with `balance_view` logic — both use `_iter_days`
 - `bootstrap()` called on every route → runs `init_db()` + `seed_defaults()` + `seed_all_regions()`
-- App version: `APP_VERSION = "v2.0.0"` at top of `app.py`
+- App version: `APP_VERSION = "v2.0.5"` at top of `app.py`

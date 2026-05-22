@@ -17,7 +17,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.4"
+APP_VERSION = "v2.0.5"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -4043,7 +4043,10 @@ def absences_new():
 <script>
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
+  var row = document.getElementById('remark_row');
+  var inp = row.querySelector('input[name="comment"]');
+  row.style.display = isSonstige ? '' : 'none';
+  if (inp) inp.required = isSonstige;
 }}
 </script>
     <div class="card">
@@ -4059,7 +4062,7 @@ function syncBemerkung(sel, sonstigeId) {{
         <label><input type="checkbox" name="is_half_day" value="1"> Halber Tag (nur wenn Von=Bis)</label><br><br>
         <div id="remark_row" style="display:none;">
           <label>Bemerkung <span style="color:var(--danger);">*</span></label><br>
-          <input type="text" name="comment" placeholder="Bemerkung eingeben …" style="width:100%;" required>
+          <input type="text" name="comment" placeholder="Bemerkung eingeben …" style="width:100%;">
         </div><br>
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/absences">Abbrechen</a>
@@ -4136,14 +4139,19 @@ def absences_new_post():
         add_flash("Überschneidung mit vorhandener Abwesenheit. Bitte Zeitraum anpassen.", "error")
         return redirect(url_for("absences_new"))
 
-    db.execute(
+    cur = db.execute(
         "INSERT INTO absences(user_id,type_id,date_from,date_to,is_half_day,comment) VALUES(?,?,?,?,?,?)",
         (u["id"], type_id, date_from, date_to, is_half_day, comment),
     )
+    new_id = cur.lastrowid
     if type_name == "Sonstige" and comment:
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
+    try:
+        _sync_to_icloud(u["id"], new_id, "create")
+    except Exception as _e:
+        app.logger.error("iCloud Sync Fehler (new): %s", _e)
     add_flash(t("absences.saved"), "success")
     return redirect(url_for("absences_list"))
 
@@ -4171,12 +4179,12 @@ def absences_edit(absence_id: int):
     db.close()
 
     options = ""
-    for t in types:
-        sel = "selected" if t["id"] == row["type_id"] else ""
-        options += f'<option value="{t["id"]}" {sel}>{t["name"]}</option>'
+    for typ in types:
+        sel = "selected" if typ["id"] == row["type_id"] else ""
+        options += f'<option value="{typ["id"]}" {sel}>{typ["name"]}</option>'
 
-    sonstige_id = next((t["id"] for t in types if t["name"] == "Sonstige"), 0)
-    current_type_name = next((t["name"] for t in types if t["id"] == row["type_id"]), "")
+    sonstige_id = next((typ["id"] for typ in types if typ["name"] == "Sonstige"), 0)
+    current_type_name = next((typ["name"] for typ in types if typ["id"] == row["type_id"]), "")
     is_sonstige_now = current_type_name == "Sonstige"
     checked = "checked" if row["is_half_day"] else ""
     comment = row["comment"] or ""
@@ -4189,7 +4197,10 @@ def absences_edit(absence_id: int):
 <script>
 function syncBemerkung(sel, sonstigeId) {{
   var isSonstige = String(sel.value) === String(sonstigeId);
-  document.getElementById('remark_row').style.display = isSonstige ? '' : 'none';
+  var row = document.getElementById('remark_row');
+  var inp = row.querySelector('input[name="comment"]');
+  row.style.display = isSonstige ? '' : 'none';
+  if (inp) inp.required = isSonstige;
 }}
 </script>
     <div class="card">
@@ -4205,12 +4216,13 @@ function syncBemerkung(sel, sonstigeId) {{
         <label><input type="checkbox" name="is_half_day" value="1" {checked}> Halber Tag (nur wenn Von=Bis)</label><br><br>
         <div id="remark_row" style="display:{remark_display};">
           <label>Bemerkung <span style="color:var(--danger);">*</span></label><br>
-          <input type="text" name="comment" value="{comment_val}" placeholder="Bemerkung eingeben …" style="width:100%;" required>
+          <input type="text" name="comment" value="{comment_val}" placeholder="Bemerkung eingeben …" style="width:100%;">
         </div><br>
         <button class="btn" type="submit">Aktualisieren</button>
         <a class="btn" href="/absences">Abbrechen</a>
       </form>
     </div>
+<script>syncBemerkung(document.getElementById('absence_type_sel'),{sonstige_id});</script>
     """
     return render_template_string(layout(t("absences.edit"), body, u, APP_VERSION))
 
@@ -4303,6 +4315,10 @@ def absences_edit_post(absence_id: int):
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
+    try:
+        _sync_to_icloud(u["id"], absence_id, "update")
+    except Exception as _e:
+        app.logger.error("iCloud Sync Fehler (edit): %s", _e)
     add_flash(t("absences.updated"), "success")
     return redirect(url_for("absences_list"))
 
@@ -4321,9 +4337,15 @@ def absences_delete(absence_id: int):
         db.close()
         add_flash(LOCK_MSG, "error")
         return redirect(url_for("absences_list"))
-    db.execute("DELETE FROM absences WHERE id=? AND user_id=?", (absence_id, u["id"]))
-    db.commit()
     db.close()
+    try:
+        _sync_to_icloud(u["id"], absence_id, "delete")
+    except Exception as _e:
+        app.logger.error("iCloud Sync Fehler (delete): %s", _e)
+    db2 = connect()
+    db2.execute("DELETE FROM absences WHERE id=? AND user_id=?", (absence_id, u["id"]))
+    db2.commit()
+    db2.close()
     add_flash(t("absences.deleted"), "success")
     return redirect(url_for("absences_list"))
 
@@ -4339,6 +4361,133 @@ _ICAL_TYPE_MAP = {
 
 def _ical_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+# ── iCloud Sync ────────────────────────────────────────────────────────────────
+
+def _icloud_encrypt(text: str) -> str:
+    import base64, hashlib
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(app.secret_key.encode()).digest())
+    return Fernet(key).encrypt(text.encode()).decode()
+
+
+def _icloud_decrypt(token: str) -> str:
+    import base64, hashlib
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(app.secret_key.encode()).digest())
+    return Fernet(key).decrypt(token.encode()).decode()
+
+
+def _icloud_update_sync_time(user_id: int) -> None:
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    db = connect()
+    db.execute("UPDATE users SET icloud_last_sync=? WHERE id=?", (ts, user_id))
+    db.commit()
+    db.close()
+
+
+def _sync_to_icloud(user_id: int, absence_id: int, action: str) -> None:
+    """Sync a single absence to iCloud. action: 'create'|'update'|'delete'. Never raises."""
+    try:
+        import caldav as _caldav_lib
+        db = connect()
+        urow = db.execute(
+            "SELECT icloud_enabled, icloud_apple_id, icloud_app_password, "
+            "icloud_calendar_name, calendar_export_prefix, language FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not urow or not int(urow["icloud_enabled"] or 0):
+            db.close()
+            return
+        apple_id = (urow["icloud_apple_id"] or "").strip()
+        enc_pw   = (urow["icloud_app_password"] or "").strip()
+        cal_name = (urow["icloud_calendar_name"] or "").strip()
+        prefix   = (urow["calendar_export_prefix"] or "").strip()
+        lang     = urow["language"] or "en"
+        if not apple_id or not enc_pw or not cal_name:
+            db.close()
+            return
+        password = _icloud_decrypt(enc_pw)
+        uid      = f"zeiterfassung-{user_id}-{absence_id}@ustrike"
+
+        if action == "delete":
+            db.close()
+            ical_str = None
+        else:
+            abrow = db.execute(
+                "SELECT a.date_from, a.date_to, a.comment, at.name AS type_name "
+                "FROM absences a JOIN absence_types at ON a.type_id=at.id "
+                "WHERE a.id=? AND a.user_id=?",
+                (absence_id, user_id),
+            ).fetchone()
+            db.close()
+            if not abrow:
+                return
+            _lmap = {
+                "Urlaub":   t("absence_type.urlaub",   lang=lang),
+                "Krank":    t("absence_type.krank",     lang=lang),
+                "Flextag":  t("absence_type.flextag",   lang=lang),
+                "Sonstige": t("absence_type.sonstige",  lang=lang),
+            }
+            type_name = abrow["type_name"] or ""
+            remark    = (abrow["comment"] or "").strip()
+            label     = remark if (type_name == "Sonstige" and remark) else _lmap.get(type_name, type_name)
+            summary   = f"{prefix} {label}".strip() if prefix else label
+            try:
+                dtend = (datetime.date.fromisoformat(abrow["date_to"]) + datetime.timedelta(days=1)).strftime("%Y%m%d")
+            except Exception:
+                dtend = abrow["date_to"].replace("-", "") + "01"
+            dtstart  = abrow["date_from"].replace("-", "")
+            dtstamp  = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            desc     = _ical_escape(remark) if remark else ""
+            ev_lines = [
+                "BEGIN:VCALENDAR", "VERSION:2.0",
+                "PRODID:-//Zeiterfassung//DE", "CALSCALE:GREGORIAN",
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART;VALUE=DATE:{dtstart}",
+                f"DTEND;VALUE=DATE:{dtend}",
+                f"SUMMARY:{_ical_escape(summary)}",
+                f"DTSTAMP:{dtstamp}",
+                "STATUS:CONFIRMED", "TRANSP:TRANSPARENT",
+            ]
+            if desc:
+                ev_lines.append(f"DESCRIPTION:{desc}")
+            ev_lines += ["END:VEVENT", "END:VCALENDAR"]
+            ical_str = "\r\n".join(ev_lines) + "\r\n"
+
+        client    = _caldav_lib.DAVClient(url="https://caldav.icloud.com", username=apple_id, password=password, timeout=10)
+        principal = client.principal()
+        cal       = next((c for c in principal.calendars() if c.name == cal_name), None)
+        if not cal:
+            app.logger.warning("iCloud: calendar '%s' not found for user %s", cal_name, user_id)
+            return
+
+        if action == "delete":
+            try:
+                import httpx as _httpx
+                # Bypass event_by_uid (REPORT) and caldav DELETE (If-Match) — both cause 412 on iCloud.
+                # save_event() puts events at {cal.url}/{uid}.ics, so we can construct the URL directly.
+                event_url = str(cal.url).rstrip("/") + "/" + uid + ".ics"
+                _resp = _httpx.delete(event_url, auth=(apple_id, password), timeout=10)
+                if _resp.status_code not in (200, 204, 404):
+                    raise Exception(f"iCloud DELETE HTTP {_resp.status_code}: {_resp.text[:200]}")
+            except Exception as _del_e:
+                app.logger.error("iCloud DELETE Fehler: %s", _del_e)
+        elif action == "create":
+            cal.save_event(ical_str)
+        elif action == "update":
+            try:
+                ev = cal.event_by_uid(uid)
+                ev.data = ical_str
+                ev.save()
+            except Exception:
+                cal.save_event(ical_str)
+
+        _icloud_update_sync_time(user_id)
+    except Exception:
+        app.logger.exception("iCloud sync error: user=%s absence=%s action=%s", user_id, absence_id, action)
 
 
 def _build_ical_for_user(user_id: int, lang: str, period: str = "all") -> str:
@@ -4454,6 +4603,18 @@ def absences_export_calendar():
     )
 
 
+def _ical_response(user_id: int, lang: str):
+    from flask import Response as _Resp
+    ical_data = _build_ical_for_user(user_id, lang)
+    resp = _Resp(ical_data, status=200)
+    resp.headers["Content-Type"]                = "text/calendar; charset=utf-8"
+    resp.headers["Content-Disposition"]         = "inline"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"]               = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"]                      = "no-cache"
+    return resp
+
+
 @app.get("/absences/calendar/<token>.ics")
 def absences_calendar_token(token: str):
     bootstrap()
@@ -4465,16 +4626,365 @@ def absences_calendar_token(token: str):
     db.close()
     if not row:
         abort(404)
-    lang = row["language"] or "en"
-    ical_data = _build_ical_for_user(row["id"], lang)
+    return _ical_response(row["id"], row["language"] or "en")
+
+
+@app.get("/absences/calendar/kalender.ics")
+def absences_calendar_basic():
+    bootstrap()
+    from flask import make_response as _make_response
+    auth = request.authorization
+    if not auth:
+        resp = _make_response("Unauthorized", 401)
+        resp.headers["WWW-Authenticate"] = 'Basic realm="Zeiterfassung Kalender"'
+        return resp
+    user = authenticate(auth.username, auth.password)
+    if not user:
+        resp = _make_response("Unauthorized", 401)
+        resp.headers["WWW-Authenticate"] = 'Basic realm="Zeiterfassung Kalender"'
+        return resp
+    db = connect()
+    row = db.execute("SELECT language FROM users WHERE id=?", (user["id"],)).fetchone()
+    db.close()
+    lang = (row["language"] or "en") if row else "en"
+    return _ical_response(user["id"], lang)
+
+
+# ---------------------------
+# CalDAV (Home Assistant)
+# ---------------------------
+
+_CALDAV_P_METHODS = ["GET", "HEAD", "PROPFIND", "OPTIONS"]
+_CALDAV_C_METHODS = ["GET", "HEAD", "PROPFIND", "REPORT", "OPTIONS"]
+
+
+def _caldav_unauth():
+    from flask import make_response as _mr
+    r = _mr("Unauthorized", 401)
+    r.headers["WWW-Authenticate"] = 'Basic realm="Zeiterfassung CalDAV"'
+    return r
+
+
+def _caldav_xml_resp(xml: str, status: int = 207):
     from flask import Response as _Resp
-    resp = _Resp(ical_data, status=200)
-    resp.headers["Content-Type"]                = "text/calendar; charset=utf-8"
-    resp.headers["Content-Disposition"]         = "inline"
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Cache-Control"]               = "no-cache, no-store, must-revalidate"
-    resp.headers["Pragma"]                      = "no-cache"
-    return resp
+    r = _Resp(xml, status=status)
+    r.headers["Content-Type"] = "application/xml; charset=utf-8"
+    r.headers["DAV"]          = "1, 2, calendar-access"
+    r.headers["Allow"]        = "GET, HEAD, PROPFIND, REPORT, OPTIONS"
+    return r
+
+
+def _caldav_options():
+    from flask import Response as _Resp
+    r = _Resp("", status=204)
+    r.headers["DAV"]   = "1, 2, calendar-access"
+    r.headers["Allow"] = "GET, HEAD, PROPFIND, REPORT, OPTIONS"
+    return r
+
+
+def _cdx(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _caldav_user_by_token(token: str):
+    db = connect()
+    row = db.execute(
+        "SELECT id, username, display_name, language FROM users WHERE calendar_token=? AND is_active=1",
+        (token,),
+    ).fetchone()
+    db.close()
+    return dict(row) if row else None
+
+
+def _caldav_user_by_basic():
+    auth = request.authorization
+    if not auth:
+        return None, _caldav_unauth()
+    u = authenticate(auth.username, auth.password)
+    if not u:
+        return None, _caldav_unauth()
+    db = connect()
+    row = db.execute(
+        "SELECT id, username, display_name, language FROM users WHERE id=? AND is_active=1",
+        (u["id"],),
+    ).fetchone()
+    db.close()
+    return (dict(row), None) if row else (None, _caldav_unauth())
+
+
+def _caldav_propfind_principal(href: str, user: dict) -> str:
+    dn = _cdx(user.get("display_name") or user.get("username") or "")
+    h  = _cdx(href)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">\n'
+        '  <response>\n'
+        f'    <href>{h}</href>\n'
+        '    <propstat>\n'
+        '      <prop>\n'
+        '        <resourcetype><principal/><collection/></resourcetype>\n'
+        f'        <displayname>{dn}</displayname>\n'
+        f'        <C:calendar-home-set><href>{h}</href></C:calendar-home-set>\n'
+        '      </prop>\n'
+        '      <status>HTTP/1.1 200 OK</status>\n'
+        '    </propstat>\n'
+        '  </response>\n'
+        '</multistatus>'
+    )
+
+
+def _caldav_propfind_calendar(href: str, user: dict, lang: str) -> str:
+    dn    = user.get("display_name") or user.get("username") or ""
+    cname = _cdx(f"{t('calendar.cal_name', lang=lang)} {dn}")
+    cdesc = _cdx(t("calendar.cal_name", lang=lang))
+    h     = _cdx(href)
+    import time as _time
+    ctag  = str(int(_time.time()))
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"'
+        ' xmlns:CS="http://calendarserver.org/ns/">\n'
+        '  <response>\n'
+        f'    <href>{h}</href>\n'
+        '    <propstat>\n'
+        '      <prop>\n'
+        '        <resourcetype><collection/><C:calendar/></resourcetype>\n'
+        f'        <displayname>{cname}</displayname>\n'
+        f'        <C:calendar-description>{cdesc}</C:calendar-description>\n'
+        '        <C:supported-calendar-component-set>\n'
+        '          <C:comp name="VEVENT"/>\n'
+        '        </C:supported-calendar-component-set>\n'
+        f'        <CS:getctag>{ctag}</CS:getctag>\n'
+        '      </prop>\n'
+        '      <status>HTTP/1.1 200 OK</status>\n'
+        '    </propstat>\n'
+        '  </response>\n'
+        '</multistatus>'
+    )
+
+
+def _caldav_absences(user_id: int):
+    db = connect()
+    row = db.execute(
+        "SELECT calendar_export_types, calendar_export_prefix FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        db.close()
+        return [], set(), ""
+    export_types = (row["calendar_export_types"] or "urlaub,krank,flextag").split(",")
+    prefix       = (row["calendar_export_prefix"] or "").strip()
+    wanted       = {_ICAL_TYPE_MAP[k] for k in export_types if k in _ICAL_TYPE_MAP}
+    abs_rows = db.execute(
+        "SELECT a.id, a.date_from, a.date_to, a.comment, at.name AS type_name "
+        "FROM absences a JOIN absence_types at ON a.type_id=at.id "
+        "WHERE a.user_id=? ORDER BY a.date_from",
+        (user_id,),
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in abs_rows], wanted, prefix
+
+
+def _caldav_vevent(ab: dict, user_id: int, prefix: str, lmap: dict, wanted: set) -> str:
+    tn = ab.get("type_name") or ""
+    if tn not in wanted:
+        return ""
+    remark  = (ab.get("comment") or "").strip()
+    label   = remark if (tn == "Sonstige" and remark) else lmap.get(tn, tn)
+    summary = (f"{prefix} {label}".strip() if prefix else label)
+    try:
+        dtend = (datetime.date.fromisoformat(ab["date_to"]) + datetime.timedelta(days=1)).strftime("%Y%m%d")
+    except Exception:
+        dtend = ab["date_to"].replace("-", "") + "01"
+    dtstart = ab["date_from"].replace("-", "")
+    uid  = f"{user_id}-{ab['id']}@zeiterfassung"
+    desc = _ical_escape(remark) if remark else ""
+    ev = [
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTART;VALUE=DATE:{dtstart}",
+        f"DTEND;VALUE=DATE:{dtend}",
+        f"SUMMARY:{_ical_escape(summary)}",
+        "STATUS:CONFIRMED",
+        "TRANSP:TRANSPARENT",
+    ]
+    if desc:
+        ev.append(f"DESCRIPTION:{desc}")
+    ev.append("END:VEVENT")
+    return "\r\n".join(ev)
+
+
+def _caldav_report(cal_href: str, user: dict, lang: str) -> str:
+    absences, wanted, prefix = _caldav_absences(user["id"])
+    lmap = {
+        "Urlaub":   t("absence_type.urlaub",   lang=lang),
+        "Krank":    t("absence_type.krank",     lang=lang),
+        "Flextag":  t("absence_type.flextag",   lang=lang),
+        "Sonstige": t("absence_type.sonstige",  lang=lang),
+    }
+    parts = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">',
+    ]
+    for ab in absences:
+        vevent = _caldav_vevent(ab, user["id"], prefix, lmap, wanted)
+        if not vevent:
+            continue
+        ev_href = _cdx(f"{cal_href}{user['id']}-{ab['id']}.ics")
+        vcal = _cdx(
+            "BEGIN:VCALENDAR\r\n"
+            "VERSION:2.0\r\n"
+            "PRODID:-//Zeiterfassung//DE\r\n"
+            "CALSCALE:GREGORIAN\r\n"
+            f"{vevent}\r\n"
+            "END:VCALENDAR\r\n"
+        )
+        parts += [
+            "  <response>",
+            f"    <href>{ev_href}</href>",
+            "    <propstat>",
+            f"      <prop><C:calendar-data>{vcal}</C:calendar-data></prop>",
+            "      <status>HTTP/1.1 200 OK</status>",
+            "    </propstat>",
+            "  </response>",
+        ]
+    parts.append("</multistatus>")
+    return "\n".join(parts)
+
+
+def _caldav_single_ical(user: dict, lang: str, filename: str) -> "str | None":
+    parts = filename.replace(".ics", "").rsplit("-", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        ab_id = int(parts[1])
+    except ValueError:
+        return None
+    absences, wanted, prefix = _caldav_absences(user["id"])
+    lmap = {
+        "Urlaub":   t("absence_type.urlaub",   lang=lang),
+        "Krank":    t("absence_type.krank",     lang=lang),
+        "Flextag":  t("absence_type.flextag",   lang=lang),
+        "Sonstige": t("absence_type.sonstige",  lang=lang),
+    }
+    for ab in absences:
+        if ab["id"] == ab_id:
+            vevent = _caldav_vevent(ab, user["id"], prefix, lmap, wanted)
+            if not vevent:
+                return None
+            return (
+                "BEGIN:VCALENDAR\r\n"
+                "VERSION:2.0\r\n"
+                "PRODID:-//Zeiterfassung//DE\r\n"
+                "CALSCALE:GREGORIAN\r\n"
+                f"{vevent}\r\n"
+                "END:VCALENDAR\r\n"
+            )
+    return None
+
+
+def _caldav_do_principal(user: dict, href: str):
+    m = request.method.upper()
+    if m == "OPTIONS":
+        return _caldav_options()
+    if m == "PROPFIND":
+        return _caldav_xml_resp(_caldav_propfind_principal(href, user))
+    from flask import Response as _Resp
+    r = _Resp("", status=200)
+    r.headers["DAV"]   = "1, 2, calendar-access"
+    r.headers["Allow"] = "GET, HEAD, PROPFIND, OPTIONS"
+    return r
+
+
+def _caldav_do_calendar(user: dict, href: str, lang: str):
+    m = request.method.upper()
+    if m == "OPTIONS":
+        return _caldav_options()
+    if m == "PROPFIND":
+        return _caldav_xml_resp(_caldav_propfind_calendar(href, user, lang))
+    if m == "REPORT":
+        return _caldav_xml_resp(_caldav_report(href, user, lang))
+    from flask import Response as _Resp
+    ical = _build_ical_for_user(user["id"], lang)
+    r = _Resp(ical, status=200)
+    r.headers["Content-Type"] = "text/calendar; charset=utf-8"
+    r.headers["DAV"]          = "1, 2, calendar-access"
+    r.headers["Allow"]        = "GET, HEAD, PROPFIND, REPORT, OPTIONS"
+    return r
+
+
+def _caldav_do_event(user: dict, lang: str, filename: str):
+    ical = _caldav_single_ical(user, lang, filename)
+    if not ical:
+        abort(404)
+    from flask import Response as _Resp
+    r = _Resp(ical, status=200)
+    r.headers["Content-Type"] = "text/calendar; charset=utf-8"
+    r.headers["DAV"] = "1, 2, calendar-access"
+    return r
+
+
+@app.route("/caldav/basic/", methods=_CALDAV_P_METHODS)
+def caldav_basic_principal():
+    bootstrap()
+    if request.method.upper() == "OPTIONS":
+        return _caldav_options()
+    user, err = _caldav_user_by_basic()
+    if err:
+        return err
+    return _caldav_do_principal(user, "/caldav/basic/")
+
+
+@app.route("/caldav/basic/calendar/", methods=_CALDAV_C_METHODS)
+def caldav_basic_calendar():
+    bootstrap()
+    if request.method.upper() == "OPTIONS":
+        return _caldav_options()
+    user, err = _caldav_user_by_basic()
+    if err:
+        return err
+    lang = user.get("language") or "en"
+    return _caldav_do_calendar(user, "/caldav/basic/calendar/", lang)
+
+
+@app.get("/caldav/basic/calendar/<filename>")
+def caldav_basic_event(filename: str):
+    bootstrap()
+    user, err = _caldav_user_by_basic()
+    if err:
+        return err
+    lang = user.get("language") or "en"
+    return _caldav_do_event(user, lang, filename)
+
+
+@app.route("/caldav/<token>/", methods=_CALDAV_P_METHODS)
+def caldav_token_principal(token: str):
+    bootstrap()
+    user = _caldav_user_by_token(token)
+    if not user:
+        abort(404)
+    lang = user.get("language") or "en"
+    return _caldav_do_principal(user, f"/caldav/{token}/")
+
+
+@app.route("/caldav/<token>/calendar/", methods=_CALDAV_C_METHODS)
+def caldav_token_calendar(token: str):
+    bootstrap()
+    user = _caldav_user_by_token(token)
+    if not user:
+        abort(404)
+    lang = user.get("language") or "en"
+    return _caldav_do_calendar(user, f"/caldav/{token}/calendar/", lang)
+
+
+@app.get("/caldav/<token>/calendar/<filename>")
+def caldav_token_event(token: str, filename: str):
+    bootstrap()
+    user = _caldav_user_by_token(token)
+    if not user:
+        abort(404)
+    lang = user.get("language") or "en"
+    return _caldav_do_event(user, lang, filename)
 
 
 # -------------------------
@@ -6166,14 +6676,19 @@ def day_absence_add(day: str):
         add_flash("Es existiert bereits eine Abwesenheit an diesem Tag.", "error")
         return redirect(f"/day/{day}")
 
-    db.execute(
+    cur = db.execute(
         "INSERT INTO absences(user_id, type_id, date_from, date_to, is_half_day, comment, updated_at) VALUES(?,?,?,?,?,?,datetime('now'))",
         (u["id"], type_id, day, day, is_half_day, comment),
     )
+    new_id = cur.lastrowid
     if type_name == "Sonstige" and comment:
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
     db.commit()
     db.close()
+    try:
+        _sync_to_icloud(u["id"], new_id, "create")
+    except Exception as _e:
+        app.logger.error("iCloud Sync Fehler (day): %s", _e)
     add_flash(t("absences.saved"), "success")
     return redirect(f"/day/{day}")
 
@@ -6227,6 +6742,11 @@ def _render_calendar_integration_section(
     cal_token: str,
     webcal_url: str,
     ical_url: str,
+    cal_auth_mode: str = "token",
+    basic_webcal_url: str = "",
+    basic_ical_url: str = "",
+    caldav_token_url: str = "",
+    caldav_basic_url: str = "",
 ) -> str:
     lang = session.get("lang", "en")
 
@@ -6235,6 +6755,12 @@ def _render_calendar_integration_section(
         chk = "checked" if cal_system == val else ""
         return (f"<label style='display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;'>"
                 f"<input type='radio' name='calendar_system' value='{val}' {chk}> {lbl}</label>")
+
+    # Radio buttons for auth mode
+    def _auth_radio(val: str, lbl: str) -> str:
+        chk = "checked" if cal_auth_mode == val else ""
+        return (f"<label style='display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;'>"
+                f"<input type='radio' name='calendar_auth_mode' value='{val}' {chk}> {lbl}</label>")
 
     # Checkboxes for absence types
     def _type_cb(key: str, lbl: str) -> str:
@@ -6255,15 +6781,39 @@ def _render_calendar_integration_section(
         "ical":    "",
     }.get(cal_system, "")
 
-    # URL for subscription (webcal for Apple, https for Google/Outlook/other)
-    _sub_url  = webcal_url if cal_system == "apple" else ical_url
-    _copy_lbl = _html.escape(t("btn.copy", lang=lang))
+    _copy_lbl    = _html.escape(t("btn.copy", lang=lang))
     _dl_url_year = "/absences/export/calendar?period=year"
     _dl_url_all  = "/absences/export/calendar?period=all"
 
-    _url_block = ""
-    if _sub_url:
-        _url_block = f"""
+    # URL block — depends on auth mode
+    if cal_auth_mode == "basic":
+        _primary_url   = basic_webcal_url if cal_system == "apple" else basic_ical_url
+        _secondary_url = basic_ical_url
+        _caldav_url    = caldav_basic_url
+        _ics_block = f"""
+        <div class="acc-sub">
+          <b style="font-size:13px;">{t('settings.calendar_token_label')}</b>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+            <input id="cal-sub-url" type="text" value="{_html.escape(_primary_url)}" readonly
+                   style="flex:1;min-width:200px;font-size:12px;font-family:monospace;">
+            <button class="btn btn-sm" type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('cal-sub-url').value)">{_copy_lbl}</button>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+            <input id="cal-sub-url2" type="text" value="{_html.escape(_secondary_url)}" readonly
+                   style="flex:1;min-width:200px;font-size:12px;font-family:monospace;">
+            <button class="btn btn-sm" type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('cal-sub-url2').value)">{_copy_lbl}</button>
+          </div>
+          <div class="small" style="color:var(--mu);margin-top:4px;">{_html.escape(t('settings.calendar_auth_basic_hint', lang=lang))}</div>
+          <div class="small" style="color:var(--mu);margin-top:4px;">{_html.escape(t('settings.calendar_ha_hint', lang=lang))}</div>
+        </div>"""
+    else:
+        _sub_url   = webcal_url if cal_system == "apple" else ical_url
+        _caldav_url = caldav_token_url
+        _ics_block = ""
+        if _sub_url:
+            _ics_block = f"""
         <div class="acc-sub">
           <b style="font-size:13px;">{t('settings.calendar_token_label')}</b>
           <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;">
@@ -6278,6 +6828,22 @@ def _render_calendar_integration_section(
             <button class="btn btn-sm danger" type="submit">{t('settings.calendar_token_reset')}</button>
           </form>
         </div>"""
+
+    _caldav_block = ""
+    if _caldav_url:
+        _caldav_block = f"""
+        <div class="acc-sub">
+          <b style="font-size:13px;">{_html.escape(t('settings.calendar_caldav_url', lang=lang))}</b>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+            <input id="cal-caldav-url" type="text" value="{_html.escape(_caldav_url)}" readonly
+                   style="flex:1;min-width:200px;font-size:12px;font-family:monospace;">
+            <button class="btn btn-sm" type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('cal-caldav-url').value)">{_copy_lbl}</button>
+          </div>
+          <div class="small" style="color:var(--mu);margin-top:4px;">{_html.escape(t('settings.calendar_caldav_hint', lang=lang))}</div>
+        </div>"""
+
+    _url_block = _ics_block + _caldav_block
 
     _instr_html = f"<p class='small' style='color:var(--mu);margin-bottom:10px;'>{_html.escape(_instructions)}</p>" if _instructions else ""
 
@@ -6296,6 +6862,12 @@ def _render_calendar_integration_section(
               {_sys_radio('google',  t('settings.calendar_google'))}
               {_sys_radio('outlook', t('settings.calendar_outlook'))}
               {_sys_radio('ical',    t('settings.calendar_other'))}
+            </div>
+
+            <div class="acc-sub">
+              <b style="font-size:13px;display:block;margin-bottom:8px;">{t('settings.calendar_auth_mode')}</b>
+              {_auth_radio('token', t('settings.calendar_auth_none',  lang=lang))}
+              {_auth_radio('basic', t('settings.calendar_auth_basic', lang=lang))}
             </div>
 
             <div class="acc-sub">
@@ -6456,21 +7028,40 @@ def settings_view():
     # Calendar integration settings
     _cal_db = connect()
     _cal_row = _cal_db.execute(
-        "SELECT calendar_system, calendar_export_types, calendar_export_prefix, calendar_token FROM users WHERE id=?",
+        "SELECT calendar_system, calendar_export_types, calendar_export_prefix, calendar_token, calendar_auth_mode FROM users WHERE id=?",
         (u["id"],),
     ).fetchone()
     _cal_db.close()
-    cal_system  = (_cal_row["calendar_system"]      or "ical")           if _cal_row else "ical"
-    cal_types   = (_cal_row["calendar_export_types"] or "urlaub,krank,flextag").split(",") if _cal_row else ["urlaub","krank","flextag"]
-    cal_prefix  = (_cal_row["calendar_export_prefix"] or "")             if _cal_row else ""
-    cal_token   = (_cal_row["calendar_token"]        or "")              if _cal_row else ""
+    cal_system    = (_cal_row["calendar_system"]      or "ical")           if _cal_row else "ical"
+    cal_types     = (_cal_row["calendar_export_types"] or "urlaub,krank,flextag").split(",") if _cal_row else ["urlaub","krank","flextag"]
+    cal_prefix    = (_cal_row["calendar_export_prefix"] or "")             if _cal_row else ""
+    cal_token     = (_cal_row["calendar_token"]        or "")              if _cal_row else ""
+    cal_auth_mode = (_cal_row["calendar_auth_mode"]    or "token")         if _cal_row else "token"
+    _base_url = _get_base_url()
     if cal_token:
-        _base_url   = _get_base_url()
         _ical_url   = _base_url + f"/absences/calendar/{cal_token}.ics"
         _webcal_url = _get_webcal_url(cal_token)
     else:
         _ical_url   = ""
         _webcal_url = ""
+    _basic_ical_url     = _base_url + "/absences/calendar/kalender.ics"
+    _basic_webcal_url   = _basic_ical_url.replace("https://", "webcal://", 1).replace("http://", "webcal://", 1)
+    _caldav_token_url   = (_base_url + f"/caldav/{cal_token}/") if cal_token else ""
+    _caldav_basic_url   = _base_url + "/caldav/basic/"
+
+    # iCloud settings
+    _ic_db  = connect()
+    _ic_row = _ic_db.execute(
+        "SELECT icloud_enabled, icloud_apple_id, icloud_app_password, icloud_calendar_name, icloud_last_sync "
+        "FROM users WHERE id=?",
+        (u["id"],),
+    ).fetchone()
+    _ic_db.close()
+    ic_enabled   = bool(int((_ic_row["icloud_enabled"] or 0))) if _ic_row else False
+    ic_apple_id  = (_ic_row["icloud_apple_id"] or "")          if _ic_row else ""
+    ic_has_pw    = bool((_ic_row["icloud_app_password"] or "")) if _ic_row else False
+    ic_cal_name  = (_ic_row["icloud_calendar_name"] or "")      if _ic_row else ""
+    ic_last_sync = (_ic_row["icloud_last_sync"] or "")          if _ic_row else ""
 
     if contouring_enabled:
         _kont_html = (
@@ -6729,8 +7320,13 @@ function wizValidate(e){{
 
     <!-- 5. Kalender-Integration -->
     {_render_calendar_integration_section(
-        cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url
+        cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url,
+        cal_auth_mode, _basic_webcal_url, _basic_ical_url,
+        _caldav_token_url, _caldav_basic_url
     )}
+
+    <!-- 6. Apple Kalender -->
+    {_render_icloud_settings_section(ic_enabled, ic_apple_id, ic_has_pw, ic_cal_name, ic_last_sync)}
     """
     return render_template_string(layout(t("settings.title"), body, u, APP_VERSION))
 
@@ -6925,14 +7521,285 @@ def settings_admin_only():
     return redirect("/settings")
 
 
+# ── iCloud Einstellungen ───────────────────────────────────────────────────────
+
+def _render_icloud_settings_section(
+    ic_enabled: bool,
+    ic_apple_id: str,
+    ic_has_pw: bool,
+    ic_cal_name: str,
+    ic_last_sync: str,
+) -> str:
+    lang = session.get("lang", "en")
+    chk  = "checked" if ic_enabled else ""
+    _pw_placeholder = "••••••••" if ic_has_pw else ""
+    _pw_keep_note   = (f"<div class='small' style='color:var(--mu);margin-top:3px;'>"
+                       f"{_html.escape(t('settings.icloud_pw_keep', lang=lang))}</div>") if ic_has_pw else ""
+    _last_sync_html = ""
+    if ic_last_sync:
+        _last_sync_html = (f"<div class='small' style='color:var(--mu);margin-top:6px;'>"
+                           f"{_html.escape(t('settings.icloud_last_sync', lang=lang))}: "
+                           f"{_html.escape(ic_last_sync)}</div>")
+    _t_test     = _html.escape(t("settings.icloud_test",     lang=lang))
+    _t_sync_all = _html.escape(t("settings.icloud_sync_all", lang=lang))
+    return f"""
+    <div class="acc" id="acc-icloud">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-icloud-body')">
+        <span>{t('settings.icloud_integration')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-icloud-body">
+        <div class="acc-inner">
+          <form method="post" action="/settings/icloud">
+            <div class="acc-sub" style="margin-top:0;padding-top:0;border-top:none;">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px;">
+                <input type="checkbox" name="icloud_enabled" value="1" {chk}>
+                <span>{_html.escape(t('settings.icloud_enabled', lang=lang))}</span>
+              </label>
+              <div style="display:flex;flex-direction:column;gap:10px;max-width:420px;">
+                <div>
+                  <label>{_html.escape(t('settings.icloud_apple_id', lang=lang))}</label><br>
+                  <input type="email" name="icloud_apple_id" value="{_html.escape(ic_apple_id)}"
+                         placeholder="name@icloud.com" style="width:100%;margin-top:4px;">
+                </div>
+                <div>
+                  <label>{_html.escape(t('settings.icloud_app_password', lang=lang))}</label><br>
+                  <input type="password" name="icloud_app_password" value=""
+                         placeholder="{_pw_placeholder}" autocomplete="new-password"
+                         style="width:100%;margin-top:4px;">
+                  {_pw_keep_note}
+                  <div class="small" style="color:var(--mu);margin-top:3px;">
+                    {_html.escape(t('settings.icloud_app_password_hint', lang=lang))}
+                  </div>
+                </div>
+                <div>
+                  <label>{_html.escape(t('settings.icloud_calendar_name', lang=lang))}</label><br>
+                  <input type="text" name="icloud_calendar_name" value="{_html.escape(ic_cal_name)}"
+                         placeholder="Familie" style="width:100%;margin-top:4px;">
+                  <div class="small" style="color:var(--mu);margin-top:3px;">
+                    {_html.escape(t('settings.icloud_calendar_hint', lang=lang))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="acc-sub" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="btn btn-sm" type="submit">{t('common.save')}</button>
+            </div>
+          </form>
+          <div class="acc-sub">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="btn btn-sm" type="button" id="icloud-test-btn"
+                      onclick="icloudTest()">{_t_test}</button>
+              <button class="btn btn-sm" type="button" id="icloud-sync-btn"
+                      onclick="icloudSyncAll()">{_t_sync_all}</button>
+            </div>
+            <div id="icloud-action-result" style="margin-top:8px;font-size:13px;"></div>
+            {_last_sync_html}
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+    function icloudTest(){{
+      var btn=document.getElementById('icloud-test-btn');
+      var res=document.getElementById('icloud-action-result');
+      btn.disabled=true; res.textContent='…';
+      fetch('/settings/icloud/test')
+        .then(r=>r.json())
+        .then(d=>{{
+          if(d.ok){{ res.style.color='var(--ok)'; res.textContent=d.message; }}
+          else{{ res.style.color='var(--err,#c00)'; res.textContent=d.error; }}
+        }})
+        .catch(e=>{{ res.style.color='var(--err,#c00)'; res.textContent=''+e; }})
+        .finally(()=>{{ btn.disabled=false; }});
+    }}
+    function icloudSyncAll(){{
+      var btn=document.getElementById('icloud-sync-btn');
+      var res=document.getElementById('icloud-action-result');
+      btn.disabled=true; res.textContent='…';
+      fetch('/settings/icloud/sync-all',{{method:'POST',headers:{{'X-Requested-With':'XMLHttpRequest'}}}})
+        .then(r=>r.json())
+        .then(d=>{{
+          if(d.ok){{ res.style.color='var(--ok)'; res.textContent=d.message; }}
+          else{{ res.style.color='var(--err,#c00)'; res.textContent=d.error; }}
+        }})
+        .catch(e=>{{ res.style.color='var(--err,#c00)'; res.textContent=''+e; }})
+        .finally(()=>{{ btn.disabled=false; }});
+    }}
+    </script>"""
+
+
+@app.post("/settings/icloud")
+@login_required
+def settings_icloud_post():
+    bootstrap()
+    u = current_user()
+    ic_enabled  = 1 if request.form.get("icloud_enabled") == "1" else 0
+    ic_apple_id = (request.form.get("icloud_apple_id") or "").strip()
+    ic_raw_pw   = (request.form.get("icloud_app_password") or "").strip()
+    ic_cal_name = (request.form.get("icloud_calendar_name") or "").strip()
+    db = connect()
+    if ic_raw_pw:
+        enc_pw = _icloud_encrypt(ic_raw_pw)
+        db.execute(
+            "UPDATE users SET icloud_enabled=?, icloud_apple_id=?, icloud_app_password=?, "
+            "icloud_calendar_name=? WHERE id=?",
+            (ic_enabled, ic_apple_id, enc_pw, ic_cal_name, u["id"]),
+        )
+    else:
+        db.execute(
+            "UPDATE users SET icloud_enabled=?, icloud_apple_id=?, icloud_calendar_name=? WHERE id=?",
+            (ic_enabled, ic_apple_id, ic_cal_name, u["id"]),
+        )
+    db.commit()
+    db.close()
+    add_flash(t("settings.saved"), "success")
+    return redirect("/settings#acc-icloud")
+
+
+@app.get("/settings/icloud/test")
+@login_required
+def settings_icloud_test():
+    bootstrap()
+    u = current_user()
+    lang = session.get("lang", "en")
+    try:
+        import caldav as _caldav_lib
+        db = connect()
+        row = db.execute(
+            "SELECT icloud_apple_id, icloud_app_password, icloud_calendar_name FROM users WHERE id=?",
+            (u["id"],),
+        ).fetchone()
+        db.close()
+        apple_id = (row["icloud_apple_id"] or "").strip() if row else ""
+        enc_pw   = (row["icloud_app_password"] or "").strip() if row else ""
+        cal_name = (row["icloud_calendar_name"] or "").strip() if row else ""
+        if not apple_id or not enc_pw:
+            return jsonify(ok=False, error=t("error.icloud_auth", lang=lang))
+        password = _icloud_decrypt(enc_pw)
+        client   = _caldav_lib.DAVClient(url="https://caldav.icloud.com", username=apple_id, password=password, timeout=10)
+        cals     = client.principal().calendars()
+        cal_names = [c.name for c in cals if c.name]
+        if cal_name and cal_name not in cal_names:
+            return jsonify(ok=False, error=t("error.icloud_calendar_not_found", lang=lang))
+        msg = t("success.icloud_connected", lang=lang)
+        if cal_names:
+            msg += f": {', '.join(cal_names[:8])}"
+        return jsonify(ok=True, message=msg, calendars=cal_names)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "401" in err_str or "auth" in err_str or "unauthorized" in err_str or "forbidden" in err_str:
+            return jsonify(ok=False, error=t("error.icloud_auth", lang=lang))
+        return jsonify(ok=False, error=str(e))
+
+
+@app.post("/settings/icloud/sync-all")
+@login_required
+def settings_icloud_sync_all():
+    bootstrap()
+    u = current_user()
+    lang = session.get("lang", "en")
+    try:
+        import caldav as _caldav_lib
+        db = connect()
+        row = db.execute(
+            "SELECT icloud_apple_id, icloud_app_password, icloud_calendar_name, "
+            "calendar_export_prefix FROM users WHERE id=?",
+            (u["id"],),
+        ).fetchone()
+        if not row or not row["icloud_apple_id"] or not row["icloud_app_password"]:
+            db.close()
+            return jsonify(ok=False, error=t("error.icloud_auth", lang=lang))
+        apple_id = row["icloud_apple_id"].strip()
+        enc_pw   = row["icloud_app_password"].strip()
+        cal_name = (row["icloud_calendar_name"] or "").strip()
+        prefix   = (row["calendar_export_prefix"] or "").strip()
+        if not cal_name:
+            db.close()
+            return jsonify(ok=False, error=t("error.icloud_calendar_not_found", lang=lang))
+        password = _icloud_decrypt(enc_pw)
+        absences = db.execute(
+            "SELECT a.id, a.date_from, a.date_to, a.comment, at.name AS type_name "
+            "FROM absences a JOIN absence_types at ON a.type_id=at.id "
+            "WHERE a.user_id=? ORDER BY a.date_from",
+            (u["id"],),
+        ).fetchall()
+        db.close()
+        _lmap = {
+            "Urlaub":   t("absence_type.urlaub",   lang=lang),
+            "Krank":    t("absence_type.krank",     lang=lang),
+            "Flextag":  t("absence_type.flextag",   lang=lang),
+            "Sonstige": t("absence_type.sonstige",  lang=lang),
+        }
+        client    = _caldav_lib.DAVClient(url="https://caldav.icloud.com", username=apple_id, password=password, timeout=10)
+        principal = client.principal()
+        cal       = next((c for c in principal.calendars() if c.name == cal_name), None)
+        if not cal:
+            return jsonify(ok=False, error=t("error.icloud_calendar_not_found", lang=lang))
+        # Delete existing Zeiterfassung events
+        uid_prefix = f"zeiterfassung-{u['id']}-"
+        try:
+            for ev in cal.events():
+                try:
+                    uid_val = ev.vobject_instance.vevent.uid.value or ""
+                    if uid_val.startswith(uid_prefix):
+                        ev.delete()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Create all absences
+        count = 0
+        dtstamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        for ab in absences:
+            try:
+                type_name = ab["type_name"] or ""
+                remark    = (ab["comment"] or "").strip()
+                label     = remark if (type_name == "Sonstige" and remark) else _lmap.get(type_name, type_name)
+                summary   = f"{prefix} {label}".strip() if prefix else label
+                try:
+                    dtend = (datetime.date.fromisoformat(ab["date_to"]) + datetime.timedelta(days=1)).strftime("%Y%m%d")
+                except Exception:
+                    dtend = ab["date_to"].replace("-", "") + "01"
+                dtstart = ab["date_from"].replace("-", "")
+                uid_ev  = f"zeiterfassung-{u['id']}-{ab['id']}@ustrike"
+                desc    = _ical_escape(remark) if remark else ""
+                ev_lines = [
+                    "BEGIN:VCALENDAR", "VERSION:2.0",
+                    "PRODID:-//Zeiterfassung//DE", "CALSCALE:GREGORIAN",
+                    "BEGIN:VEVENT",
+                    f"UID:{uid_ev}",
+                    f"DTSTART;VALUE=DATE:{dtstart}",
+                    f"DTEND;VALUE=DATE:{dtend}",
+                    f"SUMMARY:{_ical_escape(summary)}",
+                    f"DTSTAMP:{dtstamp}",
+                    "STATUS:CONFIRMED", "TRANSP:TRANSPARENT",
+                ]
+                if desc:
+                    ev_lines.append(f"DESCRIPTION:{desc}")
+                ev_lines += ["END:VEVENT", "END:VCALENDAR"]
+                cal.save_event("\r\n".join(ev_lines) + "\r\n")
+                count += 1
+            except Exception as _ev_e:
+                app.logger.warning("iCloud sync-all skip ab %s: %s", ab["id"], _ev_e)
+        _icloud_update_sync_time(u["id"])
+        return jsonify(ok=True, message=f"{count} Events synchronisiert", count=count)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "401" in err_str or "auth" in err_str or "unauthorized" in err_str:
+            return jsonify(ok=False, error=t("error.icloud_auth", lang=lang))
+        return jsonify(ok=False, error=str(e))
+
+
 @app.post("/settings/calendar")
 @login_required
 def settings_calendar_post():
     bootstrap()
     u = current_user()
-    cal_system  = (request.form.get("calendar_system") or "ical").strip()
-    cal_prefix  = (request.form.get("calendar_export_prefix") or "").strip()[:20]
-    cal_period  = (request.form.get("calendar_period") or "all").strip()
+    cal_system    = (request.form.get("calendar_system") or "ical").strip()
+    cal_prefix    = (request.form.get("calendar_export_prefix") or "").strip()[:20]
+    cal_auth_mode = (request.form.get("calendar_auth_mode") or "token").strip()
+    if cal_auth_mode not in ("token", "basic"):
+        cal_auth_mode = "token"
     # build export_types from checkboxes
     chosen = []
     for key in ("urlaub", "krank", "flextag", "sonstige"):
@@ -6941,8 +7808,8 @@ def settings_calendar_post():
     cal_types = ",".join(chosen) if chosen else "urlaub"
     db = connect()
     db.execute(
-        "UPDATE users SET calendar_system=?, calendar_export_types=?, calendar_export_prefix=? WHERE id=?",
-        (cal_system, cal_types, cal_prefix, u["id"]),
+        "UPDATE users SET calendar_system=?, calendar_export_types=?, calendar_export_prefix=?, calendar_auth_mode=? WHERE id=?",
+        (cal_system, cal_types, cal_prefix, cal_auth_mode, u["id"]),
     )
     db.commit()
     db.close()
@@ -9049,7 +9916,53 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 10. Telegram-Bot -->
+<!-- 10. Kalender-Integration -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📅 Kalender-Integration</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Kalender-Export (.ics Download &amp; webcal-Abo)</b>
+        <p>Unter <em>Einstellungen → Kalender-Integration</em> können Abwesenheiten als Kalender-Datei exportiert oder als Live-Abonnement eingerichtet werden.</p>
+        <ul>
+          <li><b>.ics herunterladen</b>: Einmalige Momentaufnahme. Öffnen importiert die Einträge in Apple Kalender, Google, Outlook usw.</li>
+          <li><b>webcal:// abonnieren</b>: Kalender-App fragt regelmäßig neue Daten ab – Änderungen erscheinen automatisch.</li>
+          <li><b>Präfix</b>: Optionaler Text vor jedem Eintrag, z.B. <code>Uwe:</code> oder <code>🏢</code>. Nützlich wenn mehrere Personen denselben Kalender nutzen.</li>
+          <li><b>Token zurücksetzen</b>: Macht alle bestehenden Abonnements ungültig und generiert eine neue URL.</li>
+        </ul>
+        <div class="info-box">ℹ️ Unterstützte Kalender-Apps: Apple Kalender, Google Kalender, Outlook, sowie alle Apps mit iCal-Standard-Unterstützung.</div>
+      </div>
+      <div class="help-entry">
+        <b>🍎 Apple iCloud Synchronisation</b>
+        <p>Abwesenheiten werden automatisch in einen iCloud-Kalender geschrieben – beim Erstellen, Bearbeiten und Löschen.</p>
+        <p><b>Voraussetzungen:</b></p>
+        <ul>
+          <li><b>Apple ID</b>: deine iCloud-E-Mail-Adresse</li>
+          <li><b>App-spezifisches Passwort</b>: unter <a href="https://appleid.apple.com" target="_blank">appleid.apple.com</a> → Anmelden → Sicherheit → App-spezifische Passwörter → Neues Passwort generieren. <em>Nicht</em> dein normales Apple-Passwort verwenden.</li>
+          <li><b>Kalender-Name</b>: exakter Name des iCloud-Kalenders (Groß-/Kleinschreibung beachten), z.B. <code>Arbeit</code></li>
+        </ul>
+        <p><b>Mehrere Nutzer</b>: Verschiedene Personen können in denselben Kalender schreiben – mit unterschiedlichem Präfix (z.B. <code>Uwe:</code> / <code>Steffi:</code>) sind Einträge klar zuzuordnen.</p>
+        <p>Mit <em>Verbindung testen</em> wird die Verbindung zu iCloud geprüft und verfügbare Kalender angezeigt. <em>Alle synchronisieren</em> schreibt alle vorhandenen Abwesenheiten einmalig in den Kalender – sinnvoll bei der Ersteinrichtung.</p>
+        <div class="warn-box">⚠️ Das App-Passwort wird verschlüsselt gespeichert. Leer lassen beim Speichern bedeutet: bestehendes Passwort bleibt unverändert.</div>
+      </div>
+      <div class="help-entry">
+        <b>Home Assistant CalDAV</b>
+        <p>Die CalDAV-URL aus den Einstellungen kann direkt in Home Assistant eingetragen werden.</p>
+        <ul>
+          <li>In HA: <em>Einstellungen → Integrationen → Kalender → CalDAV</em></li>
+          <li><b>URL</b>: <code>https://zeiten.firma.de/caldav/TOKEN/</code> (aus Einstellungen kopieren)</li>
+          <li>Kein Username/Passwort nötig – der Token übernimmt die Authentifizierung</li>
+          <li>Alternativ: Basic Auth wählen (Einstellungen → Authentifizierung) und HA-Zugangsdaten eintragen</li>
+        </ul>
+        <div class="info-box">ℹ️ Die externe Server-URL muss unter <em>Admin → Systemeinstellungen → Regionale Einstellungen → Externe Server-URL</em> korrekt eingetragen sein, damit die CalDAV-URLs stimmen.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 11. Telegram-Bot -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>🤖 Telegram-Bot</span><span class="acc-arr">▼</span>
@@ -9514,6 +10427,49 @@ function filterHelp(q){{
     <div class="help-entry">
       <b>Time booking</b>
       <p>Enable the feature with a start date. Days from this date must be booked. Disabling resets all unbooked days.</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📅 Calendar Integration</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Calendar Export (.ics Download &amp; webcal subscription)</b>
+      <p>Under <em>Settings → Calendar Integration</em>, absences can be exported as a calendar file or set up as a live subscription.</p>
+      <ul>
+        <li><b>Download .ics</b>: One-time snapshot. Opening it imports entries into Apple Calendar, Google, Outlook etc.</li>
+        <li><b>Subscribe via webcal://</b>: Calendar apps regularly fetch new data – changes appear automatically.</li>
+        <li><b>Prefix</b>: Optional text before each entry, e.g. <code>Uwe:</code> or <code>🏢</code>. Useful when multiple people share the same calendar.</li>
+        <li><b>Reset token</b>: Invalidates all existing subscriptions and generates a new URL.</li>
+      </ul>
+      <div class="info-box">ℹ️ Supported apps: Apple Calendar, Google Calendar, Outlook, and any app with iCal standard support.</div>
+    </div>
+    <div class="help-entry">
+      <b>🍎 Apple iCloud Sync</b>
+      <p>Absences are automatically written to an iCloud calendar — on create, edit and delete.</p>
+      <p><b>Requirements:</b></p>
+      <ul>
+        <li><b>Apple ID</b>: your iCloud e-mail address</li>
+        <li><b>App-specific password</b>: generate at <a href="https://appleid.apple.com" target="_blank">appleid.apple.com</a> → Sign in → Security → App-Specific Passwords → Generate. <em>Do not</em> use your regular Apple password.</li>
+        <li><b>Calendar name</b>: exact name of the iCloud calendar (case-sensitive), e.g. <code>Work</code></li>
+      </ul>
+      <p><b>Multiple users</b>: Different people can write to the same calendar — using different prefixes (e.g. <code>Uwe:</code> / <code>Steffi:</code>) keeps entries clearly attributed.</p>
+      <p>Use <em>Test connection</em> to verify iCloud access and list available calendars. <em>Sync all</em> writes all existing absences to the calendar once — useful for initial setup.</p>
+      <div class="warn-box">⚠️ The app password is stored encrypted. Leaving the field empty when saving keeps the existing password unchanged.</div>
+    </div>
+    <div class="help-entry">
+      <b>Home Assistant CalDAV</b>
+      <p>The CalDAV URL from settings can be entered directly in Home Assistant.</p>
+      <ul>
+        <li>In HA: <em>Settings → Integrations → Calendar → CalDAV</em></li>
+        <li><b>URL</b>: <code>https://time.company.com/caldav/TOKEN/</code> (copy from settings)</li>
+        <li>No username/password required — the token handles authentication</li>
+        <li>Alternatively: select Basic Auth in settings and enter your Zeiterfassung credentials in HA</li>
+      </ul>
+      <div class="info-box">ℹ️ The external server URL must be set correctly under <em>Admin → System settings → Regional settings → External server URL</em> for CalDAV URLs to work.</div>
     </div>
   </div></div>
 </div>

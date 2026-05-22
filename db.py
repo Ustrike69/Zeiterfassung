@@ -443,6 +443,18 @@ def init_db():
         for _row in db.execute("SELECT id FROM users").fetchall():
             db.execute("UPDATE users SET calendar_token=? WHERE id=?",
                        (str(_uuid.uuid4()), _row[0]))
+    if not _col_exists(db, "users", "calendar_auth_mode"):
+        db.execute("ALTER TABLE users ADD COLUMN calendar_auth_mode TEXT NOT NULL DEFAULT 'token'")
+    if not _col_exists(db, "users", "icloud_enabled"):
+        db.execute("ALTER TABLE users ADD COLUMN icloud_enabled INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "icloud_apple_id"):
+        db.execute("ALTER TABLE users ADD COLUMN icloud_apple_id TEXT")
+    if not _col_exists(db, "users", "icloud_app_password"):
+        db.execute("ALTER TABLE users ADD COLUMN icloud_app_password TEXT")
+    if not _col_exists(db, "users", "icloud_calendar_name"):
+        db.execute("ALTER TABLE users ADD COLUMN icloud_calendar_name TEXT")
+    if not _col_exists(db, "users", "icloud_last_sync"):
+        db.execute("ALTER TABLE users ADD COLUMN icloud_last_sync TEXT")
 
 
 

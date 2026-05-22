@@ -1,4 +1,4 @@
-# Zeiterfassung v2.0.0
+# Zeiterfassung v2.0.5
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail, Telegram-Bot und einem umfassenden Admin-Bereich mit Rollentrennung.
 
@@ -353,6 +353,12 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ## Versionshistorie
 
+### v2.0.5
+- **Kalender-Export:** .ics-Download und webcal://-Abonnement für alle Abwesenheiten; Präfix pro Nutzer konfigurierbar; Token-Reset macht alte Abos ungültig
+- **CalDAV-Server:** PROPFIND/REPORT/GET-Routen für Home Assistant CalDAV-Integration; Token-Auth (`/caldav/<token>/`) und Basic Auth (`/caldav/basic/`); Authentifizierung wählbar (Token / HTTP Basic)
+- **Apple iCloud Synchronisation (ausgehend):** Abwesenheiten werden automatisch in einen iCloud-Kalender geschrieben (Erstellen / Bearbeiten / Löschen); App-spezifisches Passwort Fernet-verschlüsselt gespeichert; Test-Verbindung und Alle-synchronisieren-Funktion in den Einstellungen; mehrere Nutzer können in denselben Kalender schreiben (Unterscheidung über Präfix)
+- **Externe + Interne Server-URL** in den Systemeinstellungen für Kalender-Abo-Links und lokale Integrationen
+
 ### v2.0.0
 - **Mehrsprachigkeit (DE/EN):** Vollständige i18n-Unterstützung in App und Telegram-Bot; Sprache pro Nutzer wählbar; systemweite Standardsprache konfigurierbar; `t(key)` Framework mit Fallback-Kette
 - **Europäische Feiertage:** 20 Länder, 51 Regionen (DE alle 16 Bundesländer, AT, CH, FR, NL, BE, LU, PL, CZ, IT, ES, PT, GB 4 Regionen, IE, DK, SE, NO, FI, GR); zweistufige Länder/Region-Auswahl; orthodoxes Ostern; bewegliche Feiertage
@@ -400,4 +406,4 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ---
 
-*Zeiterfassung v2.0.0 – Flask + SQLite – 20 Länder*
+*Zeiterfassung v2.0.5 – Flask + SQLite – 20 Länder*

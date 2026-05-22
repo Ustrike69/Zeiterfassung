@@ -5,3 +5,5 @@ python-telegram-bot[job-queue]>=21.0
 apscheduler>=3.10
 anthropic>=0.25
 Pillow>=10.0
+caldav>=3.2.0
+cryptography>=41.0
