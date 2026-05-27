@@ -410,6 +410,8 @@ def init_db():
         ("auto_backup_enabled", "0"),
         ("auto_backup_time", "02:00"),
         ("last_backup_time", ""),
+        ("auto_encrypt_enabled", "0"),
+        ("auto_encrypt_password", ""),
     ):
         db.execute(
             "INSERT OR IGNORE INTO backup_config(key, value) VALUES(?, ?)",
@@ -456,7 +458,23 @@ def init_db():
     if not _col_exists(db, "users", "icloud_last_sync"):
         db.execute("ALTER TABLE users ADD COLUMN icloud_last_sync TEXT")
 
-
+    # v2.0.8 – security features
+    if not _col_exists(db, "users", "password_compliant"):
+        db.execute("ALTER TABLE users ADD COLUMN password_compliant INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "login_attempts"):
+        db.execute("ALTER TABLE users ADD COLUMN login_attempts INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "login_locked_until"):
+        db.execute("ALTER TABLE users ADD COLUMN login_locked_until TEXT")
+    if not _col_exists(db, "users", "login_unlock_token"):
+        db.execute("ALTER TABLE users ADD COLUMN login_unlock_token TEXT")
+    if not _col_exists(db, "users", "last_login"):
+        db.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
+    if not _col_exists(db, "users", "totp_secret"):
+        db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+    if not _col_exists(db, "users", "totp_enabled"):
+        db.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "totp_backup_codes"):
+        db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
 
 
 

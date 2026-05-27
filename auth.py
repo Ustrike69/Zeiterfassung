@@ -1,7 +1,13 @@
 import functools
+import datetime
+import uuid
 from flask import session, redirect, url_for, request, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from db import connect
+
+_LOGIN_MAX_ATTEMPTS = 3
+_LOCK_MINUTES = 30
+_UNLOCK_TOKEN_HOURS = 24
 
 
 def has_users() -> bool:
@@ -21,15 +27,10 @@ def validate_password(password: str, username: str = "") -> list:
     errors = []
     if len(password) < 10:
         errors.append("Mindestens 10 Zeichen")
-    if not any(c.isupper() for c in password):
-        errors.append("Mindestens ein Großbuchstabe")
-    if not any(c.islower() for c in password):
-        errors.append("Mindestens ein Kleinbuchstabe")
+    if not any(c.isupper() for c in password) or not any(c.islower() for c in password):
+        errors.append("Groß- und Kleinbuchstaben erforderlich")
     if not any(c.isdigit() for c in password):
-        errors.append("Mindestens eine Ziffer")
-    _specials = set(r"""!@#$%^&*()-_=+[]{}|;:'",.<>?/\`~""")
-    if not any(c in _specials for c in password):
-        errors.append("Mindestens ein Sonderzeichen")
+        errors.append("Mindestens eine Zahl erforderlich")
     if username and username.lower() in password.lower():
         errors.append("Passwort darf nicht den Benutzernamen enthalten")
     return errors
@@ -75,23 +76,170 @@ def create_user(
 
 
 def authenticate(username: str, password: str):
+    """
+    Returns (user_dict, error_code) where error_code is None on success or one of:
+      'invalid', 'inactive', 'locked'
+    """
     canonical = _username_canonical(username)
     if not canonical:
-        return None
+        return None, "invalid"
     db = connect()
     u = db.execute(
-        "SELECT id, username, password_hash, is_admin, is_active FROM users WHERE LOWER(username)=?",
+        "SELECT id, username, password_hash, is_admin, is_active, "
+        "login_attempts, login_locked_until, email FROM users WHERE LOWER(username)=?",
         (canonical,),
     ).fetchone()
     db.close()
 
     if not u:
-        return None
+        return None, "invalid"
     if not u["is_active"]:
-        return None
+        return None, "inactive"
+
+    # Check lockout
+    locked_until_str = u["login_locked_until"]
+    if locked_until_str:
+        locked_until = datetime.datetime.fromisoformat(locked_until_str)
+        if datetime.datetime.now() < locked_until:
+            return None, "locked"
+        else:
+            # Lock expired – clear it
+            _clear_lockout(u["id"])
+
     if not check_password_hash(u["password_hash"], password):
+        _record_failed_attempt(u["id"], u["email"] or "")
+        return None, "invalid"
+
+    # Success – reset counter, update last_login
+    _record_success(u["id"])
+    return dict(u), None
+
+
+def get_lockout_until(username: str):
+    """Return the locked_until datetime for a user, or None."""
+    canonical = _username_canonical(username)
+    if not canonical:
         return None
-    return dict(u)
+    db = connect()
+    row = db.execute(
+        "SELECT login_locked_until FROM users WHERE LOWER(username)=?", (canonical,)
+    ).fetchone()
+    db.close()
+    if not row or not row["login_locked_until"]:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(row["login_locked_until"])
+    except Exception:
+        return None
+
+
+def _record_failed_attempt(user_id: int, email: str) -> None:
+    db = connect()
+    row = db.execute(
+        "SELECT login_attempts FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    attempts = (row["login_attempts"] or 0) + 1 if row else 1
+
+    if attempts >= _LOGIN_MAX_ATTEMPTS:
+        locked_until = (datetime.datetime.now() + datetime.timedelta(minutes=_LOCK_MINUTES)).isoformat()
+        token = str(uuid.uuid4())
+        db.execute(
+            "UPDATE users SET login_attempts=?, login_locked_until=?, login_unlock_token=? WHERE id=?",
+            (attempts, locked_until, token, user_id),
+        )
+        db.commit()
+        db.close()
+        if email:
+            _send_lockout_mail(email, token, user_id)
+    else:
+        db.execute(
+            "UPDATE users SET login_attempts=? WHERE id=?", (attempts, user_id)
+        )
+        db.commit()
+        db.close()
+
+
+def _record_success(user_id: int) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET login_attempts=0, login_locked_until=NULL, login_unlock_token=NULL, "
+        "last_login=datetime('now') WHERE id=?",
+        (user_id,),
+    )
+    db.commit()
+    db.close()
+
+
+def _clear_lockout(user_id: int) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET login_attempts=0, login_locked_until=NULL, login_unlock_token=NULL WHERE id=?",
+        (user_id,),
+    )
+    db.commit()
+    db.close()
+
+
+def unlock_account(user_id: int) -> None:
+    _clear_lockout(user_id)
+
+
+def validate_unlock_token(token: str):
+    """Return user dict if token is valid and not expired, else None."""
+    if not token:
+        return None
+    db = connect()
+    row = db.execute(
+        "SELECT id, login_locked_until FROM users WHERE login_unlock_token=?", (token,)
+    ).fetchone()
+    db.close()
+    if not row:
+        return None
+    if not row["login_locked_until"]:
+        return None
+    try:
+        locked_until = datetime.datetime.fromisoformat(row["login_locked_until"])
+    except Exception:
+        return None
+    # Token valid for UNLOCK_TOKEN_HOURS from lock time
+    token_expiry = locked_until + datetime.timedelta(hours=_UNLOCK_TOKEN_HOURS)
+    if datetime.datetime.now() > token_expiry:
+        return None
+    return dict(row)
+
+
+def _send_lockout_mail(email: str, token: str, user_id: int) -> None:
+    """Fire-and-forget: send account lockout email."""
+    try:
+        import threading as _thr
+        def _do():
+            try:
+                from flask import current_app as _ca
+                with _ca.app_context():
+                    _dispatch_lockout_mail(email, token)
+            except Exception:
+                pass
+        _thr.Thread(target=_do, daemon=True).start()
+    except Exception:
+        pass
+
+
+def _dispatch_lockout_mail(email: str, token: str) -> None:
+    """Called inside app context. Imports app-level helpers."""
+    try:
+        import app as _app_module
+        base_url = _app_module._get_base_url()
+        unlock_url = f"{base_url}/login/unlock/{token}"
+        from translations import t as _t
+        subject = _t("mail.account_locked_subject")
+        body = (
+            f"{_t('auth.account_locked_mail_intro')}\n\n"
+            f"{unlock_url}\n\n"
+            f"{_t('auth.account_locked_mail_hint')}"
+        )
+        _app_module._send_mail_simple(email, subject, body)
+    except Exception:
+        pass
 
 
 def current_user():
@@ -102,7 +250,8 @@ def current_user():
     u = db.execute(
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
         "password_changed, onboarding_done, display_name, email, admin_role, "
-        "must_change_password, admin_only, language FROM users WHERE id=?",
+        "must_change_password, admin_only, language, password_compliant, "
+        "totp_enabled, login_attempts, last_login FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
@@ -146,8 +295,48 @@ def set_active(user_id: int, is_active: bool) -> None:
 def set_password(user_id: int, new_password: str) -> None:
     db = connect()
     db.execute(
-        "UPDATE users SET password_hash=?, password_changed=1, must_change_password=0, updated_at=datetime('now') WHERE id=?",
+        "UPDATE users SET password_hash=?, password_changed=1, must_change_password=0, "
+        "password_compliant=1, updated_at=datetime('now') WHERE id=?",
         (generate_password_hash(new_password), user_id),
+    )
+    db.commit()
+    db.close()
+
+
+def set_totp(user_id: int, secret_encrypted: str, backup_codes_json: str) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET totp_secret=?, totp_enabled=1, totp_backup_codes=?, updated_at=datetime('now') WHERE id=?",
+        (secret_encrypted, backup_codes_json, user_id),
+    )
+    db.commit()
+    db.close()
+
+
+def disable_totp(user_id: int) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET totp_secret=NULL, totp_enabled=0, totp_backup_codes=NULL, updated_at=datetime('now') WHERE id=?",
+        (user_id,),
+    )
+    db.commit()
+    db.close()
+
+
+def get_totp_row(user_id: int) -> dict:
+    db = connect()
+    row = db.execute(
+        "SELECT totp_secret, totp_enabled, totp_backup_codes FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    db.close()
+    return dict(row) if row else {}
+
+
+def update_totp_backup_codes(user_id: int, backup_codes_json: str) -> None:
+    db = connect()
+    db.execute(
+        "UPDATE users SET totp_backup_codes=?, updated_at=datetime('now') WHERE id=?",
+        (backup_codes_json, user_id),
     )
     db.commit()
     db.close()
@@ -186,6 +375,11 @@ def set_flags(user_id: int, is_admin: bool, is_active: bool) -> None:
 def login_required(view):
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
+        # 2FA pending: redirect to 2FA page for all protected routes
+        if session.get("awaiting_2fa") and not session.get("user_id"):
+            ep = request.endpoint
+            if ep not in ("login_2fa", "login_2fa_post"):
+                return redirect(url_for("login_2fa"))
         if not session.get("user_id"):
             return redirect(url_for("login", next=request.path))
         u = current_user()
@@ -193,9 +387,10 @@ def login_required(view):
             session.clear()
             return redirect(url_for("login"))
         ep = request.endpoint
-        if u.get("must_change_password") and ep not in ("change_password", "change_password_post"):
+        need_pw_change = u.get("must_change_password") or not u.get("password_compliant")
+        if need_pw_change and ep not in ("change_password", "change_password_post"):
             return redirect(url_for("change_password"))
-        if not u.get("must_change_password") and not u.get("onboarding_done") and ep not in ("onboarding", "onboarding_post"):
+        if not need_pw_change and not u.get("onboarding_done") and ep not in ("onboarding", "onboarding_post"):
             return redirect(url_for("onboarding"))
         return view(*args, **kwargs)
     return wrapped

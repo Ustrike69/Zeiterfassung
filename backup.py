@@ -8,6 +8,63 @@ from pathlib import Path
 
 from db import db_path
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+import base64
+
+
+def _derive_key(password: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100_000,
+    )
+    return kdf.derive(password.encode())
+
+
+def encrypt_backup(data: bytes, password: str) -> bytes:
+    """Encrypt data with AES-GCM. Format: salt(16) + nonce(12) + ciphertext."""
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = _derive_key(password, salt)
+    aesgcm = AESGCM(key)
+    encrypted = aesgcm.encrypt(nonce, data, None)
+    return salt + nonce + encrypted
+
+
+def decrypt_backup(data: bytes, password: str) -> bytes:
+    """Decrypt data encrypted by encrypt_backup. Raises InvalidTag on wrong password."""
+    salt = data[:16]
+    nonce = data[16:28]
+    encrypted = data[28:]
+    key = _derive_key(password, salt)
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, encrypted, None)
+
+
+def _make_fernet_key(app_secret: str) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"zeiterfassung_backup_pw_v1",
+        iterations=100_000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(app_secret.encode()))
+
+
+def encrypt_password(password: str, app_secret: str) -> str:
+    from cryptography.fernet import Fernet
+    f = Fernet(_make_fernet_key(app_secret))
+    return f.encrypt(password.encode()).decode()
+
+
+def decrypt_password(encrypted: str, app_secret: str) -> str:
+    from cryptography.fernet import Fernet
+    f = Fernet(_make_fernet_key(app_secret))
+    return f.decrypt(encrypted.encode()).decode()
+
 import os as _os
 BACKUPS_DIR = Path(_os.environ.get("BACKUPS_DIR", _os.path.join(_os.path.dirname(__file__), "backups")))
 
@@ -44,24 +101,33 @@ def create_backup_gz(dest_path: str = None):
 
 
 def list_local_backups():
-    """Return list of dicts {name, size, mtime} for each local backup, newest first."""
+    """Return list of dicts {name, size, mtime, encrypted} for each local backup, newest first."""
     _ensure_dir()
     files = []
-    for f in sorted(BACKUPS_DIR.glob("*.db.gz"), key=lambda x: x.stat().st_mtime, reverse=True):
-        stat = f.stat()
-        files.append({
-            "name": f.name,
-            "size": stat.st_size,
-            "mtime": datetime.datetime.fromtimestamp(stat.st_mtime),
-        })
+    seen = set()
+    for pattern in ("*.db.gz.enc", "*.db.gz"):
+        for f in BACKUPS_DIR.glob(pattern):
+            if f.name not in seen:
+                seen.add(f.name)
+                stat = f.stat()
+                files.append({
+                    "name": f.name,
+                    "size": stat.st_size,
+                    "mtime": datetime.datetime.fromtimestamp(stat.st_mtime),
+                    "encrypted": f.name.endswith(".enc"),
+                })
+    files.sort(key=lambda x: x["mtime"], reverse=True)
     return files
 
 
 def prune_backups(keep: int = 7):
     """Delete oldest backups, keeping the most recent `keep` files."""
     _ensure_dir()
-    files = sorted(BACKUPS_DIR.glob("*.db.gz"), key=lambda x: x.stat().st_mtime, reverse=True)
-    for f in files[keep:]:
+    all_files = []
+    for pattern in ("*.db.gz.enc", "*.db.gz"):
+        all_files.extend(BACKUPS_DIR.glob(pattern))
+    all_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    for f in all_files[keep:]:
         try:
             f.unlink()
         except Exception:

@@ -12,12 +12,13 @@ from auth import (has_users, create_user, authenticate, current_user, login_requ
                   admin_required, sysadmin_required, timemanager_required,
                   set_password, set_flags, set_admin_role, set_active,
                   is_sysadmin, is_timemanager, validate_password, set_must_change_password,
-                  set_language)
+                  set_language, unlock_account, validate_unlock_token, get_lockout_until,
+                  set_totp, disable_totp, get_totp_row, update_totp_backup_codes)
 from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.6"
+APP_VERSION = "v2.0.8"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -59,6 +60,58 @@ def _get_app_config() -> dict:
 
 
 _HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
+def _fernet():
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    import base64
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                     salt=b"zeiterfassung_totp_v1", iterations=100_000)
+    key = base64.urlsafe_b64encode(kdf.derive(app.secret_key.encode()))
+    return Fernet(key)
+
+
+def _totp_encrypt(text: str) -> str:
+    return _fernet().encrypt(text.encode()).decode()
+
+
+def _totp_decrypt(text: str) -> str:
+    return _fernet().decrypt(text.encode()).decode()
+
+
+def _generate_totp_secret() -> str:
+    import pyotp
+    return pyotp.random_base32()
+
+
+def _verify_totp(secret_encrypted: str, code: str) -> bool:
+    import pyotp
+    try:
+        secret = _totp_decrypt(secret_encrypted)
+        return pyotp.TOTP(secret).verify(code.strip(), valid_window=1)
+    except Exception:
+        return False
+
+
+def _generate_backup_codes(n: int = 8) -> list:
+    import secrets
+    return [secrets.token_hex(4).upper() for _ in range(n)]
+
+
+def _check_backup_code(codes_json_encrypted: str, code: str) -> tuple:
+    """Returns (valid: bool, updated_json_encrypted: str)."""
+    import json as _j
+    try:
+        codes = _j.loads(_totp_decrypt(codes_json_encrypted))
+        code = code.strip().upper()
+        if code in codes:
+            codes.remove(code)
+            return True, _totp_encrypt(_j.dumps(codes))
+        return False, codes_json_encrypted
+    except Exception:
+        return False, codes_json_encrypted
 
 
 def _get_base_url() -> str:
@@ -1189,8 +1242,6 @@ def _absence_summary_for_period(user_id: int, start_iso: str, end_iso: str) -> d
 
 # ─── Periodenabschluss (Monats- / Jahresabschluss) ───────────────────────────
 
-LOCK_MSG = "Zeitraum ist abgeschlossen und kann nicht mehr bearbeitet werden."
-START_DATE_MSG = "Datum liegt vor dem Arbeitsbeginn ({})."
 
 
 def _is_day_locked(user_id: int, iso_day: str) -> bool:
@@ -1640,13 +1691,17 @@ function _pwUpdate(iid,lid,uname){
   var pw=(document.getElementById(iid)||{}).value||'';
   var el=document.getElementById(lid);if(!el)return;
   var c=_pwChk(pw,uname);
-  var items=[[c.len,'Mindestens 10 Zeichen'],[c.upper,'Großbuchstabe (A-Z)'],
-    [c.lower,'Kleinbuchstabe (a-z)'],[c.digit,'Ziffer (0-9)'],[c.special,'Sonderzeichen']];
-  if(uname)items.push([c.nouser,'Kein Benutzernamen enthalten']);
-  el.innerHTML=items.map(function(x){
+  var required=[[c.len,'Mindestens 10 Zeichen'],[c.upper,'Großbuchstabe (A-Z)'],
+    [c.lower,'Kleinbuchstabe (a-z)'],[c.digit,'Zahl (0-9)']];
+  if(uname)required.push([c.nouser,'Kein Benutzernamen enthalten']);
+  var html=required.map(function(x){
     var col=x[0]?'var(--ok)':'var(--danger)';
     return '<span style="display:block;color:'+col+';font-size:12px;">'+(x[0]?'✓ ':'✗ ')+x[1]+'</span>';
   }).join('');
+  var scol=c.special?'var(--ok)':'var(--muted,#888)';
+  var smark=c.special?'✓ ':'○ ';
+  html+='<span style="display:block;color:'+scol+';font-size:12px;">'+smark+'Sonderzeichen (optional, empfohlen)</span>';
+  el.innerHTML=html;
 }
 </script>"""
 
@@ -1764,7 +1819,7 @@ def setup():
           </select>
         </div>
         <div><label>{t("setup.username_label", setup_lang)}</label><input name="username" required></div>
-        <div><label>{t("setup.password_label", setup_lang)}</label><input type="password" name="password" required></div>
+        <div><label>{t("setup.password_label", setup_lang)}</label><input type="password" name="password" required autocomplete="new-password"></div>
         <div style="border:1px solid var(--bd);border-radius:var(--rs);padding:12px;">
           <div style="font-size:14px;font-weight:600;margin-bottom:8px;">{t("setup.usage_label", setup_lang)}</div>
           <label style="font-weight:400;display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;">
@@ -1794,7 +1849,7 @@ def setup_post():
     if chosen_lang not in [code for code, _ in _available_languages()]:
         chosen_lang = "en"
     if not username or not password:
-        add_flash("Bitte Username und Passwort angeben.", "error")
+        add_flash(t("flash.error.credentials_required"), "error")
         return redirect(url_for("setup", lang=chosen_lang))
     admin_only_val = 1 if (request.form.get("admin_only") or "0") == "1" else 0
     new_id = create_user(username, password, is_admin=True, is_active=True, onboarding_done=1)
@@ -1819,18 +1874,20 @@ def login():
     bootstrap()
     if not has_users():
         return redirect(url_for("setup"))
-    # Use default app language for login page (no session yet)
     _login_lang = _get_app_config().get("default_language") or "de"
     nxt = request.args.get("next") or "/"
     body = f'''
     {flash_html()}
     <div class="card">
       <h3>{t("login.title", _login_lang)}</h3>
-      <form method="post" action="/login">
+      <form method="post" action="/login" id="login-form">
         <input type="hidden" name="next" value="{nxt}">
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <div><label>{t("login.username", _login_lang)}</label><br><input name="username" required></div>
-          <div><label>{t("login.password", _login_lang)}</label><br><input type="password" name="password" required></div>
+          <div><label>{t("login.username", _login_lang)}</label><br>
+            <input name="username" id="login-user" required autocomplete="username"
+                   oninput="loginLockCheck()"></div>
+          <div><label>{t("login.password", _login_lang)}</label><br>
+            <input type="password" name="password" required autocomplete="current-password"></div>
         </div><br>
         <button class="btn" type="submit">{t("login.submit", _login_lang)}</button>
       </form>
@@ -1843,21 +1900,123 @@ def login():
 @app.post("/login")
 def login_post():
     bootstrap()
-    username = request.form.get("username") or ""
+    username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
     nxt = request.form.get("next") or "/"
-    u = authenticate(username, password)
-    if not u:
+    _login_lang = _get_app_config().get("default_language") or "de"
+
+    u, err = authenticate(username, password)
+    if err == "locked":
+        locked_until = get_lockout_until(username)
+        if locked_until:
+            until_str = locked_until.strftime("%H:%M")
+            add_flash(t("auth.account_locked", _login_lang).replace("{time}", until_str), "error")
+        else:
+            add_flash(t("auth.account_locked_no_email", _login_lang), "error")
+        return redirect(url_for("login", next=nxt))
+    if err or not u:
         add_flash(t("login.failed"), "error")
         return redirect(url_for("login", next=nxt))
-    session["user_id"] = u["id"]
-    # Set session language from user preference
+
+    # Set language from user preference
     from db import connect as _db_connect
     _ldb = _db_connect()
     _lrow = _ldb.execute("SELECT language FROM users WHERE id=?", (u["id"],)).fetchone()
     _ldb.close()
-    session["lang"] = (_lrow["language"] if _lrow and _lrow["language"] else "de") or "de"
+    _lang = (_lrow["language"] if _lrow and _lrow["language"] else "de") or "de"
+
+    # 2FA check
+    totp_row = get_totp_row(u["id"])
+    if totp_row.get("totp_enabled"):
+        session.clear()
+        session["awaiting_2fa"] = True
+        session["pre_2fa_user_id"] = u["id"]
+        session["pre_2fa_lang"] = _lang
+        session["pre_2fa_next"] = nxt
+        return redirect(url_for("login_2fa"))
+
+    session["user_id"] = u["id"]
+    session["lang"] = _lang
     return redirect(nxt)
+
+
+@app.get("/login/2fa")
+def login_2fa():
+    bootstrap()
+    if not session.get("awaiting_2fa"):
+        return redirect(url_for("login"))
+    _lang = session.get("pre_2fa_lang") or "de"
+    body = f"""
+    {flash_html()}
+    <div class="card" style="max-width:400px;">
+      <h3>&#128274; {t("settings.two_factor", _lang)}</h3>
+      <p class="small" style="margin-bottom:14px;">{t("auth.enter_totp_hint", _lang)}</p>
+      <form method="post" action="/login/2fa">
+        <div style="margin-bottom:10px;">
+          <label>{t("auth.totp_code", _lang)}</label>
+          <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="8" style="font-size:18px;letter-spacing:4px;width:140px;" required autofocus>
+        </div>
+        <button class="btn primary" type="submit">{t("login.submit", _lang)}</button>
+        <a class="btn" href="/login" style="margin-left:8px;">{t("btn.cancel", _lang)}</a>
+      </form>
+    </div>
+    """
+    return render_template_string(layout("2FA", body, None, APP_VERSION))
+
+
+@app.post("/login/2fa")
+def login_2fa_post():
+    bootstrap()
+    if not session.get("awaiting_2fa"):
+        return redirect(url_for("login"))
+    user_id = session.get("pre_2fa_user_id")
+    _lang = session.get("pre_2fa_lang") or "de"
+    nxt = session.get("pre_2fa_next") or "/"
+    if not user_id:
+        session.clear()
+        return redirect(url_for("login"))
+
+    code = (request.form.get("code") or "").strip()
+    totp_row = get_totp_row(user_id)
+
+    valid = False
+    if totp_row.get("totp_secret"):
+        valid = _verify_totp(totp_row["totp_secret"], code)
+    if not valid and totp_row.get("totp_backup_codes"):
+        ok, updated_codes = _check_backup_code(totp_row["totp_backup_codes"], code)
+        if ok:
+            import json as _j
+            update_totp_backup_codes(user_id, updated_codes)
+            valid = True
+
+    if not valid:
+        add_flash(t("auth.totp_invalid", _lang), "error")
+        return redirect(url_for("login_2fa"))
+
+    from db import connect as _db_connect
+    _ldb = _db_connect()
+    _lrow = _ldb.execute("SELECT language FROM users WHERE id=?", (user_id,)).fetchone()
+    _ldb.close()
+    _final_lang = (_lrow["language"] if _lrow and _lrow["language"] else "de") or "de"
+
+    session.clear()
+    session["user_id"] = user_id
+    session["lang"] = _final_lang
+    return redirect(nxt)
+
+
+@app.get("/login/unlock/<token>")
+def login_unlock(token: str):
+    bootstrap()
+    _login_lang = _get_app_config().get("default_language") or "de"
+    row = validate_unlock_token(token)
+    if not row:
+        add_flash(t("auth.unlock_invalid", _login_lang), "error")
+        return redirect(url_for("login"))
+    unlock_account(row["id"])
+    add_flash(t("auth.unlocked", _login_lang), "success")
+    return redirect(url_for("login"))
 
 
 @app.get("/logout")
@@ -2163,15 +2322,16 @@ def onboarding_post():
         new_password2 = (request.form.get("new_password2") or "").strip()
 
         from auth import authenticate as _auth_check
-        if not _auth_check(u["username"], current_password):
-            add_flash("Aktuelles Passwort falsch.", "error")
+        _, _pw_err = _auth_check(u["username"], current_password)
+        if _pw_err:
+            add_flash(t("settings.password_wrong"), "error")
             return redirect("/onboarding?step=1")
         errs = validate_password(new_password, u.get("username") or "")
         if errs:
-            add_flash("Passwort ungültig: " + "; ".join(errs), "error")
+            add_flash(t("flash.error.password_invalid").format(errors="; ".join(errs)), "error")
             return redirect("/onboarding?step=1")
         if new_password != new_password2:
-            add_flash("Passwörter stimmen nicht überein.", "error")
+            add_flash(t("settings.password_mismatch"), "error")
             return redirect("/onboarding?step=1")
         set_password(u["id"], new_password)
         return redirect("/onboarding?step=2")
@@ -2194,7 +2354,7 @@ def onboarding_post():
     elif step == 3:
         valid_from = _parse_date_input(request.form.get("valid_from") or "") or ""
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_from):
-            add_flash("Bitte ein gültiges Datum angeben.", "error")
+            add_flash(t("flash.error.invalid_date"), "error")
             return redirect("/onboarding?step=3")
         mode = (request.form.get("mode") or "weekly").strip().lower()
         if mode not in ("weekly", "daily"):
@@ -2249,7 +2409,7 @@ def onboarding_post():
             if entitlement < 0 or carryover < 0:
                 raise ValueError()
         except Exception:
-            add_flash("Bitte gültige Werte eingeben.", "error")
+            add_flash(t("flash.error.invalid_values"), "error")
             return redirect("/onboarding?step=4")
         _set_vacation_year(u["id"], year, entitlement, carryover)
         return redirect("/onboarding?step=5")
@@ -2261,7 +2421,7 @@ def onboarding_post():
         try:
             start_minutes = _parse_signed_hhmm_to_minutes(start_balance_raw) if start_balance_raw else 0
         except Exception:
-            add_flash("Startsaldo: Bitte +HH:MM oder -HH:MM angeben.", "error")
+            add_flash(t("flash.error.balance_start_format"), "error")
             return redirect("/onboarding?step=5")
         _set_start_balance_minutes(u["id"], start_minutes)
         if tracking_start_iso:
@@ -2421,7 +2581,7 @@ def _before_start_date(user_id: int, iso_day: str) -> "str | None":
     """Return error message if iso_day is before user's tracking_start_date, else None."""
     start = _get_tracking_start(user_id)
     if start and iso_day < start:
-        return START_DATE_MSG.format(_fmt_date_de(start))
+        return t("flash.error.before_start_date").format(date=_fmt_date_de(start))
     return None
 
 
@@ -2603,7 +2763,7 @@ def settings_contouring_toggle():
         )
         db.commit()
         db.close()
-        add_flash("Kontierung wurde deaktiviert. Bestehende Kontierungen bleiben erhalten.", "success")
+        add_flash(t("flash.success.booking_disabled"), "success")
     else:
         start_date = _parse_date_input(request.form.get("contouring_start_date") or "")
         if not start_date:
@@ -2615,7 +2775,7 @@ def settings_contouring_toggle():
         )
         db.commit()
         db.close()
-        add_flash(f"Kontierung aktiviert ab {_fmt_date_de(start_date)}.", "success")
+        add_flash(t("flash.success.booking_enabled").format(date=_fmt_date_de(start_date)), "success")
     return redirect("/settings")
 
 
@@ -2626,11 +2786,11 @@ def api_set_exception():
     u = current_user()
     day = (request.form.get("day") or "").strip()[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
-        add_flash("Ungültiges Datum.", "error")
+        add_flash(t("flash.error.invalid_date"), "error")
         return redirect("/calendar")
     note = (request.form.get("note") or "").strip()[:200]
     _set_weekend_exception(u["id"], day, note)
-    add_flash(f"Ausnahme für {day} gesetzt – Zeitblöcke können jetzt eingetragen werden.", "success")
+    add_flash(t("flash.success.exception_added").format(day=day), "success")
     return redirect(f"/day/{day}")
 
 
@@ -2641,10 +2801,10 @@ def api_remove_exception():
     u = current_user()
     day = (request.form.get("day") or "").strip()[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
-        add_flash("Ungültiges Datum.", "error")
+        add_flash(t("flash.error.invalid_date"), "error")
         return redirect("/calendar")
     _remove_weekend_exception(u["id"], day)
-    add_flash(f"Ausnahme für {day} entfernt.", "success")
+    add_flash(t("flash.success.exception_removed").format(day=day), "success")
     return redirect(f"/day/{day}")
 
 
@@ -3689,22 +3849,22 @@ def balance_set_expected_override():
     back = f"/balance?y={y}&m={m}" if y and m else "/balance"
 
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
-        add_flash("Ungültiges Datum.", "error")
+        add_flash(t("flash.error.invalid_date"), "error")
         return redirect(back)
 
     if not val:
         _set_expected_override_minutes(u["id"], day, None)
-        add_flash("Soll-Override entfernt.", "success")
+        add_flash(t("flash.success.target_override_removed"), "success")
         return redirect(back)
 
     try:
         mins = _minutes_from_hhmm(val)
     except Exception:
-        add_flash("Soll bitte als HH:MM angeben (z.B. 08:00).", "error")
+        add_flash(t("flash.error.target_format"), "error")
         return redirect(back)
 
     _set_expected_override_minutes(u["id"], day, int(mins))
-    add_flash("Soll gespeichert.", "success")
+    add_flash(t("flash.success.target_saved"), "success")
     return redirect(back)
 
 
@@ -3722,11 +3882,11 @@ def balance_set_start():
     try:
         mins = _parse_signed_hhmm_to_minutes(start_balance_raw)
     except Exception:
-        add_flash("Ungültiges Format. Bitte +HH:MM oder -HH:MM verwenden.", "error")
+        add_flash(t("flash.error.balance_format"), "error")
         return redirect(back)
 
     _set_start_balance_minutes(u["id"], mins)
-    add_flash("Startsaldo gespeichert.", "success")
+    add_flash(t("flash.success.balance_saved"), "success")
     return redirect(back)
 
 def _month_start_end(year: int, month: int):
@@ -3848,11 +4008,11 @@ def balance_monthly_csv():
 
 def _validate_absence_dates(date_from: str, date_to: str, is_half_day: int):
     if not date_from or not date_to:
-        return "Bitte Von/Bis angeben."
+        return t("flash.error.absence_date_required")
     if date_from > date_to:
-        return "Von-Datum darf nicht nach Bis-Datum liegen."
+        return t("flash.error.absence_date_order")
     if is_half_day and date_from != date_to:
-        return "Halber Tag ist nur erlaubt, wenn Von = Bis."
+        return t("flash.error.absence_half_day")
     return None
 
 
@@ -4090,7 +4250,7 @@ def absences_new_post():
         return redirect(url_for("absences_new"))
 
     if date_from and date_to and _is_range_locked(u["id"], date_from, date_to):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(url_for("absences_new"))
     if date_from:
         sd_err = _range_before_start_date(u["id"], date_from, date_to or date_from)
@@ -4100,14 +4260,14 @@ def absences_new_post():
 
     _enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
     if type_id not in _enabled_ids:
-        add_flash("Ungültiger Abwesenheitstyp.", "error")
+        add_flash(t("flash.error.invalid_absence_type"), "error")
         return redirect(url_for("absences_new"))
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
     type_name = type_row["name"] if type_row else ""
     if type_name == "Sonstige" and not comment:
         db.close()
-        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        add_flash(t("flash.error.sonstige_comment_required"), "error")
         return redirect(url_for("absences_new"))
 
     if type_name == "Urlaub" and not u.get("is_admin"):
@@ -4117,9 +4277,7 @@ def absences_new_post():
             if requested > available:
                 db.close()
                 add_flash(
-                    f"Nicht genügend Urlaubstage verfügbar. "
-                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    t("flash.error.vacation_limit").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
                 return redirect(url_for("absences_new"))
@@ -4129,14 +4287,13 @@ def absences_new_post():
             available, requested = chk
             if requested > available:
                 add_flash(
-                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    t("flash.error.vacation_limit_admin").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
 
     if _has_overlap(db, u["id"], date_from, date_to):
         db.close()
-        add_flash("Überschneidung mit vorhandener Abwesenheit. Bitte Zeitraum anpassen.", "error")
+        add_flash(t("flash.error.absence_overlap"), "error")
         return redirect(url_for("absences_new"))
 
     cur = db.execute(
@@ -4246,14 +4403,14 @@ def absences_edit_post(absence_id: int):
 
     _enabled_ids = _get_user_enabled_absence_type_ids(u["id"])
     if type_id not in _enabled_ids:
-        add_flash("Ungültiger Abwesenheitstyp.", "error")
+        add_flash(t("flash.error.invalid_absence_type"), "error")
         return redirect(f"/absences/{absence_id}/edit")
     db = connect()
     type_row = db.execute("SELECT name FROM absence_types WHERE id=?", (type_id,)).fetchone()
     type_name = type_row["name"] if type_row else ""
     if type_name == "Sonstige" and not comment:
         db.close()
-        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        add_flash(t("flash.error.sonstige_comment_required"), "error")
         return redirect(f"/absences/{absence_id}/edit")
 
     row = db.execute(
@@ -4268,7 +4425,7 @@ def absences_edit_post(absence_id: int):
         date_from and date_to and _is_range_locked(u["id"], date_from, date_to)
     ):
         db.close()
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/absences/{absence_id}/edit")
     if date_from:
         sd_err = _range_before_start_date(u["id"], date_from, date_to or date_from)
@@ -4284,9 +4441,7 @@ def absences_edit_post(absence_id: int):
             if requested > available:
                 db.close()
                 add_flash(
-                    f"Nicht genügend Urlaubstage verfügbar. "
-                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    t("flash.error.vacation_limit").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
                 return redirect(f"/absences/{absence_id}/edit")
@@ -4296,14 +4451,13 @@ def absences_edit_post(absence_id: int):
             available, requested = chk
             if requested > available:
                 add_flash(
-                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    t("flash.error.vacation_limit_admin").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
 
     if _has_overlap(db, u["id"], date_from, date_to, exclude_id=absence_id):
         db.close()
-        add_flash("Überschneidung mit vorhandener Abwesenheit. Bitte Zeitraum anpassen.", "error")
+        add_flash(t("flash.error.absence_overlap"), "error")
         return redirect(f"/absences/{absence_id}/edit")
 
     db.execute(
@@ -4335,7 +4489,7 @@ def absences_delete(absence_id: int):
     ).fetchone()
     if row and _is_range_locked(u["id"], row["date_from"], row["date_to"]):
         db.close()
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(url_for("absences_list"))
     db.close()
     try:
@@ -4638,8 +4792,8 @@ def absences_calendar_basic():
         resp = _make_response("Unauthorized", 401)
         resp.headers["WWW-Authenticate"] = 'Basic realm="Zeiterfassung Kalender"'
         return resp
-    user = authenticate(auth.username, auth.password)
-    if not user:
+    user, _auth_err = authenticate(auth.username, auth.password)
+    if not user or _auth_err:
         resp = _make_response("Unauthorized", 401)
         resp.headers["WWW-Authenticate"] = 'Basic realm="Zeiterfassung Kalender"'
         return resp
@@ -4700,8 +4854,8 @@ def _caldav_user_by_basic():
     auth = request.authorization
     if not auth:
         return None, _caldav_unauth()
-    u = authenticate(auth.username, auth.password)
-    if not u:
+    u, _auth_err = authenticate(auth.username, auth.password)
+    if not u or _auth_err:
         return None, _caldav_unauth()
     db = connect()
     row = db.execute(
@@ -5744,15 +5898,15 @@ def _round_to_15(hhmm: str) -> str:
 
 def _validate_block(time_in: str, time_out: str, break_minutes: int) -> tuple[bool, str]:
     if not re.match(r"^\d{2}:\d{2}$", time_in) or not re.match(r"^\d{2}:\d{2}$", time_out):
-        return False, "Bitte Zeiten im Format HH:MM angeben."
+        return False, t("flash.error.time_format")
     s = _minutes_from_hhmm(time_in)
     e = _minutes_from_hhmm(time_out)
     if e <= s:
-        return False, "Gehen muss nach Kommen liegen."
+        return False, t("flash.error.time_order")
     if break_minutes < 0:
-        return False, "Pause darf nicht negativ sein."
+        return False, t("flash.error.break_negative")
     if break_minutes >= (e - s):
-        return False, "Pause ist zu groß (>= Blockdauer)."
+        return False, t("flash.error.break_too_large")
     return True, ""
 
 
@@ -6270,15 +6424,15 @@ def day_business_trip_save(day: str):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     destination = (request.form.get("destination") or "").strip()
     if not destination:
-        add_flash("Ort ist Pflichtfeld.", "error")
+        add_flash(t("flash.error.location_required"), "error")
         return redirect(f"/day/{day}")
     start_date = _parse_date_input(request.form.get("start_date") or day)
     if not start_date:
-        add_flash("Ungültiges Startdatum.", "error")
+        add_flash(t("flash.error.invalid_start_date"), "error")
         return redirect(f"/day/{day}")
     sd_err = _before_start_date(u["id"], start_date)
     if sd_err:
@@ -6336,7 +6490,7 @@ def day_business_trip_delete(day: str):
     u = current_user()
     day = str(day).strip()[:10]
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     trip_id = (request.form.get("trip_id") or "").strip()
     db = connect()
@@ -6358,10 +6512,10 @@ def day_block_add(day: str):
     # Normalize to YYYY-MM-DD so calendar and DB always match
     day = str(day).strip()[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
-        add_flash("Ungültiges Datum.", "error")
+        add_flash(t("flash.error.invalid_date"), "error")
         return redirect("/calendar")
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     sd_err = _before_start_date(u["id"], day)
     if sd_err:
@@ -6375,7 +6529,7 @@ def day_block_add(day: str):
                     if request.form.get('save_exception'):
                         _set_weekend_exception(u['id'], day, (request.form.get('exception_note') or '').strip()[:200])
                 else:
-                    add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
+                    add_flash(t("flash.error.weekend_blocked"), "error")
                     return redirect(f"/day/{day}")
     time_in = _round_to_15((request.form.get("time_in") or "").strip())
     time_out = _round_to_15((request.form.get("time_out") or "").strip())
@@ -6394,7 +6548,7 @@ def day_block_add(day: str):
     if _get_pref_auto_breaks(u["id"]) == 1:
         break_minutes = _apply_auto_breaks_if_needed(e - s, break_minutes)
         if break_minutes >= (e - s):
-            add_flash("Pause ist zu groß (>= Blockdauer).", "error")
+            add_flash(t("flash.error.break_too_large"), "error")
             return redirect(f"/day/{day}")
 
     db = connect()
@@ -6404,7 +6558,7 @@ def day_block_add(day: str):
         e2 = _minutes_from_hhmm(r["time_out"])
         if not (e <= s2 or s >= e2):
             db.close()
-            add_flash("Zeitblock überschneidet sich mit vorhandenem Block.", "error")
+            add_flash(t("flash.error.block_overlap"), "error")
             return redirect(f"/day/{day}")
 
     db.execute(
@@ -6425,7 +6579,7 @@ def day_block_edit(day: str, block_id: int):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
 
     db = connect()
@@ -6523,7 +6677,7 @@ def day_block_edit_post(day: str, block_id: int):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         abort(400)
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     sd_err = _before_start_date(u["id"], day)
     if sd_err:
@@ -6538,7 +6692,7 @@ def day_block_edit_post(day: str, block_id: int):
                     if request.form.get('save_exception'):
                         _set_weekend_exception(u['id'], day, (request.form.get('exception_note') or '').strip()[:200])
                 else:
-                    add_flash('Arbeiten an Wochenende/Feiertag ist blockiert. Setze zuerst eine Ausnahme für diesen Tag.', 'error')
+                    add_flash(t("flash.error.weekend_blocked"), "error")
                     return redirect(f"/day/{day}/block/{block_id}/edit")
 
     time_in = _round_to_15((request.form.get("time_in") or "").strip())
@@ -6561,7 +6715,7 @@ def day_block_edit_post(day: str, block_id: int):
     if _get_pref_auto_breaks(u["id"]) == 1:
         break_minutes = _apply_auto_breaks_if_needed(e - s, break_minutes)
         if break_minutes >= (e - s):
-            add_flash("Pause ist zu groß (>= Blockdauer).", "error")
+            add_flash(t("flash.error.break_too_large"), "error")
             return redirect(f"/day/{day}/block/{block_id}/edit")
 
     db = connect()
@@ -6584,7 +6738,7 @@ def day_block_edit_post(day: str, block_id: int):
         e2 = _minutes_from_hhmm(r["time_out"])
         if not (e <= s2 or s >= e2):
             db.close()
-            add_flash("Zeitblock überschneidet sich mit vorhandenem Block.", "error")
+            add_flash(t("flash.error.block_overlap"), "error")
             return redirect(f"/day/{day}/block/{block_id}/edit")
 
     db.execute(
@@ -6603,7 +6757,7 @@ def day_block_delete(day: str):
     bootstrap()
     u = current_user()
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     block_id = int(request.form.get("block_id") or 0)
     db = connect()
@@ -6620,7 +6774,7 @@ def day_absence_add(day: str):
     bootstrap()
     u = current_user()
     if _is_day_locked(u["id"], day):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/day/{day}")
     sd_err = _before_start_date(u["id"], day)
     if sd_err:
@@ -6635,7 +6789,7 @@ def day_absence_add(day: str):
     type_name = type_row["name"] if type_row else ""
     if type_name == "Sonstige" and not comment:
         db.close()
-        add_flash('Bei Typ "Sonstige" ist eine Bemerkung Pflicht.', "error")
+        add_flash(t("flash.error.sonstige_comment_required"), "error")
         return redirect(f"/day/{day}")
 
     if type_name == "Urlaub" and not u.get("is_admin"):
@@ -6645,9 +6799,7 @@ def day_absence_add(day: str):
             if requested > available:
                 db.close()
                 add_flash(
-                    f"Nicht genügend Urlaubstage verfügbar. "
-                    f"Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage.",
+                    t("flash.error.vacation_limit").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
                 return redirect(f"/day/{day}")
@@ -6657,8 +6809,7 @@ def day_absence_add(day: str):
             available, requested = chk
             if requested > available:
                 add_flash(
-                    f"⚠️ Urlaubslimit überschritten – Verfügbar: {_fmt_vac_days(available)} Tage, "
-                    f"Beantragt: {_fmt_vac_days(requested)} Tage. Als Admin gespeichert.",
+                    t("flash.error.vacation_limit_admin").format(available=_fmt_vac_days(available), requested=_fmt_vac_days(requested)),
                     "error",
                 )
 
@@ -6673,7 +6824,7 @@ def day_absence_add(day: str):
     ).fetchone()
     if overlap:
         db.close()
-        add_flash("Es existiert bereits eine Abwesenheit an diesem Tag.", "error")
+        add_flash(t("flash.error.absence_exists"), "error")
         return redirect(f"/day/{day}")
 
     cur = db.execute(
@@ -6910,6 +7061,79 @@ def _render_calendar_integration_section(
     </div>"""
 
 
+def _render_security_accordion(u: dict, totp_enabled: bool) -> str:
+    _totp_status = t('settings.two_factor_enabled') if totp_enabled else t('settings.two_factor_disabled')
+    _totp_color  = "var(--ok)" if totp_enabled else "var(--mu)"
+    _last_login  = (u.get("last_login") or "")[:16].replace("T", " ")
+    _attempts    = int(u.get("login_attempts") or 0)
+    _attempts_color = "var(--danger)" if _attempts > 0 else "var(--ok)"
+
+    _totp_section = f"""
+      <div class="acc-sub">
+        <b style="font-size:14px;">{t('settings.two_factor')}</b>
+        <div style="margin-top:8px;">
+          <span style="color:{_totp_color};font-weight:600;">{_totp_status}</span>
+        </div>
+        {"" if not totp_enabled else f'''
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <form method="post" action="/settings/2fa/backup-codes">
+            <button class="btn btn-sm" type="submit">{t('settings.regenerate_backup_codes')}</button>
+          </form>
+          <form method="post" action="/settings/2fa/disable"
+                onsubmit="return confirm('{t('settings.totp_disable_confirm')}');">
+            <button class="btn danger btn-sm" type="submit">{t('settings.disable_2fa')}</button>
+          </form>
+        </div>'''}
+        {"" if totp_enabled else f'''
+        <div style="margin-top:10px;">
+          <a class="btn btn-sm primary" href="/settings/2fa/enable">{t('settings.enable_2fa')}</a>
+        </div>'''}
+        <p class="small" style="color:var(--mu);margin-top:6px;">{t('settings.backup_codes_hint')}</p>
+      </div>
+      <div class="acc-sub">
+        <b style="font-size:14px;">{t('settings.login_activity')}</b>
+        <div style="margin-top:8px;font-size:13px;">
+          <div>{t('settings.last_login')}: <b>{_last_login or "–"}</b></div>
+          <div style="margin-top:4px;">{t('settings.failed_attempts')}: <span style="color:{_attempts_color};font-weight:600;">{_attempts}</span></div>
+        </div>
+      </div>
+    """
+
+    return f"""
+    <div class="acc" id="acc-security">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-security-body')">
+        <span>&#128274; {t('settings.security')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-security-body">
+        <div class="acc-inner">
+          <div class="acc-sub" style="border-top:none;margin-top:0;padding-top:0;">
+            <b style="font-size:14px;">{t('settings.pw_section')}</b>
+            <form method="post" action="/settings/password" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
+              <div>
+                <label>{t('settings.password_old')}</label><br>
+                <input type="password" name="current_password" required autocomplete="current-password">
+              </div>
+              <div>
+                <label>{t('settings.password_new')}</label><br>
+                <input type="password" name="new_password" id="spw-inp" required autocomplete="new-password" minlength="6"
+                       oninput="_pwUpdate('spw-inp','spw-chk','{_html.escape(u.get('username') or '')}')">
+                <div id="spw-chk" style="margin-top:6px;padding:8px;background:var(--sf);border-radius:var(--rs);border:1px solid var(--bd);line-height:1.7;"></div>
+              </div>
+              <div>
+                <label>{t('settings.pw_confirm_repeat')}</label><br>
+                <input type="password" name="new_password_confirm" required autocomplete="new-password">
+              </div>
+              <div><button class="btn" type="submit">{t('btn.change_pw')}</button></div>
+            </form>
+          </div>
+          {_totp_section}
+        </div>
+      </div>
+    </div>
+    {_PW_STRENGTH_JS}
+    """
+
+
 @app.get("/settings")
 @login_required
 def settings_view():
@@ -7057,6 +7281,10 @@ def settings_view():
         (u["id"],),
     ).fetchone()
     _ic_db.close()
+
+    # Security / 2FA data
+    _totp = get_totp_row(u["id"])
+    _totp_enabled = bool(_totp.get("totp_enabled"))
     ic_enabled   = bool(int((_ic_row["icloud_enabled"] or 0))) if _ic_row else False
     ic_apple_id  = (_ic_row["icloud_apple_id"] or "")          if _ic_row else ""
     ic_has_pw    = bool((_ic_row["icloud_app_password"] or "")) if _ic_row else False
@@ -7195,25 +7423,6 @@ function wizValidate(e){{
           </div>
 
           <div class="acc-sub">
-            <b style="font-size:14px;">{t('settings.pw_section')}</b>
-            <form method="post" action="/settings/password" style="display:flex;flex-direction:column;gap:10px;max-width:400px;margin-top:10px;">
-              <div>
-                <label>{t('settings.password_old')}</label><br>
-                <input type="password" name="current_password" required autocomplete="current-password">
-              </div>
-              <div>
-                <label>{t('settings.password_new')}</label><br>
-                <input type="password" name="new_password" required autocomplete="new-password" minlength="6">
-              </div>
-              <div>
-                <label>{t('settings.pw_confirm_repeat')}</label><br>
-                <input type="password" name="new_password_confirm" required autocomplete="new-password">
-              </div>
-              <div><button class="btn" type="submit">{t('btn.change_pw')}</button></div>
-            </form>
-          </div>
-
-          <div class="acc-sub">
             <b style="font-size:14px;">{t("settings.language")}</b>
             <form method="post" action="/settings/language" style="display:flex;flex-direction:column;gap:10px;max-width:300px;margin-top:10px;">
               <div>
@@ -7245,7 +7454,10 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 2. Urlaub -->
+    <!-- 2. Sicherheit -->
+    {_render_security_accordion(u, _totp_enabled)}
+
+    <!-- 3. Urlaub -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub')">
         <span>{t('settings.vac_section')} – {vac_year}</span><span class="acc-arr">▼</span>
@@ -7331,6 +7543,124 @@ function wizValidate(e){{
     return render_template_string(layout(t("settings.title"), body, u, APP_VERSION))
 
 
+@app.get("/settings/2fa/enable")
+@login_required
+def settings_2fa_enable():
+    bootstrap()
+    u = current_user()
+    import pyotp, io as _io, qrcode as _qr, base64 as _b64
+    secret = _generate_totp_secret()
+    session["pending_totp_secret"] = secret
+    totp_uri = pyotp.TOTP(secret).provisioning_uri(
+        name=u.get("email") or u.get("username") or "user",
+        issuer_name="Zeiterfassung",
+    )
+    qr_img = _qr.make(totp_uri)
+    buf = _io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    qr_b64 = _b64.b64encode(buf.getvalue()).decode()
+    body = f"""
+    {flash_html()}
+    <div class="card" style="max-width:480px;">
+      <h3>&#128274; {t('settings.enable_2fa')}</h3>
+      <p class="small" style="margin-bottom:12px;">{t('settings.totp_scan_hint')}</p>
+      <div style="margin-bottom:16px;">
+        <img src="data:image/png;base64,{qr_b64}" alt="QR Code"
+             style="width:200px;height:200px;border:1px solid var(--bd);border-radius:8px;">
+      </div>
+      <p class="small" style="color:var(--mu);margin-bottom:12px;word-break:break-all;">
+        {t('settings.totp_confirm_label')}: <code>{secret}</code>
+      </p>
+      <form method="post" action="/settings/2fa/enable">
+        <div style="margin-bottom:12px;">
+          <label>{t('settings.totp_confirm_label')}</label><br>
+          <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="6" style="font-size:18px;letter-spacing:4px;width:120px;" required autofocus>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn primary" type="submit">{t('settings.totp_activate_btn')}</button>
+          <a class="btn" href="/settings#acc-security">{t('btn.cancel')}</a>
+        </div>
+      </form>
+    </div>
+    """
+    return render_template_string(layout(t("settings.enable_2fa"), body, u, APP_VERSION))
+
+
+@app.post("/settings/2fa/enable")
+@login_required
+def settings_2fa_enable_post():
+    bootstrap()
+    u = current_user()
+    code = (request.form.get("code") or "").strip()
+    secret = session.get("pending_totp_secret")
+    if not secret:
+        add_flash(t("settings.totp_code_invalid"), "error")
+        return redirect("/settings/2fa/enable")
+
+    import pyotp, json as _j
+    if not pyotp.TOTP(secret).verify(code, valid_window=1):
+        add_flash(t("settings.totp_code_invalid"), "error")
+        return redirect("/settings/2fa/enable")
+
+    backup_codes = _generate_backup_codes()
+    secret_enc = _totp_encrypt(secret)
+    codes_enc = _totp_encrypt(_j.dumps(backup_codes))
+    set_totp(u["id"], secret_enc, codes_enc)
+    session.pop("pending_totp_secret", None)
+
+    codes_html = " ".join(f"<code style='margin:2px;padding:2px 6px;background:var(--sf);border:1px solid var(--bd);border-radius:4px;font-size:13px;'>{c}</code>" for c in backup_codes)
+    add_flash(t("settings.totp_enabled_ok"), "success")
+    body = f"""
+    {flash_html()}
+    <div class="card" style="max-width:480px;">
+      <h3>&#128274; {t('settings.backup_codes')}</h3>
+      <p style="color:var(--danger);font-weight:600;margin-bottom:10px;">&#9888; {t('settings.totp_save_codes')}</p>
+      <p class="small" style="margin-bottom:12px;">{t('settings.backup_codes_hint')}</p>
+      <div style="margin-bottom:16px;line-height:2;">{codes_html}</div>
+      <a class="btn primary" href="/settings#acc-security">{t('btn.save')}</a>
+    </div>
+    """
+    return render_template_string(layout(t("settings.backup_codes"), body, u, APP_VERSION))
+
+
+@app.post("/settings/2fa/disable")
+@login_required
+def settings_2fa_disable():
+    bootstrap()
+    u = current_user()
+    disable_totp(u["id"])
+    add_flash(t("settings.totp_disabled"), "success")
+    return redirect("/settings#acc-security")
+
+
+@app.post("/settings/2fa/backup-codes")
+@login_required
+def settings_2fa_backup_codes():
+    bootstrap()
+    u = current_user()
+    import json as _j
+    totp_row = get_totp_row(u["id"])
+    if not totp_row.get("totp_enabled"):
+        return redirect("/settings#acc-security")
+    new_codes = _generate_backup_codes()
+    codes_enc = _totp_encrypt(_j.dumps(new_codes))
+    update_totp_backup_codes(u["id"], codes_enc)
+    codes_html = " ".join(f"<code style='margin:2px;padding:2px 6px;background:var(--sf);border:1px solid var(--bd);border-radius:4px;font-size:13px;'>{c}</code>" for c in new_codes)
+    add_flash(t("settings.totp_codes_regenerated"), "success")
+    body = f"""
+    {flash_html()}
+    <div class="card" style="max-width:480px;">
+      <h3>&#128274; {t('settings.backup_codes')}</h3>
+      <p style="color:var(--danger);font-weight:600;margin-bottom:10px;">&#9888; {t('settings.totp_save_codes')}</p>
+      <p class="small" style="margin-bottom:12px;">{t('settings.backup_codes_hint')}</p>
+      <div style="margin-bottom:16px;line-height:2;">{codes_html}</div>
+      <a class="btn primary" href="/settings#acc-security">{t('btn.save')}</a>
+    </div>
+    """
+    return render_template_string(layout(t("settings.backup_codes"), body, u, APP_VERSION))
+
+
 @app.get("/settings/password")
 @login_required
 def settings_password():
@@ -7407,11 +7737,11 @@ def settings_telegram_save():
         db.execute("DELETE FROM telegram_users WHERE user_id=?", (u["id"],))
         db.commit()
         db.close()
-        add_flash("Telegram-ID entfernt.", "success")
+        add_flash(t("flash.success.telegram_removed"), "success")
         return redirect("/settings")
 
     if not raw.isdigit() or not (5 <= len(raw) <= 15):
-        add_flash("Ungültige Telegram-ID (nur Zahlen, 5–15 Stellen).", "error")
+        add_flash(t("flash.error.telegram_invalid"), "error")
         return redirect("/settings")
 
     tg_id = int(raw)
@@ -7422,7 +7752,7 @@ def settings_telegram_save():
             (tg_id, u["id"]),
         ).fetchone()
         if conflict:
-            add_flash("Diese Telegram-ID ist bereits vergeben.", "error")
+            add_flash(t("flash.error.telegram_taken"), "error")
             return redirect("/settings")
         db.execute(
             "INSERT OR REPLACE INTO telegram_users(telegram_id, user_id, created_at) VALUES(?,?,datetime('now'))",
@@ -7431,7 +7761,7 @@ def settings_telegram_save():
         db.commit()
     finally:
         db.close()
-    add_flash("Telegram-ID gespeichert.", "success")
+    add_flash(t("flash.success.telegram_saved"), "success")
     return redirect("/settings")
 
 
@@ -7448,7 +7778,7 @@ def settings_reminder_save():
     m = re.match(r"^(\d{2}):(\d{2})$", reminder_time)
     h, mi = int(m.group(1)), int(m.group(2))
     if not (15 <= h <= 23) or not (0 <= mi <= 59):
-        add_flash("Ungültige Uhrzeit. Erlaubter Bereich: 15:00 – 23:00.", "error")
+        add_flash(t("flash.error.reminder_time_invalid"), "error")
         return redirect("/settings")
 
     db = connect()
@@ -7457,7 +7787,7 @@ def settings_reminder_save():
             "SELECT telegram_id FROM telegram_users WHERE user_id=?", (u["id"],)
         ).fetchone()
         if not tg_row:
-            add_flash("Keine Telegram-ID hinterlegt. Bitte zuerst eine Telegram-ID speichern.", "error")
+            add_flash(t("flash.error.telegram_required"), "error")
             return redirect("/settings")
         db.execute(
             "UPDATE telegram_users SET wizard_enabled=?, reminder_time=? WHERE user_id=?",
@@ -7466,7 +7796,7 @@ def settings_reminder_save():
         db.commit()
     finally:
         db.close()
-    add_flash("Erinnerungseinstellungen gespeichert.", "success")
+    add_flash(t("flash.success.reminder_saved"), "success")
     return redirect("/settings")
 
 
@@ -7480,20 +7810,21 @@ def settings_password_post():
     new_password_confirm = (request.form.get("new_password_confirm") or "").strip()
 
     if not current_password:
-        add_flash("Bitte aktuelles Passwort angeben.", "error")
+        add_flash(t("flash.error.current_password_required"), "error")
         return redirect("/settings/password")
 
-    if not authenticate(u["username"], current_password):
-        add_flash("Aktuelles Passwort ist falsch.", "error")
+    _, _pw_err = authenticate(u["username"], current_password)
+    if _pw_err:
+        add_flash(t("settings.password_wrong"), "error")
         return redirect("/settings/password")
 
     errs = validate_password(new_password, u.get("username") or "")
     if errs:
-        add_flash("Passwort ungültig: " + "; ".join(errs), "error")
+        add_flash(t("flash.error.password_invalid").format(errors="; ".join(errs)), "error")
         return redirect("/settings/password")
 
     if new_password != new_password_confirm:
-        add_flash("Neues Passwort und Wiederholung stimmen nicht überein.", "error")
+        add_flash(t("settings.password_mismatch"), "error")
         return redirect("/settings/password")
 
     set_password(u["id"], new_password)
@@ -7516,7 +7847,7 @@ def settings_admin_only():
     )
     db.commit()
     db.close()
-    msg = "Zeiterfassung deaktiviert. Du siehst ab sofort nur den Admin-Bereich." if new_val else "Zeiterfassung aktiviert."
+    msg = t("flash.success.time_tracking_disabled") if new_val else t("flash.success.time_tracking_enabled")
     add_flash(msg, "success")
     return redirect("/settings")
 
@@ -7853,23 +8184,28 @@ def change_password():
     bootstrap()
     u = current_user()
     uname = _html.escape(u.get("username") or "")
+    not_compliant = not u.get("password_compliant") and not u.get("must_change_password")
+    hint = ""
+    if not_compliant:
+        hint = f'<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#92400e;">{t("settings.password_compliant_hint")}</div>'
     body = f"""
     {flash_html()}
     <div class="card" style="max-width:420px;">
-      <h3>Neues Passwort festlegen</h3>
-      <p class="small" style="margin-bottom:14px;">Bitte wähle ein neues Passwort. Du wirst danach automatisch weitergeleitet.</p>
+      <h3>{t("change_pw.title")}</h3>
+      {hint}
+      <p class="small" style="margin-bottom:14px;">{t("change_pw.info")}</p>
       <form method="post" action="/change-password">
         <div style="margin-bottom:10px;">
-          <label>Neues Passwort</label>
+          <label>{t("change_pw.new")}</label>
           <input type="password" name="new_password" id="cpw-inp" required autocomplete="new-password"
                  oninput="_pwUpdate('cpw-inp','cpw-chk','{uname}')">
           <div id="cpw-chk" style="margin-top:6px;padding:8px;background:var(--sf);border-radius:var(--rs);border:1px solid var(--bd);line-height:1.7;"></div>
         </div>
         <div style="margin-bottom:14px;">
-          <label>Passwort wiederholen</label>
+          <label>{t("change_pw.confirm")}</label>
           <input type="password" name="new_password_confirm" required autocomplete="new-password">
         </div>
-        <button class="btn primary" type="submit">Passwort speichern</button>
+        <button class="btn primary" type="submit">{t("change_pw.submit")}</button>
       </form>
     </div>
     {_PW_STRENGTH_JS}
@@ -7887,11 +8223,11 @@ def change_password_post():
 
     errs = validate_password(new_password, u.get("username") or "")
     if errs:
-        add_flash("Passwort ungültig: " + "; ".join(errs), "error")
+        add_flash(t("flash.error.password_invalid").format(errors="; ".join(errs)), "error")
         return redirect("/change-password")
 
     if new_password != new_password_confirm:
-        add_flash("Passwörter stimmen nicht überein.", "error")
+        add_flash(t("settings.password_mismatch"), "error")
         return redirect("/change-password")
 
     set_password(u["id"], new_password)
@@ -8002,11 +8338,11 @@ def settings_vacation_save():
         if entitlement < 0 or carryover < 0:
             raise ValueError()
     except Exception:
-        add_flash("Bitte gültige Werte (Tage) eingeben.", "error")
+        add_flash(t("flash.error.invalid_days"), "error")
         return redirect("/settings#urlaub")
 
     _set_vacation_year(u["id"], year, entitlement, carryover)
-    add_flash("Urlaubseinstellungen gespeichert.", "success")
+    add_flash(t("flash.success.vacation_saved"), "success")
     return redirect("/settings#urlaub")
 
 
@@ -8107,11 +8443,20 @@ def _get_backup_config() -> dict:
     return {r["key"]: r["value"] for r in rows}
 
 
-def _save_backup_config(enabled: bool, backup_time: str) -> None:
+def _save_backup_config(enabled: bool, backup_time: str,
+                        auto_encrypt_enabled: bool = False,
+                        auto_encrypt_password: str = "") -> None:
     db = connect()
     try:
         db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_backup_enabled',?,datetime('now'))", ("1" if enabled else "0",))
         db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_backup_time',?,datetime('now'))", (backup_time,))
+        db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_encrypt_enabled',?,datetime('now'))", ("1" if auto_encrypt_enabled else "0",))
+        if auto_encrypt_password:
+            from backup import encrypt_password as _enc_pw
+            _secret = app.secret_key
+            db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_encrypt_password',?,datetime('now'))", (_enc_pw(auto_encrypt_password, _secret),))
+        elif not auto_encrypt_enabled:
+            db.execute("INSERT OR REPLACE INTO backup_config(key,value,updated_at) VALUES('auto_encrypt_password',?,datetime('now'))", ("",))
         db.commit()
     finally:
         db.close()
@@ -8462,16 +8807,16 @@ def export_mail():
                 target_name = row["display_name"] or row["username"]
 
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_from):
-        add_flash("Ungültiges Von-Datum.", "error")
+        add_flash(t("flash.error.invalid_date_from"), "error")
         return redirect("/export")
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_to):
-        add_flash("Ungültiges Bis-Datum.", "error")
+        add_flash(t("flash.error.invalid_date_to"), "error")
         return redirect("/export")
     if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', recipient):
-        add_flash("Ungültige E-Mail-Adresse.", "error")
+        add_flash(t("flash.error.invalid_email"), "error")
         return redirect("/export")
     if date_from > date_to:
-        add_flash("Von-Datum muss vor Bis-Datum liegen.", "error")
+        add_flash(t("flash.error.date_range"), "error")
         return redirect("/export")
 
     # Clamp to user tracking start
@@ -8502,7 +8847,7 @@ def export_mail():
         fname_pfx = "zeitbloecke"
 
     if not data:
-        add_flash(f"Keine Daten für den Zeitraum {date_from} – {date_to}.", "error")
+        add_flash(t("flash.error.no_data_range").format(from_date=date_from, to_date=date_to), "error")
         return redirect("/export")
 
     attachment_name = f"{fname_pfx}_{target_name.lower().replace(' ','_')}_{date_from}_{date_to}.csv"
@@ -8524,9 +8869,9 @@ def export_mail():
 
     try:
         _send_mail(recipient, subject, body_text, attachment_name, csv_bytes)
-        add_flash(f"Export wurde an {recipient} gesendet.", "success")
+        add_flash(t("flash.success.export_sent").format(recipient=recipient), "success")
     except Exception as exc:
-        add_flash(f"E-Mail konnte nicht gesendet werden: {exc}", "error")
+        add_flash(t("flash.error.mail_fail_detail").format(error=exc), "error")
 
     return redirect("/export")
 
@@ -8541,7 +8886,7 @@ def settings_save():
 
     sched = _parse_sched_form(request.form)
     if not sched["valid_from"]:
-        add_flash("Bitte ein gültiges Datum (TT.MM.JJJJ) angeben.", "error")
+        add_flash(t("flash.error.date_format"), "error")
         return redirect("/settings")
 
     # Overlap check: warn if a newer schema exists that would override this one
@@ -8597,17 +8942,17 @@ def settings_schedule_delete(schedule_id: int):
     ).fetchone()
     if not row:
         db.close()
-        add_flash("Zeitschema nicht gefunden.", "error")
+        add_flash(t("flash.error.schedule_not_found"), "error")
         return redirect("/settings")
     count = db.execute("SELECT COUNT(*) FROM user_schedules WHERE user_id=?", (u["id"],)).fetchone()[0]
     if count <= 1:
         db.close()
-        add_flash("Das letzte Zeitschema kann nicht gelöscht werden.", "error")
+        add_flash(t("flash.error.schedule_last"), "error")
         return redirect("/settings")
     db.execute("DELETE FROM user_schedules WHERE id=?", (schedule_id,))
     db.commit()
     db.close()
-    add_flash(f"Zeitschema ab {_fmt_date_de(row['valid_from'])} gelöscht.", "success")
+    add_flash(t("flash.success.schedule_deleted").format(date=_fmt_date_de(row["valid_from"])), "success")
     return redirect("/settings")
 
 
@@ -8763,18 +9108,18 @@ def business_trips_add():
     year = (request.form.get("y") or str(datetime.date.today().year)).strip()
     destination = (request.form.get("destination") or "").strip()
     if not destination:
-        add_flash("Ort ist Pflichtfeld.", "error")
+        add_flash(t("flash.error.location_required"), "error")
         return redirect(f"/business_trips?y={year}&new=1")
     start_date = _parse_date_input(request.form.get("start_date") or "")
     if not start_date:
-        add_flash("Ungültiges Startdatum.", "error")
+        add_flash(t("flash.error.invalid_start_date"), "error")
         return redirect(f"/business_trips?y={year}&new=1")
     end_date_raw = (request.form.get("end_date") or "").strip()
     end_date = _parse_date_input(end_date_raw) if end_date_raw else start_date
     if end_date and end_date < start_date:
         end_date = start_date
     if _is_range_locked(u["id"], start_date, end_date or start_date):
-        add_flash(LOCK_MSG, "error")
+        add_flash(t("flash.error.period_locked"), "error")
         return redirect(f"/business_trips?y={year}&new=1")
     sd_err = _before_start_date(u["id"], start_date)
     if sd_err:
@@ -8824,7 +9169,7 @@ def business_trips_delete():
         ).fetchone()
         if trip and _is_range_locked(u["id"], trip["start_date"], trip["end_date"] or trip["start_date"]):
             db.close()
-            add_flash(LOCK_MSG, "error")
+            add_flash(t("flash.error.period_locked"), "error")
             return redirect(f"/business_trips?y={year}")
         db.execute("DELETE FROM business_trips WHERE id=? AND user_id=?", (int(trip_id), u["id"]))
         db.commit()
@@ -8989,29 +9334,29 @@ def periods_lock():
         month_raw = request.form.get("month") or ""
         month = int(month_raw) if month_raw.strip() else None
     except (ValueError, TypeError):
-        add_flash("Ungültige Eingabe.", "error")
+        add_flash(t("flash.invalid_input"), "error")
         return redirect("/periods")
 
     # Guard: cannot lock current or future month
     if month is not None:
         lockable = (year < today.year) or (year == today.year and month < today.month)
         if not lockable:
-            add_flash("Nur vergangene Monate können abgeschlossen werden.", "error")
+            add_flash(t("periods.past_months_only"), "error")
             return redirect(f"/periods?y={year}")
     else:
         if year >= today.year:
-            add_flash("Nur vergangene Jahre können als ganzes abgeschlossen werden.", "error")
+            add_flash(t("periods.past_years_only"), "error")
             return redirect(f"/periods?y={year}")
 
     user_start = _get_tracking_start(u["id"])
     if user_start and month:
         period_last_day = f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
         if period_last_day < user_start:
-            add_flash(f"Abschluss nicht möglich – Monat liegt vor Arbeitsbeginn ({_fmt_date_de(user_start)}).", "error")
+            add_flash(t("periods.before_start_err").format(date=_fmt_date_de(user_start)), "error")
             return redirect(f"/periods?y={year}")
     _lock_period(u["id"], year, month, locked_by=u["id"])
     label = f"{_t_month(month)} {year}" if month else f"{t('periods.whole_year')} {year}"
-    add_flash(f"{label} abgeschlossen.", "success")
+    add_flash(t("flash.success.period_closed").format(label=label), "success")
     return redirect(f"/periods?y={year}")
 
 
@@ -9027,12 +9372,12 @@ def periods_unlock():
         month_raw = request.form.get("month") or ""
         month = int(month_raw) if month_raw.strip() else None
     except (ValueError, TypeError):
-        add_flash("Ungültige Eingabe.", "error")
+        add_flash(t("flash.invalid_input"), "error")
         return redirect("/periods")
 
     _unlock_period(u["id"], year, month)
     label = f"{_t_month(month)} {year}" if month else f"{t('periods.whole_year')} {year}"
-    add_flash(f"{label} entsperrt.", "success")
+    add_flash(t("flash.success.period_unlocked").format(label=label), "success")
     return redirect(f"/periods?y={year}")
 
 
@@ -10663,7 +11008,7 @@ def admin_users_new_post():
         password = (request.form.get("password") or "").strip()
 
     if not username or not password:
-        add_flash("Bitte Username und Passwort angeben.", "error")
+        add_flash(t("flash.error.credentials_required"), "error")
         return redirect(url_for("admin_users_new"))
 
     try:
@@ -10676,7 +11021,7 @@ def admin_users_new_post():
             onboarding_done=0,
         )
     except Exception:
-        add_flash("Benutzer konnte nicht angelegt werden (evtl. Username bereits vorhanden).", "error")
+        add_flash(t("flash.error.user_create_failed"), "error")
         return redirect(url_for("admin_users_new"))
 
     # Set role, admin_only, must_change_password
@@ -10702,13 +11047,13 @@ def admin_users_new_post():
                     f"Benutzername: {username}\nTemporäres Passwort: {password}\n\n"
                     f"Bitte ändere das Passwort nach dem ersten Login.\n\nDein Zeiterfassung-Team",
                 )
-                add_flash(f"Benutzer angelegt und Zugangsdaten per Mail an {_html.escape(email)} gesendet.", "success")
+                add_flash(t("flash.success.user_created_mail").format(email=_html.escape(email)), "success")
             except Exception:
-                add_flash(f"Benutzer angelegt. Mail-Versand fehlgeschlagen. Temporäres Passwort: <b>{_html.escape(password)}</b>", "success")
+                add_flash(t("flash.success.user_created_mail_failed").format(password=_html.escape(password)), "success")
         else:
-            add_flash(f"Benutzer angelegt (keine E-Mail). Temporäres Passwort: <b>{_html.escape(password)}</b>", "success")
+            add_flash(t("flash.success.user_created_noemail").format(password=_html.escape(password)), "success")
     else:
-        add_flash("Benutzer angelegt. Der Nutzer wird beim Login durch den Einrichtungs-Wizard geführt.", "success")
+        add_flash(t("flash.success.user_created"), "success")
     return redirect("/admin#acc-user")
 
 
@@ -10915,7 +11260,7 @@ def admin_users_edit_post(user_id: int):
             db.close()
             if (target_is_sysadmin and target_is_sysadmin["admin_role"] == "sysadmin"
                     and sysadmin_count <= 1):
-                add_flash("Letzter Systemadmin kann nicht degradiert werden.", "error")
+                add_flash(t("flash.error.last_sysadmin"), "error")
                 return redirect(f"/admin/users/{user_id}/edit")
         set_admin_role(user_id, new_role)
 
@@ -10982,7 +11327,7 @@ def admin_users_delete(user_id: int):
     u = current_user()
 
     if user_id == u["id"]:
-        add_flash("Eigener Account kann nicht gelöscht werden.", "error")
+        add_flash(t("admin.cant_delete_own"), "error")
         return redirect(url_for("admin_users"))
 
     db = connect()
@@ -10998,14 +11343,14 @@ def admin_users_delete(user_id: int):
         admin_count = db.execute("SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1").fetchone()[0]
         if admin_count <= 1:
             db.close()
-            add_flash("Letzter Admin-Account kann nicht gelöscht werden.", "error")
+            add_flash(t("flash.error.last_admin"), "error")
             return redirect(url_for("admin_users"))
 
     display = target["display_name"] or target["username"]
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.commit()
     db.close()
-    add_flash(f"Benutzer '{display}' und alle zugehörigen Daten wurden gelöscht.", "success")
+    add_flash(t("flash.success.user_deleted").format(name=display), "success")
     return redirect(url_for("admin_users"))
 
 
@@ -11025,7 +11370,7 @@ def admin_users_reset_password(user_id: int):
 
     # Timemanagers may not reset sysadmin passwords
     if not is_sysadmin(u) and target["admin_role"] == "sysadmin":
-        add_flash("Kein Zugriff: Systemadmin-Passwort kann nur von einem Systemadmin zurückgesetzt werden.", "error")
+        add_flash(t("flash.error.sysadmin_pw_reset"), "error")
         return redirect("/admin")
 
     new_pw = _generate_password()
@@ -11050,15 +11395,20 @@ def admin_users_reset_password(user_id: int):
             mail_sent = False
 
     if mail_sent:
-        add_flash(f"Passwort für {display} zurückgesetzt und per Mail an {_html.escape(email)} gesendet.", "success")
+        add_flash(t("flash.success.pw_reset_mail").format(name=display, email=_html.escape(email)), "success")
     else:
-        add_flash(
-            f"Passwort für {display} zurückgesetzt. "
-            f"{'Keine E-Mail hinterlegt – ' if not email else 'Mail-Versand fehlgeschlagen – '}"
-            f"Temporäres Passwort: <b>{_html.escape(new_pw)}</b>",
-            "success",
-        )
+        _reason = t("flash.success.pw_reset_no_email_reason") if not email else t("flash.success.pw_reset_fail_reason")
+        add_flash(t("flash.success.pw_reset_nomail").format(name=display, reason=_reason, password=_html.escape(new_pw)), "success")
     return redirect(f"/admin/users/{user_id}/edit")
+
+
+@app.post("/admin/users/<int:user_id>/unlock")
+@timemanager_required
+def admin_users_unlock(user_id: int):
+    bootstrap()
+    unlock_account(user_id)
+    add_flash(t("auth.unlocked"), "success")
+    return redirect("/admin")
 
 
 @app.get("/admin/users/<int:user_id>/vacation-carryover")
@@ -11177,10 +11527,10 @@ def admin_vacation_carryover_post(user_id: int):
             comment = (request.form.get("comment") or "").strip()
             _upsert_vacation_carryover_override(user_id, year, carryover_days, valid_until, comment)
         except (ValueError, TypeError):
-            add_flash("Ungültige Eingabe bei Übertragstagen.", "error")
+            add_flash(t("flash.error.invalid_carryover"), "error")
             return redirect(url_for("admin_vacation_carryover", user_id=user_id))
 
-    add_flash("Urlaubsübertrag-Ausnahme gespeichert.", "success")
+    add_flash(t("flash.success.carryover_saved"), "success")
     return redirect(url_for("admin_vacation_carryover", user_id=user_id))
 
 
@@ -11189,7 +11539,7 @@ def admin_vacation_carryover_post(user_id: int):
 def admin_vacation_carryover_delete(user_id: int, year: int):
     bootstrap()
     _delete_vacation_carryover_override(user_id, year)
-    add_flash(f"Übertrag-Ausnahme für {year} gelöscht.", "success")
+    add_flash(t("flash.success.carryover_deleted").format(year=year), "success")
     return redirect(url_for("admin_vacation_carryover", user_id=user_id))
 
 
@@ -11206,10 +11556,10 @@ def admin_impersonate(user_id: int):
     if not target:
         abort(404)
     if target["is_admin"]:
-        add_flash("Admin-Identität kann nicht angenommen werden.", "error")
+        add_flash(t("flash.error.impersonate_admin"), "error")
         return redirect(url_for("admin"))
     if not target["is_active"]:
-        add_flash("Inaktive Benutzer können nicht angenommen werden.", "error")
+        add_flash(t("flash.error.impersonate_inactive"), "error")
         return redirect(url_for("admin"))
     session["impersonator_id"] = u["id"]
     session["user_id"] = user_id
@@ -11285,7 +11635,7 @@ def admin_schedule_edit_post(user_id: int, schedule_id: str):
 
     sched = _parse_sched_form(request.form)
     if not sched["valid_from"]:
-        add_flash("Bitte ein gültiges Datum angeben.", "error")
+        add_flash(t("flash.error.invalid_date"), "error")
         return redirect(f"/admin/schedule/{user_id}/edit/{schedule_id}")
 
     # When editing an existing entry, delete the old row first (handles valid_from changes)
@@ -11300,7 +11650,7 @@ def admin_schedule_edit_post(user_id: int, schedule_id: str):
             pass
 
     _sched_save_to_db(user_id, sched)
-    add_flash(f"Zeitschema ab {_fmt_date_de(sched['valid_from'])} gespeichert.", "success")
+    add_flash(t("flash.success.schedule_saved").format(date=_fmt_date_de(sched["valid_from"])), "success")
     return redirect(f"/admin/users/{user_id}/edit")
 
 
@@ -11316,9 +11666,9 @@ def admin_schedule_delete(user_id: int, schedule_id: int):
     if row:
         db.execute("DELETE FROM user_schedules WHERE id=?", (schedule_id,))
         db.commit()
-        add_flash(f"Zeitschema ab {_fmt_date_de(row['valid_from'])} gelöscht.", "success")
+        add_flash(t("flash.success.schedule_deleted").format(date=_fmt_date_de(row["valid_from"])), "success")
     else:
-        add_flash("Zeitschema nicht gefunden.", "error")
+        add_flash(t("flash.error.schedule_not_found"), "error")
     db.close()
     return redirect(f"/admin/users/{user_id}/edit")
 
@@ -11419,7 +11769,7 @@ def admin_periods_unlock():
         target_uid = int(request.form.get("target_user_id") or 0)
         year = int(request.form.get("year") or 0)
     except (ValueError, TypeError):
-        add_flash("Ungültige Eingabe.", "error")
+        add_flash(t("flash.invalid_input"), "error")
         return redirect("/admin/periods")
 
     db = connect()
@@ -11428,7 +11778,7 @@ def admin_periods_unlock():
         db.commit()
     finally:
         db.close()
-    add_flash(f"Alle Abschlüsse für Jahr {year} entsperrt.", "success")
+    add_flash(t("flash.success.year_unlocked").format(year=year), "success")
     return redirect(f"/admin?y={year}#acc-abschl")
 
 
@@ -11450,7 +11800,7 @@ def admin_home():
     all_users = db.execute(
         "SELECT id, username, display_name, is_admin, is_active, admin_role, "
         "vacation_carryover_exception, contouring_enabled, created_at, holiday_region, "
-        "email, admin_only FROM users ORDER BY username"
+        "email, admin_only, login_locked_until, login_attempts FROM users ORDER BY username"
     ).fetchall()
     locks_raw = db.execute(
         "SELECT pl.*, u.username AS locked_by_name FROM period_locks pl "
@@ -11497,6 +11847,17 @@ def admin_home():
         bl_badge = (f" <span class='small' style='color:var(--mu);'>📍 {_html.escape(_bl_label)}</span>"
                     if _hr and _bl_label else "")
 
+        # Locked badge
+        _locked_until_str = r["login_locked_until"] if r["login_locked_until"] else ""
+        _is_locked = False
+        if _locked_until_str:
+            try:
+                _is_locked = datetime.datetime.fromisoformat(_locked_until_str) > datetime.datetime.now()
+            except Exception:
+                pass
+        locked_badge = (f" <span class='small' style='color:var(--danger);font-weight:600;'>🔒 {t('auth.too_many_attempts')}</span>"
+                        if _is_locked else "")
+
         # delete / impersonate buttons (sysadmin only for delete)
         del_btn = ""
         if _is_sysadm and uid != u["id"]:
@@ -11512,13 +11873,19 @@ def admin_home():
                 f'<form method="post" action="/admin/impersonate/{uid}" style="display:contents;">'
                 f'<button class="btn btn-sm" type="submit">{t("admin.identity_btn")}</button></form>'
             )
+        unlock_btn = ""
+        if _is_locked:
+            unlock_btn = (
+                f'<form method="post" action="/admin/users/{uid}/unlock" style="display:contents;">'
+                f'<button class="btn btn-sm" type="submit" style="color:var(--danger);">&#128275; {t("auth.admin_unlock_btn")}</button></form>'
+            )
         user_trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}{bl_badge}</td>'
+            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}{bl_badge}{locked_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
             f'<td><div style="display:flex;gap:4px;flex-wrap:wrap;">'
             f'<a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("btn.edit")}</a>'
-            f'{imp_btn}{del_btn}</div></td>'
+            f'{imp_btn}{unlock_btn}{del_btn}</div></td>'
             f'</tr>'
         )
 
@@ -11537,11 +11904,17 @@ def admin_home():
                 f'<form method="post" action="/admin/impersonate/{uid}" style="display:contents;">'
                 f'<button class="btn btn-sm" type="submit" title="{t("admin.identity_btn")}">{t("admin.identity_btn")}</button></form>'
             )
+        unlock_tm_btn = ""
+        if _is_locked and uid != u["id"]:
+            unlock_tm_btn = (
+                f'<form method="post" action="/admin/users/{uid}/unlock" style="display:contents;">'
+                f'<button class="btn btn-sm" type="submit" style="color:var(--danger);">&#128275; {t("auth.admin_unlock_btn")}</button></form>'
+            )
         tm_user_trs += (
             f'<tr>'
-            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}</td>'
+            f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}{locked_badge}</td>'
             f'<td>{email_html}</td>'
-            f'<td style="white-space:nowrap;"><div style="display:flex;gap:4px;flex-wrap:wrap;">{imp_tm_btn}{pw_reset_btn}</div></td>'
+            f'<td style="white-space:nowrap;"><div style="display:flex;gap:4px;flex-wrap:wrap;">{imp_tm_btn}{unlock_tm_btn}{pw_reset_btn}</div></td>'
             f'</tr>'
         )
 
@@ -11944,6 +12317,9 @@ def _render_backup_section() -> str:
     auto_on = cfg.get("auto_backup_enabled", "0") == "1"
     auto_time = cfg.get("auto_backup_time") or "02:00"
     auto_checked = "checked" if auto_on else ""
+    auto_enc_on = cfg.get("auto_encrypt_enabled", "0") == "1"
+    auto_enc_checked = "checked" if auto_enc_on else ""
+    auto_enc_pw_set = bool(cfg.get("auto_encrypt_password", ""))
 
     # Local full backups list
     backups = list_local_backups()
@@ -11952,11 +12328,12 @@ def _render_backup_section() -> str:
         safe = b["name"].replace("'", "\\'")
         mtime_str = b["mtime"].strftime("%d.%m.%Y %H:%M")
         size_str = _fmt_backup_size(b["size"])
+        enc_badge = " <span style='font-size:10px;color:#6366f1;font-weight:600;'>🔒</span>" if b.get("encrypted") else ""
         backup_rows += (
             f"<tr>"
             f"<td style='font-size:12px;'>{mtime_str}</td>"
             f"<td style='font-size:12px;'>{size_str}</td>"
-            f"<td style='font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mu);'>{b['name']}</td>"
+            f"<td style='font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mu);'>{b['name']}{enc_badge}</td>"
             f"<td style='white-space:nowrap;'>"
             f"<a class='btn btn-sm' href='/admin/backup/local/{b['name']}'>&#11123;</a>"
             f"<form method='post' action='/admin/backup/delete/{b['name']}' style='display:inline;margin-left:4px;'"
@@ -11983,6 +12360,7 @@ def _render_backup_section() -> str:
         for u in _all_users
     )
 
+    _auto_enc_pw_hint = f" <span style='color:var(--mu);font-size:11px;'>({t('settings.saved')})</span>" if auto_enc_pw_set else ""
     _restore_confirm = t('admin.backup_restore_confirm')
     return f"""
     <div class="acc" id="acc-backup">
@@ -11995,12 +12373,39 @@ def _render_backup_section() -> str:
           <!-- ── 1. Vollständiges Backup ── -->
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_full_title')}</div>
           <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_full_hint')}</p>
-          <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
-            <a class="btn primary btn-sm" href="/admin/backup/download">&#11015; {t('admin.backup_download_btn')}</a>
-            <div class="small" style="color:var(--mu);padding-top:5px;">
-              {t('admin.backup_last') + " <b>" + last_ts + "</b>" if last_ts else t('admin.backup_none')}
+
+          <!-- Download-Formular mit optionaler Verschlüsselung -->
+          <form method="post" action="/admin/backup/download" style="margin-bottom:12px;">
+            <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:8px;">
+              <div>
+                <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
+                  <input type="checkbox" id="dl-enc-toggle" name="encrypt" value="1"
+                         onchange="bkDlToggle()"> {t('backup.encrypt')}
+                </label>
+              </div>
+              <div class="small" style="color:var(--mu);padding-top:3px;">
+                {t('admin.backup_last') + " <b>" + last_ts + "</b>" if last_ts else t('admin.backup_none')}
+              </div>
             </div>
-          </div>
+            <div id="dl-enc-fields" style="display:none;margin-bottom:8px;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;">
+              <p class="small" style="color:#6366f1;margin-bottom:8px;">&#128274; {t('backup.encrypt_hint')}</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <div>
+                  <label style="font-size:12px;">{t('backup.password')}</label><br>
+                  <input type="password" name="password" id="dl-enc-pw" autocomplete="new-password"
+                         style="font-size:13px;padding:4px 8px;width:180px;">
+                </div>
+                <div>
+                  <label style="font-size:12px;">{t('backup.password_confirm')}</label><br>
+                  <input type="password" name="password_confirm" id="dl-enc-pw2" autocomplete="new-password"
+                         style="font-size:13px;padding:4px 8px;width:180px;">
+                </div>
+              </div>
+            </div>
+            <button class="btn primary btn-sm" type="submit">&#11015; {t('admin.backup_download_btn')}</button>
+          </form>
+
+          <!-- Auto-Backup + Auto-Verschlüsselung -->
           <form method="post" action="/admin/backup/auto-config" style="margin-bottom:12px;">
             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
               <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
@@ -12010,24 +12415,56 @@ def _render_backup_section() -> str:
                 <label style="font-size:12px;">{t('common.time')}</label>
                 <input type="time" name="auto_time" value="{auto_time}" style="font-size:13px;padding:4px 8px;width:110px;">
               </div>
+            </div>
+            <div style="margin-top:8px;">
+              <label style="font-size:13px;font-weight:400;display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="auto-enc-toggle" name="auto_encrypt_enabled" value="1"
+                       {auto_enc_checked} onchange="autoEncToggle()"> {t('backup.auto_encrypt')}
+              </label>
+            </div>
+            <div id="auto-enc-fields" style="display:{'block' if auto_enc_on else 'none'};margin-top:8px;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <div>
+                  <label style="font-size:12px;">{t('backup.auto_encrypt_password')}{_auto_enc_pw_hint}</label><br>
+                  <input type="password" name="auto_encrypt_password" autocomplete="new-password"
+                         placeholder="{'••••••••' if auto_enc_pw_set else ''}"
+                         style="font-size:13px;padding:4px 8px;width:180px;">
+                </div>
+                <div>
+                  <label style="font-size:12px;">{t('backup.password_confirm')}</label><br>
+                  <input type="password" name="auto_encrypt_password_confirm" autocomplete="new-password"
+                         style="font-size:13px;padding:4px 8px;width:180px;">
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:8px;">
               <button class="btn btn-sm" type="submit">{t('btn.save')}</button>
             </div>
             <p class="small" style="margin-top:6px;color:var(--mu);">{t('admin.backup_keep_hint')}</p>
           </form>
 
+          <!-- Restore -->
           <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_restore_title')}</div>
           <form method="post" action="/admin/backup/restore" enctype="multipart/form-data"
-                onsubmit="return confirm('{_restore_confirm}');">
+                onsubmit="return confirm('{_restore_confirm}');" id="restore-form">
             <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:6px;">
               <div>
-                <label style="font-size:12px;">{t('admin.backup_file_label')}</label>
-                <input type="file" name="backup_file" accept=".db,.db.gz,.gz" required style="font-size:13px;">
+                <label style="font-size:12px;">{t('admin.backup_file_label')} / {t('backup.encrypted_file')}</label>
+                <input type="file" name="backup_file" accept=".db,.db.gz,.gz,.enc"
+                       required style="font-size:13px;display:block;margin-top:2px;"
+                       onchange="restoreEncDetect(this)">
               </div>
               <button class="btn danger btn-sm" type="submit">&#11014; {t('btn.import')}</button>
+            </div>
+            <div id="restore-enc-field" style="display:none;margin-bottom:6px;">
+              <label style="font-size:12px;">&#128274; {t('backup.password')}</label><br>
+              <input type="password" name="enc_password" id="restore-enc-pw"
+                     style="font-size:13px;padding:4px 8px;width:200px;" autocomplete="current-password">
             </div>
           </form>
           <p class="small" style="color:var(--mu);margin-bottom:12px;">{t('admin.backup_restore_hint')}</p>
 
+          <!-- Lokale Backups Liste -->
           <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_local_title')} ({len(backups)})</div>
           <div class="table-scroll" style="margin-bottom:0;">
             <table>
@@ -12097,6 +12534,23 @@ def _render_backup_section() -> str:
       </div>
     </div>
 <script>
+function bkDlToggle(){{
+  var on=document.getElementById('dl-enc-toggle').checked;
+  document.getElementById('dl-enc-fields').style.display=on?'block':'none';
+  var pw=document.getElementById('dl-enc-pw');
+  if(pw) pw.required=on;
+}}
+function autoEncToggle(){{
+  var on=document.getElementById('auto-enc-toggle').checked;
+  document.getElementById('auto-enc-fields').style.display=on?'block':'none';
+}}
+function restoreEncDetect(inp){{
+  var fname=(inp.value||'').toLowerCase();
+  var isEnc=fname.endsWith('.enc');
+  document.getElementById('restore-enc-field').style.display=isEnc?'block':'none';
+  var pw=document.getElementById('restore-enc-pw');
+  if(pw) pw.required=isEnc;
+}}
 function userImportPreview(){{
   var fi=document.getElementById('user-import-file');
   if(!fi||!fi.files||!fi.files[0]){{alert('Bitte zuerst eine Datei auswählen.');return;}}
@@ -12140,17 +12594,39 @@ function _esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 </script>"""
 
 
-@app.get("/admin/backup/download")
+@app.post("/admin/backup/download")
 @sysadmin_required
 def admin_backup_download():
     bootstrap()
-    from backup import create_backup_gz
+    from backup import create_backup_gz, encrypt_backup
     import io as _io
+
+    encrypt = bool(request.form.get("encrypt"))
+    password = (request.form.get("password") or "").strip()
+    password_confirm = (request.form.get("password_confirm") or "").strip()
+
+    if encrypt:
+        if not password:
+            add_flash(t("flash.error.backup_password_required"), "error")
+            return redirect("/admin#acc-backup")
+        if password != password_confirm:
+            add_flash(t("backup.password_mismatch"), "error")
+            return redirect("/admin#acc-backup")
+
     buf, fname = create_backup_gz()
     _record_last_backup()
+    raw = buf.getvalue()
+
+    if encrypt:
+        raw = encrypt_backup(raw, password)
+        fname = fname + ".enc"
+        mimetype = "application/octet-stream"
+    else:
+        mimetype = "application/gzip"
+
     return send_file(
-        buf,
-        mimetype="application/gzip",
+        _io.BytesIO(raw),
+        mimetype=mimetype,
         as_attachment=True,
         download_name=fname,
     )
@@ -12160,29 +12636,45 @@ def admin_backup_download():
 @sysadmin_required
 def admin_backup_restore():
     bootstrap()
-    from backup import restore_from_bytes
+    from backup import restore_from_bytes, decrypt_backup
     import threading
 
     f = request.files.get("backup_file")
     if not f or not f.filename:
-        add_flash("Keine Datei ausgewählt.", "error")
+        add_flash(t("flash.error.no_file"), "error")
         return redirect("/admin#acc-backup")
 
     fname = f.filename.lower()
-    if not (fname.endswith(".db") or fname.endswith(".db.gz") or fname.endswith(".gz")):
-        add_flash("Nur .db oder .db.gz Dateien erlaubt.", "error")
+    is_enc = fname.endswith(".enc")
+    base_fname = fname[:-4] if is_enc else fname
+
+    if not (base_fname.endswith(".db") or base_fname.endswith(".db.gz") or base_fname.endswith(".gz")):
+        add_flash(t("flash.error.invalid_db_file"), "error")
         return redirect("/admin#acc-backup")
 
-    is_gz = fname.endswith(".gz")
     data = f.read()
+
+    if is_enc:
+        password = (request.form.get("enc_password") or "").strip()
+        if not password:
+            add_flash(t("flash.error.backup_password_required"), "error")
+            return redirect("/admin#acc-backup")
+        try:
+            data = decrypt_backup(data, password)
+        except Exception:
+            add_flash(t("backup.wrong_password"), "error")
+            return redirect("/admin#acc-backup")
+        base_fname = fname[:-4]
+
+    is_gz = base_fname.endswith(".gz")
 
     try:
         pre_path = restore_from_bytes(data, is_gz)
     except Exception as e:
-        add_flash(f"Restore fehlgeschlagen: {e}", "error")
+        add_flash(t("flash.error.restore_failed").format(error=e), "error")
         return redirect("/admin#acc-backup")
 
-    add_flash("Datenbank wiederhergestellt. Service wird neu gestartet …", "success")
+    add_flash(t("flash.success.restore_done"), "success")
 
     def _restart():
         import time, os
@@ -12198,12 +12690,18 @@ def admin_backup_restore():
 def admin_backup_auto_config():
     bootstrap()
     enabled = bool(request.form.get("auto_enabled"))
-    t = (request.form.get("auto_time") or "02:00").strip()
+    _t = (request.form.get("auto_time") or "02:00").strip()
     import re as _re
-    if not _re.match(r"^\d{2}:\d{2}$", t):
-        t = "02:00"
-    _save_backup_config(enabled, t)
-    add_flash("Backup-Einstellungen gespeichert.", "success")
+    if not _re.match(r"^\d{2}:\d{2}$", _t):
+        _t = "02:00"
+    auto_enc = bool(request.form.get("auto_encrypt_enabled"))
+    auto_enc_pw = (request.form.get("auto_encrypt_password") or "").strip()
+    auto_enc_pw_confirm = (request.form.get("auto_encrypt_password_confirm") or "").strip()
+    if auto_enc and auto_enc_pw and auto_enc_pw != auto_enc_pw_confirm:
+        add_flash(t("backup.password_mismatch"), "error")
+        return redirect("/admin#acc-backup")
+    _save_backup_config(enabled, _t, auto_enc, auto_enc_pw)
+    add_flash(t("settings.saved"), "success")
     return redirect("/admin#acc-backup")
 
 
@@ -12213,12 +12711,13 @@ def admin_backup_download_local(filename: str):
     bootstrap()
     from backup import BACKUPS_DIR
     import re as _re
-    if not _re.match(r'^[\w\-\.]+\.db\.gz$', filename):
+    if not _re.match(r'^[\w\-\.]+\.db\.gz(\.enc)?$', filename):
         abort(400)
     path = BACKUPS_DIR / filename
     if not path.exists():
         abort(404)
-    return send_file(str(path), mimetype="application/gzip", as_attachment=True, download_name=filename)
+    mimetype = "application/octet-stream" if filename.endswith(".enc") else "application/gzip"
+    return send_file(str(path), mimetype=mimetype, as_attachment=True, download_name=filename)
 
 
 @app.post("/admin/backup/delete/<filename>")
@@ -12227,14 +12726,14 @@ def admin_backup_delete(filename: str):
     bootstrap()
     from backup import BACKUPS_DIR
     import re as _re
-    if not _re.match(r'^[\w\-\.]+\.db\.gz$', filename):
+    if not _re.match(r'^[\w\-\.]+\.db\.gz(\.enc)?$', filename):
         abort(400)
     path = BACKUPS_DIR / filename
     if path.exists():
         path.unlink()
-        add_flash(f"Backup {filename} gelöscht.", "success")
+        add_flash(t("flash.success.backup_deleted").format(filename=filename), "success")
     else:
-        add_flash("Datei nicht gefunden.", "error")
+        add_flash(t("flash.error.file_not_found"), "error")
     return redirect("/admin#acc-backup")
 
 
@@ -12260,20 +12759,16 @@ def admin_backup_settings_import():
     from backup import import_settings
     f = request.files.get("settings_file")
     if not f or not f.filename:
-        add_flash("Keine Datei ausgewählt.", "error")
+        add_flash(t("flash.error.no_file"), "error")
         return redirect("/admin#acc-backup")
     if not f.filename.lower().endswith(".json"):
-        add_flash("Nur .json Dateien erlaubt.", "error")
+        add_flash(t("flash.error.invalid_json_file"), "error")
         return redirect("/admin#acc-backup")
     try:
         counts = import_settings(f.read())
-        add_flash(
-            f"Einstellungen importiert: {counts['mail']} Mail-Werte, {counts['bot']} Bot-Werte. "
-            "Passwörter müssen ggf. neu gesetzt werden.",
-            "success",
-        )
+        add_flash(t("flash.success.settings_imported").format(mail=counts["mail"], bot=counts["bot"]), "success")
     except Exception as e:
-        add_flash(f"Import fehlgeschlagen: {e}", "error")
+        add_flash(t("flash.error.import_failed").format(error=e), "error")
     return redirect("/admin#acc-backup")
 
 
@@ -12307,31 +12802,35 @@ def admin_backup_user_import():
     from backup import import_user_data
     f = request.files.get("user_file")
     if not f or not f.filename:
-        add_flash("Keine Datei ausgewählt.", "error")
+        add_flash(t("flash.error.no_file"), "error")
         return redirect("/admin#acc-backup")
     if not f.filename.lower().endswith(".json"):
-        add_flash("Nur .json Dateien erlaubt.", "error")
+        add_flash(t("flash.error.invalid_json_file"), "error")
         return redirect("/admin#acc-backup")
     target_raw = (request.form.get("target_uid") or "").strip()
     if not target_raw:
-        add_flash("Kein Ziel-Benutzer ausgewählt.", "error")
+        add_flash(t("flash.error.no_target_user"), "error")
         return redirect("/admin#acc-backup")
     try:
         target_uid = int(target_raw)
     except ValueError:
-        add_flash("Ungültiger Ziel-Benutzer.", "error")
+        add_flash(t("flash.error.invalid_target_user"), "error")
         return redirect("/admin#acc-backup")
     try:
         s = import_user_data(f.read(), target_uid)
+        _skipped_str = t("flash.success.user_imported_skipped").format(count=s["skipped"]) if s["skipped"] else ""
         add_flash(
-            f"Import abgeschlossen: {s['time_blocks']} Zeitblöcke, "
-            f"{s['absences']} Abwesenheiten, {s['business_trips']} Dienstreisen, "
-            f"{s['schedules']} Zeitschemas importiert"
-            + (f" · {s['skipped']} Duplikate übersprungen" if s["skipped"] else "") + ".",
+            t("flash.success.user_imported").format(
+                time_blocks=s["time_blocks"],
+                absences=s["absences"],
+                trips=s["business_trips"],
+                schedules=s["schedules"],
+                skipped=_skipped_str,
+            ),
             "success",
         )
     except Exception as e:
-        add_flash(f"Import fehlgeschlagen: {e}", "error")
+        add_flash(t("flash.error.import_failed").format(error=e), "error")
     return redirect("/admin#acc-backup")
 
 
@@ -12531,7 +13030,7 @@ def admin_bot_config_save():
     if not api:
         api = cfg.get("anthropic_api_key") or ""
     _save_bot_config(tok, api, ids)
-    add_flash("Bot-Konfiguration gespeichert. Bot neu starten, damit Änderungen aktiv werden.", "success")
+    add_flash(t("flash.success.bot_saved"), "success")
     return redirect("/admin#acc-bot")
 
 
@@ -12548,9 +13047,9 @@ def admin_bot_control():
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode == 0:
-        add_flash(f"Bot-Service: {action} erfolgreich.", "success")
+        add_flash(t("flash.success.bot_action").format(action=action), "success")
     else:
-        add_flash(f"Fehler: {r.stderr.strip() or r.stdout.strip()}", "error")
+        add_flash(t("flash.error.general_detail").format(detail=r.stderr.strip() or r.stdout.strip()), "error")
     return redirect("/admin#acc-bot")
 
 
@@ -12579,9 +13078,9 @@ WantedBy=multi-user.target
             f.write(svc)
         subprocess.run(["systemctl", "daemon-reload"], timeout=10)
         subprocess.run(["systemctl", "enable", "--now", "zeiterfassung-bot"], timeout=15)
-        add_flash("Bot-Service eingerichtet und gestartet.", "success")
+        add_flash(t("flash.success.bot_setup"), "success")
     except Exception as e:
-        add_flash(f"Fehler beim Einrichten: {e}", "error")
+        add_flash(t("flash.error.setup_failed").format(error=e), "error")
     return redirect("/admin#acc-bot")
 
 
@@ -12605,9 +13104,9 @@ def admin_update_run():
     success, lines = _run_update()
     output = "\n".join(lines)
     if success:
-        add_flash(f"Update erfolgreich. Neu starten…\n{output}", "success")
+        add_flash(t("flash.success.update_done").format(output=output), "success")
     else:
-        add_flash(f"Update fehlgeschlagen:\n{output}", "error")
+        add_flash(t("flash.error.update_failed").format(output=output), "error")
 
     def _restart():
         import time
@@ -12703,7 +13202,7 @@ def admin_mail_settings_save():
     mail_from     = (request.form.get("mail_from") or "").strip()
 
     if not mail_server or not mail_username:
-        add_flash("Mailserver und Benutzername sind Pflichtfelder.", "error")
+        add_flash(t("flash.error.smtp_required"), "error")
         return redirect("/admin/mail-settings")
 
     # If no new password entered, persist the currently-effective password to DB
@@ -12722,7 +13221,7 @@ def admin_mail_settings_test():
     bootstrap()
     recipient = (request.form.get("test_recipient") or "").strip()
     if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', recipient):
-        add_flash("Ungültige E-Mail-Adresse.", "error")
+        add_flash(t("flash.error.invalid_email"), "error")
         return redirect("/admin/mail-settings")
     try:
         _send_mail(
@@ -12732,9 +13231,9 @@ def admin_mail_settings_test():
             attachment_name="test.csv",
             attachment_bytes=_build_csv_bytes(["test"], [["OK"]]),
         )
-        add_flash(f"Test-Mail erfolgreich gesendet an {recipient}.", "success")
+        add_flash(t("flash.success.smtp_test").format(recipient=recipient), "success")
     except Exception as exc:
-        add_flash(f"Fehler beim Senden: {exc}", "error")
+        add_flash(t("flash.error.smtp_fail").format(error=exc), "error")
     return redirect("/admin#acc-mail")
 
 
@@ -13237,7 +13736,7 @@ def admin_overtime_save():
         db.commit()
     finally:
         db.close()
-    add_flash("Gleitzeitkonto-Limits gespeichert.", "success")
+    add_flash(t("flash.success.ot_limits_saved"), "success")
     return redirect("/admin#acc-overtime")
 
 
@@ -13272,7 +13771,7 @@ def admin_overtime_save_defaults():
     from flask import g as _g
     if hasattr(_g, "_app_config_cache"):
         del _g._app_config_cache
-    add_flash("Standard-Limits gespeichert.", "success")
+    add_flash(t("flash.success.ot_defaults_saved"), "success")
     return redirect("/admin#acc-overtime-defaults")
 
 
@@ -13282,11 +13781,11 @@ def admin_overtime_check():
     bootstrap()
     sent, errors = _run_overtime_notifications()
     if sent:
-        add_flash(f"Benachrichtigungen gesendet: {sent}.", "success")
+        add_flash(t("flash.success.ot_notify_sent").format(count=sent), "success")
     if errors:
-        add_flash(f"Fehler bei {errors} Empfänger(n). Maileinstellungen prüfen.", "error")
+        add_flash(t("flash.error.ot_notify_failed").format(count=errors), "error")
     if not sent and not errors:
-        add_flash("Keine Limit-Überschreitungen gefunden oder kein Benachrichtigungsintervall erreicht.", "success")
+        add_flash(t("flash.success.ot_notify_none"), "success")
     return redirect("/admin#acc-overtime")
 
 
@@ -13699,7 +14198,7 @@ def admin_batch_absence_types():
         _db.commit()
         _db.close()
 
-    add_flash("Abwesenheitstypen gespeichert.", "success")
+    add_flash(t("flash.success.absence_types_saved"), "success")
     return redirect("/admin#acc-per-user-settings")
 
 
@@ -13973,7 +14472,7 @@ def admin_appearance_save():
         )
     db.commit()
     db.close()
-    add_flash("Erscheinungsbild gespeichert.", "success")
+    add_flash(t("flash.success.appearance_saved"), "success")
     return redirect("/admin#acc-appearance")
 
 
@@ -14013,7 +14512,7 @@ def admin_regional_save():
     from flask import g as _g
     if hasattr(_g, "_app_config_cache"):
         del _g._app_config_cache
-    add_flash("Regionale Einstellungen gespeichert.", "success")
+    add_flash(t("flash.success.regional_saved"), "success")
     return redirect("/admin#acc-regional")
 
 
