@@ -19,6 +19,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "nav.absences":    "Abwesenheiten",
         "nav.trips":       "Dienstreisen",
         "nav.periods":     "Abschlüsse",
+        "nav.approvals":   "Genehmigungen",
         "nav.settings":    "Einstellungen",
         "nav.export":      "Export",
         "nav.admin":       "Admin",
@@ -60,6 +61,32 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn.run":         "Ausführen",
         "btn.check":       "Prüfen",
         "btn.booking":     "Kontieren",
+        "btn.approve":     "✅ Genehmigen",
+        "btn.reject":      "✗ Ablehnen",
+
+        # ── Approvals ────────────────────────────────────────────────
+        "approvals.title":              "Genehmigungen",
+        "approvals.pending_title":      "Ausstehende Genehmigungen",
+        "approvals.history":            "Vergangene Entscheidungen",
+        "approvals.history_title":      "Vergangene Entscheidungen",
+        "approvals.no_pending":         "Keine ausstehenden Genehmigungen.",
+        "approvals.no_history":         "Keine vergangenen Entscheidungen.",
+        "approvals.reject_reason":      "Ablehnungsgrund",
+        "approvals.reject_reason_required": "Bitte Ablehnungsgrund angeben.",
+        "approvals.col_user":           "Mitarbeiter",
+        "approvals.col_type":           "Typ",
+        "approvals.col_days":           "Tage",
+        "approvals.col_requested":      "Beantragt",
+        "approvals.col_decided":        "Entschieden",
+        "approvals.col_comment":        "Kommentar",
+        "approvals.approved_flash":     "Abwesenheit genehmigt.",
+        "approvals.rejected_flash":     "Abwesenheit abgelehnt.",
+        "success.absence_approved":     "Abwesenheit genehmigt.",
+        "success.absence_rejected":     "Abwesenheit abgelehnt.",
+        "mail.absence_approved_subject": "Zeiterfassung - Abwesenheit genehmigt",
+        "mail.absence_approved_body":   "Deine {type} vom {from_date} bis {to_date} wurde genehmigt.",
+        "mail.absence_rejected_subject": "Zeiterfassung - Abwesenheit abgelehnt",
+        "mail.absence_rejected_body":   "Deine {type} vom {from_date} bis {to_date} wurde abgelehnt.\n\nGrund: {reason}",
 
         # ── Common labels ─────────────────────────────────────────────
         "common.yes":      "Ja",
@@ -105,7 +132,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "login.failed":        "Login fehlgeschlagen.",
         "login.db_label":      "DB",
         "auth.account_locked":          "Konto gesperrt bis {time}. Entsperr-Link wurde an deine E-Mail gesendet.",
-        "auth.account_locked_no_email": "Konto gesperrt. Bitte Admin kontaktieren.",
+        "auth.account_locked_no_email": "Konto gesperrt. Kein E-Mail hinterlegt – bitte Admin kontaktieren.",
         "auth.too_many_attempts":        "Zu viele Fehlversuche.",
         "auth.attempts_remaining":       "Noch {n} Versuch(e).",
         "auth.unlocked":                 "Konto erfolgreich entsperrt.",
@@ -119,6 +146,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "setup.title":             "Ersteinrichtung",
         "setup.language_label":    "Sprache / Language",
+        "setup.timezone":          "Zeitzone",
         "setup.usage_label":       "Erfasst du selbst Arbeitszeiten?",
         "setup.usage_yes":         "Ja, ich erfasse eigene Zeiten",
         "setup.usage_no":          "Nein, ich verwalte nur (kein Zeitkonto)",
@@ -271,6 +299,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "absences.multiday":    "Mehrtägig",
         "absences.save":        "Speichern",
         "absences.saved":       "Abwesenheit gespeichert.",
+        "absences.saved_pending": "Abwesenheit beantragt – wartet auf Genehmigung.",
         "absences.deleted":     "Abwesenheit gelöscht.",
         "absences.updated":     "Abwesenheit aktualisiert.",
         "absences.overlaps":    "Überschneidung mit bestehender Abwesenheit.",
@@ -279,6 +308,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "absences.select_type": "Typ wählen …",
         "absences.remark":      "Bemerkung (optional)",
         "absences.is_half_day_label": "Halber Tag",
+
+        # Absence approval
+        "absence.status_pending":     "Ausstehend",
+        "absence.status_approved":    "Genehmigt",
+        "absence.status_rejected":    "Abgelehnt",
+        "absence.approval_required":  "Genehmigung erforderlich",
+        "absence.waiting_approval":   "Wartet auf Genehmigung",
+        "admin.is_approver":          "Ist Genehmiger",
+        "admin.approver":             "Genehmiger",
+        "admin.approval_types":       "Genehmigung erforderlich für",
+        "admin.approval_none":        "Kein Genehmiger zugewiesen",
+        "mail.approval_request_subject": "Zeiterfassung - Genehmigung erforderlich",
 
         # Absence type names
         "absence_type.urlaub":   "Urlaub",
@@ -417,6 +458,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.totp_code_invalid":         "Ungültiger Bestätigungs-Code.",
         "settings.totp_codes_regenerated":    "Neue Backup-Codes generiert.",
         "mail.account_locked_subject":        "Zeiterfassung - Konto gesperrt",
+        "mail.approval_request_body":         "{name} hat {type} vom {from_date} bis {to_date} beantragt.\n\nZur Genehmigung:\n{url}",
 
         # ── Change password (forced) ──────────────────────────────────
         "change_pw.title":       "Passwort ändern",
@@ -862,6 +904,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.server_config":          "Server-Konfiguration",
         "admin.base_url":               "Externe Server-URL",
         "admin.base_url_hint":          "URL unter der die App erreichbar ist, z.B. https://zeiten.firma.de. Wird für Kalender-Abonnements und Mail-Links genutzt.",
+        "admin.timezone":               "Zeitzone",
+        "admin.timezone_hint":          "Zeitzone für Uhrzeitanzeigen und Berechnungen. Neustart empfohlen nach Änderung.",
 
         # ── Admin per-user settings ───────────────────────────────────
         "admin.abs_types_per_user":  "Abwesenheitstypen pro Benutzer",
@@ -1051,6 +1095,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "nav.absences":    "Absences",
         "nav.trips":       "Business Trips",
         "nav.periods":     "Lock Periods",
+        "nav.approvals":   "Approvals",
         "nav.settings":    "Settings",
         "nav.export":      "Export",
         "nav.admin":       "Admin",
@@ -1088,6 +1133,32 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn.stop_impersonate": "Stop impersonation",
         "btn.lock":        "Lock",
         "btn.unlock":      "Unlock",
+        "btn.approve":     "✅ Approve",
+        "btn.reject":      "✗ Reject",
+
+        # ── Approvals ────────────────────────────────────────────────
+        "approvals.title":              "Approvals",
+        "approvals.pending_title":      "Pending Approvals",
+        "approvals.history":            "Past Decisions",
+        "approvals.history_title":      "Past Decisions",
+        "approvals.no_pending":         "No pending approvals.",
+        "approvals.no_history":         "No past decisions.",
+        "approvals.reject_reason":      "Rejection reason",
+        "approvals.reject_reason_required": "Please provide a rejection reason.",
+        "approvals.col_user":           "Employee",
+        "approvals.col_type":           "Type",
+        "approvals.col_days":           "Days",
+        "approvals.col_requested":      "Requested",
+        "approvals.col_decided":        "Decided",
+        "approvals.col_comment":        "Comment",
+        "approvals.approved_flash":     "Absence approved.",
+        "approvals.rejected_flash":     "Absence rejected.",
+        "success.absence_approved":     "Absence approved.",
+        "success.absence_rejected":     "Absence rejected.",
+        "mail.absence_approved_subject": "Zeiterfassung - Absence approved",
+        "mail.absence_approved_body":   "Your {type} from {from_date} to {to_date} has been approved.",
+        "mail.absence_rejected_subject": "Zeiterfassung - Absence rejected",
+        "mail.absence_rejected_body":   "Your {type} from {from_date} to {to_date} was rejected.\n\nReason: {reason}",
         "btn.restore":     "Restore",
         "btn.run":         "Run",
         "btn.check":       "Check",
@@ -1137,7 +1208,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "login.failed":        "Login failed.",
         "login.db_label":      "DB",
         "auth.account_locked":          "Account locked until {time}. Unlock link sent to your email.",
-        "auth.account_locked_no_email": "Account locked. Please contact admin.",
+        "auth.account_locked_no_email": "Account locked. No email on file – please contact admin.",
         "auth.too_many_attempts":        "Too many failed attempts.",
         "auth.attempts_remaining":       "{n} attempt(s) remaining.",
         "auth.unlocked":                 "Account successfully unlocked.",
@@ -1151,6 +1222,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "setup.title":             "Initial Setup",
         "setup.language_label":    "Language / Sprache",
+        "setup.timezone":          "Timezone",
         "setup.usage_label":       "Do you record your own working hours?",
         "setup.usage_yes":         "Yes, I track my own hours",
         "setup.usage_no":          "No, I only manage (no time account)",
@@ -1303,6 +1375,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "absences.multiday":    "Multi-day",
         "absences.save":        "Save",
         "absences.saved":       "Absence saved.",
+        "absences.saved_pending": "Absence submitted – waiting for approval.",
         "absences.deleted":     "Absence deleted.",
         "absences.updated":     "Absence updated.",
         "absences.overlaps":    "Overlaps with an existing absence.",
@@ -1311,6 +1384,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "absences.select_type": "Select type …",
         "absences.remark":      "Remark (optional)",
         "absences.is_half_day_label": "Half day",
+
+        # Absence approval
+        "absence.status_pending":     "Pending",
+        "absence.status_approved":    "Approved",
+        "absence.status_rejected":    "Rejected",
+        "absence.approval_required":  "Approval required",
+        "absence.waiting_approval":   "Waiting for approval",
+        "admin.is_approver":          "Is approver",
+        "admin.approver":             "Approver",
+        "admin.approval_types":       "Approval required for",
+        "admin.approval_none":        "No approver assigned",
+        "mail.approval_request_subject": "Zeiterfassung - Approval required",
 
         # Absence type names
         "absence_type.urlaub":   "Vacation",
@@ -1449,6 +1534,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.totp_code_invalid":         "Invalid confirmation code.",
         "settings.totp_codes_regenerated":    "New backup codes generated.",
         "mail.account_locked_subject":        "Zeiterfassung - Account locked",
+        "mail.approval_request_body":         "{name} has requested {type} from {from_date} to {to_date}.\n\nApprove here:\n{url}",
 
         # ── Change password (forced) ──────────────────────────────────
         "change_pw.title":       "Change password",
@@ -1894,6 +1980,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.server_config":          "Server Configuration",
         "admin.base_url":               "External Server URL",
         "admin.base_url_hint":          "URL under which the app is accessible, e.g. https://time.company.com. Used for calendar subscriptions and mail links.",
+        "admin.timezone":               "Timezone",
+        "admin.timezone_hint":          "Timezone for time displays and calculations. Restart recommended after change.",
 
         # ── Admin per-user settings ───────────────────────────────────
         "admin.abs_types_per_user":  "Absence types per user",

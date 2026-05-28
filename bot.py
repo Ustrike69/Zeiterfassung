@@ -1116,6 +1116,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "\n*Abend-Erinnerung:*\n"
         "Schreib _erinnerung_ (Status), _erinnerung an_, _erinnerung aus_ oder _erinnerung 19:30_\n"
     )
+    # Approver commands
+    if own_uid:
+        db = connect()
+        try:
+            is_apr = db.execute("SELECT is_approver FROM users WHERE id=?", (own_uid,)).fetchone()
+        finally:
+            db.close()
+        if is_apr and is_apr["is_approver"]:
+            text += (
+                "\n*Genehmiger-Befehle:*\n"
+                "/genehmigungen — Ausstehende Genehmigungen\n"
+                "genehmigen <ID> — Abwesenheit genehmigen\n"
+                "ablehnen <ID> <Grund> — Abwesenheit ablehnen\n"
+            )
+
     if is_admin:
         text += (
             "\n*Admin-Befehle:*\n"
@@ -2322,6 +2337,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_erinnerung(tid, text, update)
         return
 
+    # Handle "genehmigen / ablehnen" commands (approver text shortcuts)
+    if text_lower.startswith("genehmigen ") or text_lower.startswith("ablehnen "):
+        if await _handle_genehmigen(own_uid, text, update):
+            return
+
     # Handle wizard states
     ws = wizard_state.get(tid)
     if ws:
@@ -2468,6 +2488,127 @@ async def cmd_rente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+# ── Approval commands ─────────────────────────────────────────────────────────
+
+async def cmd_genehmigungen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ok, uid = await _check_auth(update, context)
+    if not ok:
+        return
+    db = connect()
+    try:
+        u = db.execute("SELECT is_approver FROM users WHERE id=?", (uid,)).fetchone()
+        if not u or not u["is_approver"]:
+            await update.message.reply_text("Du bist kein Genehmiger.")
+            return
+        pending = db.execute("""
+            SELECT aa.id AS approval_id, aa.absence_id,
+                   a.date_from, a.date_to,
+                   at.name AS type_name,
+                   usr.username, usr.display_name
+            FROM absence_approvals aa
+            JOIN absences a ON a.id = aa.absence_id
+            JOIN absence_types at ON at.id = a.type_id
+            JOIN users usr ON usr.id = a.user_id
+            WHERE aa.approver_id = ? AND aa.status = 'pending'
+            ORDER BY aa.created_at ASC
+        """, (uid,)).fetchall()
+    finally:
+        db.close()
+
+    if not pending:
+        await update.message.reply_text("✅ Keine ausstehenden Genehmigungen.")
+        return
+
+    lines = ["📋 *Ausstehende Genehmigungen:*\n"]
+    for p in pending:
+        name = p["display_name"] or p["username"]
+        lines.append(
+            f"*#{p['absence_id']}* {name}: {p['type_name']} "
+            f"{p['date_from']} – {p['date_to']}"
+        )
+    lines.append(
+        "\nGenehmigen: `genehmigen <ID>`\n"
+        "Ablehnen: `ablehnen <ID> <Grund>`"
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _handle_genehmigen(uid: int, text: str, update: Update) -> bool:
+    """Handle 'genehmigen <ID>' or 'ablehnen <ID> <Grund>' text commands."""
+    lower = text.strip().lower()
+    m_approve = re.match(r'^genehmigen\s+(\d+)$', lower)
+    m_reject  = re.match(r'^ablehnen\s+(\d+)\s+(.+)$', text.strip(), re.IGNORECASE)
+
+    if not m_approve and not m_reject:
+        return False
+
+    db = connect()
+    try:
+        u_row = db.execute("SELECT is_approver FROM users WHERE id=?", (uid,)).fetchone()
+        if not u_row or not u_row["is_approver"]:
+            return False
+
+        if m_approve:
+            absence_id = int(m_approve.group(1))
+            aa = db.execute(
+                "SELECT aa.id, a.user_id, a.date_from, a.date_to, at.name AS type_name "
+                "FROM absence_approvals aa "
+                "JOIN absences a ON a.id = aa.absence_id "
+                "JOIN absence_types at ON at.id = a.type_id "
+                "WHERE aa.absence_id=? AND aa.approver_id=? AND aa.status='pending'",
+                (absence_id, uid),
+            ).fetchone()
+            if not aa:
+                await update.message.reply_text(f"Genehmigung #{absence_id} nicht gefunden oder bereits entschieden.")
+                return True
+            db.execute(
+                "UPDATE absence_approvals SET status='approved', updated_at=datetime('now') WHERE id=?",
+                (aa["id"],),
+            )
+            db.commit()
+            requester = db.execute("SELECT email, language, username FROM users WHERE id=?", (aa["user_id"],)).fetchone()
+            await update.message.reply_text(f"✅ Abwesenheit #{absence_id} genehmigt.")
+            # Notify requester via Telegram
+            tg_id_row = db.execute("SELECT telegram_id FROM telegram_users WHERE user_id=?", (aa["user_id"],)).fetchone()
+        else:
+            absence_id = int(m_reject.group(1))
+            reason = m_reject.group(2).strip()
+            aa = db.execute(
+                "SELECT aa.id, a.user_id, a.date_from, a.date_to, at.name AS type_name "
+                "FROM absence_approvals aa "
+                "JOIN absences a ON a.id = aa.absence_id "
+                "JOIN absence_types at ON at.id = a.type_id "
+                "WHERE aa.absence_id=? AND aa.approver_id=? AND aa.status='pending'",
+                (absence_id, uid),
+            ).fetchone()
+            if not aa:
+                await update.message.reply_text(f"Genehmigung #{absence_id} nicht gefunden oder bereits entschieden.")
+                return True
+            db.execute(
+                "UPDATE absence_approvals SET status='rejected', comment=?, updated_at=datetime('now') WHERE id=?",
+                (reason, aa["id"]),
+            )
+            db.commit()
+            requester = db.execute("SELECT email, language, username FROM users WHERE id=?", (aa["user_id"],)).fetchone()
+            await update.message.reply_text(f"✗ Abwesenheit #{absence_id} abgelehnt: {reason}")
+            tg_id_row = db.execute("SELECT telegram_id FROM telegram_users WHERE user_id=?", (aa["user_id"],)).fetchone()
+
+        # Notify requester
+        if tg_id_row:
+            tg_id = tg_id_row["telegram_id"]
+            if m_approve:
+                msg = f"✅ Dein {aa['type_name']} vom {aa['date_from']} bis {aa['date_to']} wurde genehmigt."
+            else:
+                msg = f"❌ Dein {aa['type_name']} vom {aa['date_from']} bis {aa['date_to']} wurde abgelehnt: {reason}"
+            try:
+                await update.get_bot().send_message(chat_id=tg_id, text=msg)
+            except Exception:
+                pass
+    finally:
+        db.close()
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -2490,6 +2631,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alsabw", cmd_alsabw))
     app.add_handler(CommandHandler("testwizard", cmd_testwizard))
     app.add_handler(CommandHandler("rente", cmd_rente))
+    app.add_handler(CommandHandler("genehmigungen", cmd_genehmigungen))
     app.add_handler(CallbackQueryHandler(handle_wizard_callback, pattern="^wizard_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

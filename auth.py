@@ -1,13 +1,30 @@
 import functools
 import datetime
 import uuid
+import logging
 from flask import session, redirect, url_for, request, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from db import connect
+from zoneinfo import ZoneInfo
 
 _LOGIN_MAX_ATTEMPTS = 3
 _LOCK_MINUTES = 30
 _UNLOCK_TOKEN_HOURS = 24
+
+
+def _get_configured_timezone() -> ZoneInfo:
+    try:
+        db = connect()
+        row = db.execute("SELECT value FROM app_config WHERE key='timezone'").fetchone()
+        db.close()
+        tz_str = (row["value"] if row else None) or "Europe/Berlin"
+        return ZoneInfo(tz_str)
+    except Exception:
+        return ZoneInfo("Europe/Berlin")
+
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(tz=_get_configured_timezone())
 
 
 def has_users() -> bool:
@@ -100,7 +117,9 @@ def authenticate(username: str, password: str):
     locked_until_str = u["login_locked_until"]
     if locked_until_str:
         locked_until = datetime.datetime.fromisoformat(locked_until_str)
-        if datetime.datetime.now() < locked_until:
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=datetime.timezone.utc)
+        if _now() < locked_until:
             return None, "locked"
         else:
             # Lock expired – clear it
@@ -128,7 +147,10 @@ def get_lockout_until(username: str):
     if not row or not row["login_locked_until"]:
         return None
     try:
-        return datetime.datetime.fromisoformat(row["login_locked_until"])
+        dt = datetime.datetime.fromisoformat(row["login_locked_until"])
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(_get_configured_timezone())
     except Exception:
         return None
 
@@ -141,7 +163,7 @@ def _record_failed_attempt(user_id: int, email: str) -> None:
     attempts = (row["login_attempts"] or 0) + 1 if row else 1
 
     if attempts >= _LOGIN_MAX_ATTEMPTS:
-        locked_until = (datetime.datetime.now() + datetime.timedelta(minutes=_LOCK_MINUTES)).isoformat()
+        locked_until = (_now() + datetime.timedelta(minutes=_LOCK_MINUTES)).isoformat()
         token = str(uuid.uuid4())
         db.execute(
             "UPDATE users SET login_attempts=?, login_locked_until=?, login_unlock_token=? WHERE id=?",
@@ -199,11 +221,13 @@ def validate_unlock_token(token: str):
         return None
     try:
         locked_until = datetime.datetime.fromisoformat(row["login_locked_until"])
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=datetime.timezone.utc)
     except Exception:
         return None
     # Token valid for UNLOCK_TOKEN_HOURS from lock time
     token_expiry = locked_until + datetime.timedelta(hours=_UNLOCK_TOKEN_HOURS)
-    if datetime.datetime.now() > token_expiry:
+    if _now() > token_expiry:
         return None
     return dict(row)
 
@@ -214,32 +238,40 @@ def _send_lockout_mail(email: str, token: str, user_id: int) -> None:
         import threading as _thr
         def _do():
             try:
-                from flask import current_app as _ca
-                with _ca.app_context():
-                    _dispatch_lockout_mail(email, token)
-            except Exception:
-                pass
+                import app as _app_module
+                with _app_module.app.app_context():
+                    _dispatch_lockout_mail(email, token, user_id)
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Unlock-Mail thread Fehler: {e}")
         _thr.Thread(target=_do, daemon=True).start()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Unlock-Mail start Fehler: {e}")
 
 
-def _dispatch_lockout_mail(email: str, token: str) -> None:
+def _dispatch_lockout_mail(email: str, token: str, user_id: int) -> None:
     """Called inside app context. Imports app-level helpers."""
+    import app as _app_module
+    from translations import t as _t
     try:
-        import app as _app_module
+        lang = "de"
+        try:
+            db = connect()
+            urow = db.execute("SELECT language FROM users WHERE id=?", (user_id,)).fetchone()
+            db.close()
+            lang = (urow["language"] if urow and urow["language"] else None) or "de"
+        except Exception:
+            pass
         base_url = _app_module._get_base_url()
         unlock_url = f"{base_url}/login/unlock/{token}"
-        from translations import t as _t
-        subject = _t("mail.account_locked_subject")
+        subject = _t("mail.account_locked_subject", lang)
         body = (
-            f"{_t('auth.account_locked_mail_intro')}\n\n"
+            f"{_t('auth.account_locked_mail_intro', lang)}\n\n"
             f"{unlock_url}\n\n"
-            f"{_t('auth.account_locked_mail_hint')}"
+            f"{_t('auth.account_locked_mail_hint', lang)}"
         )
         _app_module._send_mail_simple(email, subject, body)
-    except Exception:
-        pass
+    except Exception as e:
+        _app_module.app.logger.error(f"Unlock-Mail Fehler: {e}")
 
 
 def current_user():
@@ -251,7 +283,7 @@ def current_user():
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
         "password_changed, onboarding_done, display_name, email, admin_role, "
         "must_change_password, admin_only, language, password_compliant, "
-        "totp_enabled, login_attempts, last_login FROM users WHERE id=?",
+        "totp_enabled, login_attempts, last_login, is_approver FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()

@@ -4,7 +4,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-**Zeiterfassung** (v2.0.5) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
+**Zeiterfassung** (v2.0.9) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
 
 ## Running the Application
 
@@ -89,6 +89,18 @@ Two admin roles controlled by `admin_role` column on `users` table:
 | `@timemanager_required` | alias for `@admin_required` |
 | `@sysadmin_required` | only `admin_role='sysadmin'` |
 
+### Approval Routes (login_required + is_approver check)
+
+- `GET /approvals` — approver dashboard: pending queue + decision history
+- `POST /approvals/<approval_id>/approve` — approve (uses `absence_approvals.id`)
+- `POST /approvals/<approval_id>/reject` — reject with mandatory `comment` field
+
+### Auth / Security Routes
+
+- `GET /login/2fa`, `POST /login/2fa` — TOTP verification step after password login
+- `GET /login/unlock/<token>` — self-service account unlock via emailed token
+- `GET /change-password`, `POST /change-password` — forced password change
+
 ### Sysadmin-only Routes
 
 - `/admin/users/new`, `/admin/users/<id>/delete`
@@ -128,6 +140,7 @@ Key tables:
 | `time_blocks` | Multiple time blocks per day (current model) |
 | `time_entries` | Legacy single-entry-per-day |
 | `absences` | Linked to `absence_types` |
+| `absence_approvals` | Approval records per absence: `absence_id`, `approver_id`, `status` (pending/approved/rejected), `comment` |
 | `absence_types` | Urlaub, Krank, Flextag, Sonstige (+ custom) |
 | `calendar_days` | Holiday/weekend flags by ISO date + region; composite PK (day, region) |
 | `contoured_days` | Days marked as contoured (user_id, day) |
@@ -176,6 +189,17 @@ Key tables:
 | `icloud_app_password` | TEXT | Fernet-encrypted app-specific password |
 | `icloud_calendar_name` | TEXT | Exact iCloud calendar name to write to |
 | `icloud_last_sync` | TEXT | Timestamp of last successful sync (YYYY-MM-DD HH:MM) |
+| `is_approver` | INTEGER | 1 = user can approve other users' absences |
+| `approver_id` | INTEGER | FK → users.id; who approves this user's absences |
+| `approval_required_types` | TEXT | Comma-separated absence type IDs requiring approval (NULL = none) |
+| `password_compliant` | INTEGER | 1 = password meets current rules |
+| `login_attempts` | INTEGER | Failed login counter (reset on success) |
+| `login_locked_until` | TEXT | ISO datetime; account locked until this time |
+| `login_unlock_token` | TEXT | UUID token for self-service unlock link |
+| `last_login` | TEXT | ISO datetime of last successful login |
+| `totp_secret` | TEXT | Fernet-encrypted TOTP secret |
+| `totp_enabled` | INTEGER | 1 = 2FA active |
+| `totp_backup_codes` | TEXT | Fernet-encrypted JSON array of one-time backup codes |
 
 ## Schedule System
 
@@ -214,6 +238,23 @@ Two modes (`mode` in `user_schedules`):
 `Wochentag | Datum | Beginn | Ende | Pause (min) | Soll | Delta | Bemerkung`
 
 UTF-8 BOM encoding, semicolon delimiter.
+
+### Key Helper Functions (v2.0.9+)
+
+| Function | Description |
+|----------|-------------|
+| `_get_timezone()` | Reads `timezone` from `app_config`; returns `ZoneInfo` object (default `Europe/Berlin`) |
+| `_notify_absence_decision(user_id, email, lang, …)` | Background thread: sends mail + Telegram to requester on approve/reject |
+| `_send_approval_request_mail(absence_id, requester, …)` | Background thread: notifies approver of new pending absence |
+| `_send_tg_message(user_id, text)` | Fire-and-forget Telegram message via HTTP API; reads token from `bot_config` |
+| `_send_absence_decision_mail` | Deprecated alias; use `_notify_absence_decision` |
+| `_timezone_select(name, current)` | Renders HTML `<select>` for timezone picker |
+
+**`auth.py` helpers (v2.0.9+):**
+- `_get_configured_timezone()` — reads timezone from `app_config` DB table (used in auth.py, no Flask context dependency)
+- `_now()` — `datetime.datetime.now(tz=_get_configured_timezone())`
+- `_send_lockout_mail(email, token, user_id)` — fire-and-forget thread using `app.app_context()` (not `current_app` proxy)
+- `_dispatch_lockout_mail(email, token, user_id)` — called inside app context; fetches user language from DB; logs errors
 
 ## Mail Configuration
 
@@ -309,4 +350,4 @@ Admin can act as another user:
 - **JS strings from Python**: Pre-compute `t()` values into Python vars (e.g., `_lbl = t('key')`), then embed via `repr(_lbl)` in `<script>` blocks to avoid quote conflicts.
 - `_calc_balance_end_at` must stay in sync with `balance_view` logic — both use `_iter_days`
 - `bootstrap()` called on every route → runs `init_db()` + `seed_defaults()` + `seed_all_regions()`
-- App version: `APP_VERSION = "v2.0.5"` at top of `app.py`
+- App version: `APP_VERSION = "v2.0.9"` at top of `app.py`

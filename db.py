@@ -476,7 +476,27 @@ def init_db():
     if not _col_exists(db, "users", "totp_backup_codes"):
         db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
 
+    # v2.0.9 – approval workflow
+    if not _col_exists(db, "users", "is_approver"):
+        db.execute("ALTER TABLE users ADD COLUMN is_approver INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(db, "users", "approval_required_types"):
+        db.execute("ALTER TABLE users ADD COLUMN approval_required_types TEXT DEFAULT NULL")
+    if not _col_exists(db, "users", "approver_id"):
+        db.execute("ALTER TABLE users ADD COLUMN approver_id INTEGER DEFAULT NULL REFERENCES users(id)")
 
+    db.execute("""CREATE TABLE IF NOT EXISTS absence_approvals(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        absence_id INTEGER NOT NULL,
+        approver_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+        comment TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY(absence_id) REFERENCES absences(id) ON DELETE CASCADE,
+        FOREIGN KEY(approver_id) REFERENCES users(id)
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_absence_approvals_absence ON absence_approvals(absence_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_absence_approvals_approver ON absence_approvals(approver_id, status)")
 
     db.commit()
     db.close()

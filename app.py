@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.8"
+APP_VERSION = "v2.0.9"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -57,6 +57,38 @@ def _get_app_config() -> dict:
         result = {}
     g._app_config_cache = result
     return result
+
+
+_COMMON_TIMEZONES = [
+    ("Europe/Berlin",     "Europe/Berlin (Deutschland, Österreich)"),
+    ("Europe/Vienna",     "Europe/Vienna (Österreich)"),
+    ("Europe/Zurich",     "Europe/Zurich (Schweiz)"),
+    ("Europe/London",     "Europe/London (Großbritannien)"),
+    ("Europe/Paris",      "Europe/Paris (Frankreich)"),
+    ("Europe/Amsterdam",  "Europe/Amsterdam (Niederlande)"),
+    ("Europe/Warsaw",     "Europe/Warsaw (Polen)"),
+    ("Europe/Prague",     "Europe/Prague (Tschechien)"),
+    ("Europe/Rome",       "Europe/Rome (Italien)"),
+    ("Europe/Madrid",     "Europe/Madrid (Spanien)"),
+    ("UTC",               "UTC"),
+]
+
+
+def _get_timezone():
+    from zoneinfo import ZoneInfo
+    tz = (_get_app_config().get("timezone") or "Europe/Berlin").strip()
+    try:
+        return ZoneInfo(tz)
+    except Exception:
+        return ZoneInfo("Europe/Berlin")
+
+
+def _timezone_select(name: str, current: str = "Europe/Berlin") -> str:
+    opts = "".join(
+        f'<option value="{v}"{"  selected" if v == current else ""}>{_html.escape(label)}</option>'
+        for v, label in _COMMON_TIMEZONES
+    )
+    return f'<select name="{name}" style="width:100%;max-width:400px;margin-top:4px;">{opts}</select>'
 
 
 _HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
@@ -1072,8 +1104,14 @@ def _absence_on_day(user_id: int, iso_day: str) -> bool:
             row = db.execute("SELECT 1 FROM absences WHERE user_id=? AND date=? LIMIT 1", (user_id, iso_day)).fetchone()
             return bool(row)
         if "date_from" in cols and "date_to" in cols:
+            # Only count absences that are not pending/rejected (no approval record, or approved)
             row = db.execute(
-                "SELECT 1 FROM absences WHERE user_id=? AND date_from<=? AND date_to>=? LIMIT 1",
+                "SELECT 1 FROM absences a "
+                "WHERE a.user_id=? AND a.date_from<=? AND a.date_to>=? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM absence_approvals aa "
+                "  WHERE aa.absence_id=a.id AND aa.status IN ('pending','rejected')"
+                ") LIMIT 1",
                 (user_id, iso_day, iso_day),
             ).fetchone()
             return bool(row)
@@ -1818,6 +1856,10 @@ def setup():
             {lang_options}
           </select>
         </div>
+        <div>
+          <label>{t("setup.timezone", setup_lang)}</label>
+          {_timezone_select("timezone", "Europe/Berlin")}
+        </div>
         <div><label>{t("setup.username_label", setup_lang)}</label><input name="username" required></div>
         <div><label>{t("setup.password_label", setup_lang)}</label><input type="password" name="password" required autocomplete="new-password"></div>
         <div style="border:1px solid var(--bd);border-radius:var(--rs);padding:12px;">
@@ -1848,6 +1890,9 @@ def setup_post():
     chosen_lang = (request.form.get("lang") or "en").strip()
     if chosen_lang not in [code for code, _ in _available_languages()]:
         chosen_lang = "en"
+    chosen_tz = (request.form.get("timezone") or "Europe/Berlin").strip()
+    if chosen_tz not in [v for v, _ in _COMMON_TIMEZONES]:
+        chosen_tz = "Europe/Berlin"
     if not username or not password:
         add_flash(t("flash.error.credentials_required"), "error")
         return redirect(url_for("setup", lang=chosen_lang))
@@ -1858,10 +1903,14 @@ def setup_post():
         "UPDATE users SET admin_role='sysadmin', admin_only=?, language=?, updated_at=datetime('now') WHERE id=?",
         (admin_only_val, chosen_lang, new_id),
     )
-    # Save default language to app_config
+    # Save default language and timezone to app_config
     db.execute(
         "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES('default_language', ?, datetime('now'))",
         (chosen_lang,),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES('timezone', ?, datetime('now'))",
+        (chosen_tz,),
     )
     db.commit()
     db.close()
@@ -1891,7 +1940,6 @@ def login():
         </div><br>
         <button class="btn" type="submit">{t("login.submit", _login_lang)}</button>
       </form>
-      <p class="small">DB: {db_path()}</p>
     </div>
     '''
     return render_template_string(layout("Login", body, None, APP_VERSION))
@@ -1905,14 +1953,28 @@ def login_post():
     nxt = request.form.get("next") or "/"
     _login_lang = _get_app_config().get("default_language") or "de"
 
+    # Try to get user language for auth messages before authentication
+    _user_lang = _login_lang
+    try:
+        _uldb = connect()
+        _ulrow = _uldb.execute(
+            "SELECT language FROM users WHERE LOWER(username)=?", (username.lower(),)
+        ).fetchone()
+        _uldb.close()
+        if _ulrow and _ulrow["language"]:
+            _user_lang = _ulrow["language"]
+    except Exception:
+        pass
+
     u, err = authenticate(username, password)
     if err == "locked":
         locked_until = get_lockout_until(username)
         if locked_until:
-            until_str = locked_until.strftime("%H:%M")
-            add_flash(t("auth.account_locked", _login_lang).replace("{time}", until_str), "error")
+            local_until = locked_until.astimezone(_get_timezone())
+            until_str = local_until.strftime("%H:%M")
+            add_flash(t("auth.account_locked", _user_lang).replace("{time}", until_str), "error")
         else:
-            add_flash(t("auth.account_locked_no_email", _login_lang), "error")
+            add_flash(t("auth.account_locked_no_email", _user_lang), "error")
         return redirect(url_for("login", next=nxt))
     if err or not u:
         add_flash(t("login.failed"), "error")
@@ -4095,6 +4157,272 @@ def _resolve_comment_from_form() -> str:
     return comment_plain
 
 
+def _fmt_iso_short(iso_val) -> str:
+    try:
+        return datetime.date.fromisoformat(str(iso_val)[:10]).strftime("%d.%m.%Y")
+    except Exception:
+        return str(iso_val)
+
+
+@app.get("/approvals")
+@login_required
+def approvals_view():
+    bootstrap()
+    u = current_user()
+    if not u.get("is_approver"):
+        abort(403)
+
+    db = connect()
+    try:
+        pending = db.execute("""
+            SELECT aa.id AS approval_id, aa.status, aa.created_at,
+                   a.id AS absence_id, a.date_from, a.date_to, a.is_half_day,
+                   at.name AS typ, at.color AS typ_color,
+                   usr.username, usr.display_name
+            FROM absence_approvals aa
+            JOIN absences a ON a.id = aa.absence_id
+            JOIN absence_types at ON at.id = a.type_id
+            JOIN users usr ON usr.id = a.user_id
+            WHERE aa.approver_id = ? AND aa.status = 'pending'
+            ORDER BY aa.created_at DESC
+        """, (u["id"],)).fetchall()
+
+        history = db.execute("""
+            SELECT aa.id AS approval_id, aa.status, aa.comment,
+                   aa.updated_at, a.date_from, a.date_to, a.is_half_day,
+                   at.name AS typ, at.color AS typ_color,
+                   usr.username, usr.display_name
+            FROM absence_approvals aa
+            JOIN absences a ON a.id = aa.absence_id
+            JOIN absence_types at ON at.id = a.type_id
+            JOIN users usr ON usr.id = a.user_id
+            WHERE aa.approver_id = ? AND aa.status != 'pending'
+            ORDER BY aa.updated_at DESC
+            LIMIT 50
+        """, (u["id"],)).fetchall()
+    finally:
+        db.close()
+
+    def _uname(row):
+        return _html.escape(row["display_name"] or row["username"])
+
+    def _days(row):
+        try:
+            d1 = datetime.date.fromisoformat(str(row["date_from"])[:10])
+            d2 = datetime.date.fromisoformat(str(row["date_to"])[:10])
+            return "0.5" if row["is_half_day"] else str((d2 - d1).days + 1)
+        except Exception:
+            return "?"
+
+    def _typ_badge(row):
+        color = _html.escape(row["typ_color"] or "#999")
+        name = _html.escape(row["typ"])
+        return f'<span style="display:inline-block;width:9px;height:9px;background:{color};border-radius:2px;margin-right:4px;"></span>{name}'
+
+    reject_reason_label = t("approvals.reject_reason")
+    reject_reason_req   = t("approvals.reject_reason_required")
+    btn_approve  = t("btn.approve")
+    btn_reject   = t("btn.reject")
+    btn_cancel   = t("btn.cancel")
+
+    pending_rows = ""
+    for p in pending:
+        mid = f"m{p['approval_id']}"
+        pending_rows += (
+            f"<tr>"
+            f"<td>{_uname(p)}</td>"
+            f"<td>{_typ_badge(p)}</td>"
+            f"<td>{_fmt_iso_short(p['date_from'])}</td>"
+            f"<td>{_fmt_iso_short(p['date_to'])}</td>"
+            f"<td>{_days(p)}</td>"
+            f"<td class='small'>{_fmt_iso_short(p['created_at'])}</td>"
+            f"<td style='white-space:nowrap;'>"
+            f"<div style='display:flex;gap:4px;flex-wrap:wrap;'>"
+            f"<form method='post' action='/approvals/{p['approval_id']}/approve' style='display:contents;'>"
+            f"<button class='btn btn-sm primary' type='submit'>{btn_approve}</button></form>"
+            f"<button class='btn btn-sm danger' type='button' "
+            f"onclick=\"document.getElementById('{mid}').style.display='table-row'\">{btn_reject}</button>"
+            f"</div></td></tr>"
+            f"<tr id='{mid}' style='display:none;background:var(--sf);'>"
+            f"<td colspan='7' style='padding:10px;'>"
+            f"<form method='post' action='/approvals/{p['approval_id']}/reject' "
+            f"style='display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;'>"
+            f"<div style='flex:1;min-width:200px;'>"
+            f"<label style='font-size:12px;'>{reject_reason_label} *</label>"
+            f"<input type='text' name='comment' required style='font-size:13px;padding:6px 10px;margin-top:4px;'></div>"
+            f"<button class='btn btn-sm danger' type='submit'>{btn_reject}</button>"
+            f"<button class='btn btn-sm' type='button' "
+            f"onclick=\"document.getElementById('{mid}').style.display='none'\">{btn_cancel}</button>"
+            f"</form></td></tr>"
+        )
+    if not pending_rows:
+        pending_rows = f"<tr><td colspan='7' class='small' style='color:var(--mu);'>{t('approvals.no_pending')}</td></tr>"
+
+    history_rows = ""
+    for h in history:
+        if h["status"] == "approved":
+            st = f"<span style='color:var(--ok);font-weight:600;'>✅ {t('absence.status_approved')}</span>"
+        else:
+            st = f"<span style='color:var(--danger);font-weight:600;'>✗ {t('absence.status_rejected')}</span>"
+        history_rows += (
+            f"<tr>"
+            f"<td>{_uname(h)}</td>"
+            f"<td>{_typ_badge(h)}</td>"
+            f"<td>{_fmt_iso_short(h['date_from'])}</td>"
+            f"<td>{_fmt_iso_short(h['date_to'])}</td>"
+            f"<td>{st}</td>"
+            f"<td class='small'>{_fmt_iso_short(h['updated_at'])}</td>"
+            f"<td class='small'>{_html.escape(h['comment'] or '')}</td>"
+            f"</tr>"
+        )
+    if not history_rows:
+        history_rows = f"<tr><td colspan='7' class='small' style='color:var(--mu);'>{t('approvals.no_history')}</td></tr>"
+
+    col_user = t("approvals.col_user")
+    col_type = t("approvals.col_type")
+    col_from = t("absences.from")
+    col_to   = t("absences.to")
+    col_days = t("approvals.col_days")
+    col_req  = t("approvals.col_requested")
+    col_dec  = t("approvals.col_decided")
+    col_cmt  = t("approvals.col_comment")
+    pt       = t("approvals.pending_title")
+    ht       = t("approvals.history_title")
+
+    body = (
+        flash_html() +
+        f'<div class="card">'
+        f'<h3>{pt}</h3>'
+        f'<div class="table-scroll"><table>'
+        f'<thead><tr><th>{col_user}</th><th>{col_type}</th><th>{col_from}</th>'
+        f'<th>{col_to}</th><th>{col_days}</th><th>{col_req}</th><th></th></tr></thead>'
+        f'<tbody>{pending_rows}</tbody></table></div></div>'
+        f'<div class="card">'
+        f'<h3>{ht}</h3>'
+        f'<div class="table-scroll"><table>'
+        f'<thead><tr><th>{col_user}</th><th>{col_type}</th><th>{col_from}</th>'
+        f'<th>{col_to}</th><th>Status</th><th>{col_dec}</th><th>{col_cmt}</th></tr></thead>'
+        f'<tbody>{history_rows}</tbody></table></div></div>'
+    )
+    return render_template_string(layout(pt, body, u, APP_VERSION))
+
+
+@app.post("/approvals/<int:approval_id>/approve")
+@login_required
+def approvals_approve(approval_id: int):
+    bootstrap()
+    u = current_user()
+    if not u.get("is_approver"):
+        abort(403)
+    db = connect()
+    try:
+        aa = db.execute(
+            "SELECT aa.id, a.user_id, a.date_from, a.date_to, at.name AS type_name "
+            "FROM absence_approvals aa "
+            "JOIN absences a ON a.id = aa.absence_id "
+            "JOIN absence_types at ON at.id = a.type_id "
+            "WHERE aa.id=? AND aa.approver_id=? AND aa.status='pending'",
+            (approval_id, u["id"]),
+        ).fetchone()
+        if not aa:
+            abort(404)
+        db.execute(
+            "UPDATE absence_approvals SET status='approved', updated_at=datetime('now') WHERE id=?",
+            (approval_id,),
+        )
+        db.commit()
+        req = db.execute(
+            "SELECT id, email, language FROM users WHERE id=?", (aa["user_id"],)
+        ).fetchone()
+    finally:
+        db.close()
+    if req:
+        _notify_absence_decision(
+            user_id=aa["user_id"], email=req["email"] or "",
+            lang=req["language"] or "de",
+            type_name=aa["type_name"], date_from=aa["date_from"], date_to=aa["date_to"],
+            approved=True, reason="",
+        )
+    add_flash(t("approvals.approved_flash"), "success")
+    return redirect(url_for("approvals_view"))
+
+
+@app.post("/approvals/<int:approval_id>/reject")
+@login_required
+def approvals_reject(approval_id: int):
+    bootstrap()
+    u = current_user()
+    if not u.get("is_approver"):
+        abort(403)
+    comment = (request.form.get("comment") or "").strip()
+    if not comment:
+        add_flash(t("approvals.reject_reason_required"), "error")
+        return redirect(url_for("approvals_view"))
+    db = connect()
+    try:
+        aa = db.execute(
+            "SELECT aa.id, a.user_id, a.date_from, a.date_to, at.name AS type_name "
+            "FROM absence_approvals aa "
+            "JOIN absences a ON a.id = aa.absence_id "
+            "JOIN absence_types at ON at.id = a.type_id "
+            "WHERE aa.id=? AND aa.approver_id=? AND aa.status='pending'",
+            (approval_id, u["id"]),
+        ).fetchone()
+        if not aa:
+            abort(404)
+        db.execute(
+            "UPDATE absence_approvals SET status='rejected', comment=?, updated_at=datetime('now') WHERE id=?",
+            (comment, approval_id),
+        )
+        db.commit()
+        req = db.execute(
+            "SELECT id, email, language FROM users WHERE id=?", (aa["user_id"],)
+        ).fetchone()
+    finally:
+        db.close()
+    if req:
+        _notify_absence_decision(
+            user_id=aa["user_id"], email=req["email"] or "",
+            lang=req["language"] or "de",
+            type_name=aa["type_name"], date_from=aa["date_from"], date_to=aa["date_to"],
+            approved=False, reason=comment,
+        )
+    add_flash(t("approvals.rejected_flash"), "success")
+    return redirect(url_for("approvals_view"))
+
+
+def _notify_absence_decision(user_id: int, email: str, lang: str, type_name: str, date_from: str, date_to: str, approved: bool, reason: str) -> None:
+    """Background thread: mail + Telegram to requester after approve/reject."""
+    import threading as _thr
+    def _do():
+        try:
+            with app.app_context():
+                if email:
+                    if approved:
+                        subj = t("mail.absence_approved_subject", lang)
+                        body = t("mail.absence_approved_body", lang).format(
+                            type=type_name, from_date=date_from, to_date=date_to
+                        )
+                    else:
+                        subj = t("mail.absence_rejected_subject", lang)
+                        body = t("mail.absence_rejected_body", lang).format(
+                            type=type_name, from_date=date_from, to_date=date_to, reason=reason
+                        )
+                    try:
+                        _send_mail_simple(email, subj, body)
+                    except Exception as e:
+                        app.logger.error(f"Decision-Mail Fehler: {e}")
+                tg_msg = (
+                    f"✅ Dein {type_name} vom {date_from} bis {date_to} wurde genehmigt."
+                    if approved else
+                    f"❌ Dein {type_name} vom {date_from} bis {date_to} wurde abgelehnt: {reason}"
+                )
+                _send_tg_message(user_id, tg_msg)
+        except Exception as e:
+            app.logger.error(f"Decision notification Fehler: {e}")
+    _thr.Thread(target=_do, daemon=True).start()
+
+
 @app.get("/absences")
 @login_required
 def absences_list():
@@ -4110,9 +4438,13 @@ def absences_list():
     db = connect()
     rows_sql = """
       SELECT a.id, a.date_from, a.date_to, a.is_half_day, a.comment,
-             t.name AS type_name, t.color AS type_color
+             t.name AS type_name, t.color AS type_color,
+             aa.status AS approval_status, aa.comment AS rejection_reason,
+             apr.display_name AS approver_display, apr.username AS approver_username
       FROM absences a
       JOIN absence_types t ON t.id = a.type_id
+      LEFT JOIN absence_approvals aa ON aa.absence_id = a.id
+      LEFT JOIN users apr ON apr.id = aa.approver_id
       WHERE a.user_id = ?
     """
     params = [u["id"]]
@@ -4139,6 +4471,20 @@ def absences_list():
         color = a["type_color"] or "#999"
         scope = t("absences.half_day") if a["is_half_day"] else t("absences.full_day")
         bemerkung = (a["comment"] or "") if a["type_name"] == "Sonstige" else ""
+        _apst = a["approval_status"]
+        _approver_name = _html.escape(a["approver_display"] or a["approver_username"] or "") if a["approval_status"] else ""
+        if _apst == "pending":
+            _hint = f" – {t('absence.waiting_approval')}" + (f" ({_approver_name})" if _approver_name else "")
+            status_badge = f"<span style='font-size:11px;background:#fef3c7;color:#92400e;border-radius:3px;padding:2px 6px;white-space:nowrap;'>⏳ {t('absence.status_pending')}{_hint}</span>"
+        elif _apst == "rejected":
+            _reason = _html.escape(a["rejection_reason"] or "")
+            _reason_hint = f": {_reason}" if _reason else ""
+            status_badge = f"<span style='font-size:11px;background:#fee2e2;color:#991b1b;border-radius:3px;padding:2px 6px;white-space:nowrap;'>✗ {t('absence.status_rejected')}{_reason_hint}</span>"
+        elif _apst == "approved":
+            status_badge = f"<span style='font-size:11px;background:#dcfce7;color:#166534;border-radius:3px;padding:2px 6px;white-space:nowrap;'>✅ {t('absence.status_approved')}</span>"
+        else:
+            status_badge = ""
+        _is_pending = _apst == "pending"
         trs += f"""
         <tr>
           <td><span style='display:inline-block;width:10px;height:10px;background:{color};border-radius:2px;margin-right:6px;'></span>{a["type_name"]}</td>
@@ -4146,9 +4492,10 @@ def absences_list():
           <td>{_fmt_iso(a["date_to"])}</td>
           <td>{scope}</td>
           <td>{bemerkung}</td>
+          <td>{status_badge}</td>
           <td style="white-space:nowrap;">
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
-              <a class="btn btn-sm" href="/absences/{a["id"]}/edit">{t("btn.edit")}</a>
+              {"" if _is_pending else f'<a class="btn btn-sm" href="/absences/{a["id"]}/edit">{t("btn.edit")}</a>'}
               <form method="post" action="/absences/{a["id"]}/delete" style="display:contents;" onsubmit="return confirm('{t("absences.confirm_delete")}');">
                 <button class="btn danger btn-sm" type="submit">{t("btn.delete")}</button>
               </form>
@@ -4171,7 +4518,7 @@ def absences_list():
       </form>
       <hr>
       <table>
-        <thead><tr><th>{t("absences.type")}</th><th>{t("absences.from")}</th><th>{t("absences.to")}</th><th>{t("absences.scope")}</th><th>{t("absences.comment")}</th><th></th></tr></thead>
+        <thead><tr><th>{t("absences.type")}</th><th>{t("absences.from")}</th><th>{t("absences.to")}</th><th>{t("absences.scope")}</th><th>{t("absences.comment")}</th><th>{t("absence.approval_required")}</th><th></th></tr></thead>
         <tbody>{trs}</tbody>
       </table>
       {(f"<p class='small'><i>{t('absences.no_entries')}</i></p>" if not absences else "")}
@@ -4296,6 +4643,15 @@ def absences_new_post():
         add_flash(t("flash.error.absence_overlap"), "error")
         return redirect(url_for("absences_new"))
 
+    # Check if approval is required for this type
+    _urow = db.execute(
+        "SELECT approval_required_types, approver_id FROM users WHERE id=?", (u["id"],)
+    ).fetchone()
+    _art_str = (_urow["approval_required_types"] or "") if _urow else ""
+    _art_ids = {int(x) for x in _art_str.split(",") if x.strip().isdigit()} if _art_str else set()
+    _needs_approval = type_id in _art_ids
+    _approver_id = (_urow["approver_id"] if _urow else None) if _needs_approval else None
+
     cur = db.execute(
         "INSERT INTO absences(user_id,type_id,date_from,date_to,is_half_day,comment) VALUES(?,?,?,?,?,?)",
         (u["id"], type_id, date_from, date_to, is_half_day, comment),
@@ -4303,13 +4659,26 @@ def absences_new_post():
     new_id = cur.lastrowid
     if type_name == "Sonstige" and comment:
         db.execute("INSERT OR IGNORE INTO absence_remarks(user_id,remark) VALUES(?,?)", (u["id"], comment))
+
+    if _needs_approval and _approver_id:
+        db.execute(
+            "INSERT INTO absence_approvals(absence_id, approver_id, status, created_at, updated_at) "
+            "VALUES(?, ?, 'pending', datetime('now'), datetime('now'))",
+            (new_id, _approver_id),
+        )
+
     db.commit()
     db.close()
-    try:
-        _sync_to_icloud(u["id"], new_id, "create")
-    except Exception as _e:
-        app.logger.error("iCloud Sync Fehler (new): %s", _e)
-    add_flash(t("absences.saved"), "success")
+
+    if _needs_approval and _approver_id:
+        _send_approval_request_mail(new_id, u, type_name, date_from, date_to, _approver_id)
+        add_flash(t("absences.saved_pending"), "success")
+    else:
+        try:
+            _sync_to_icloud(u["id"], new_id, "create")
+        except Exception as _e:
+            app.logger.error("iCloud Sync Fehler (new): %s", _e)
+        add_flash(t("absences.saved"), "success")
     return redirect(url_for("absences_list"))
 
 
@@ -8667,6 +9036,66 @@ def _send_mail_simple(to: str, subject: str, body_text: str) -> None:
         s.sendmail(username, [to], msg.as_string())
 
 
+def _send_tg_message(user_id: int, text: str) -> None:
+    """Send a Telegram message to a user (fire-and-forget). Uses bot token from bot_config."""
+    import threading as _thr
+    def _do():
+        try:
+            import urllib.request as _ur
+            import urllib.parse as _up
+            db = connect()
+            cfg = db.execute("SELECT key, value FROM bot_config").fetchall()
+            tg_row = db.execute("SELECT telegram_id FROM telegram_users WHERE user_id=?", (user_id,)).fetchone()
+            db.close()
+            token = next((r["value"] for r in cfg if r["key"] == "bot_token"), None)
+            if not token or not tg_row:
+                return
+            chat_id = tg_row["telegram_id"]
+            data = _up.urlencode({"chat_id": chat_id, "text": text}).encode()
+            _ur.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10)
+        except Exception as e:
+            app.logger.warning(f"TG-Nachricht Fehler für user {user_id}: {e}")
+    _thr.Thread(target=_do, daemon=True).start()
+
+
+def _send_approval_request_mail(absence_id: int, requester: dict, type_name: str, date_from: str, date_to: str, approver_id: int) -> None:
+    """Send approval request email to approver in a background thread."""
+    import threading as _thr
+    def _do():
+        try:
+            with app.app_context():
+                db = connect()
+                apr = db.execute("SELECT email, language, display_name, username FROM users WHERE id=?", (approver_id,)).fetchone()
+                db.close()
+                if not apr or not apr["email"]:
+                    app.logger.warning(f"Approval-Mail: Genehmiger {approver_id} hat keine E-Mail")
+                    return
+                lang = (apr["language"] or "de")
+                requester_name = requester.get("display_name") or requester.get("username", "?")
+                base_url = _get_base_url()
+                url = f"{base_url}/admin"
+                body = t("mail.approval_request_body", lang).format(
+                    name=requester_name,
+                    type=type_name,
+                    from_date=date_from,
+                    to_date=date_to,
+                    url=url,
+                )
+                _send_mail_simple(apr["email"], t("mail.approval_request_subject", lang), body)
+                app.logger.info(f"Approval-Mail gesendet an {apr['email']} für Abwesenheit {absence_id}")
+                # Telegram notification to approver
+                base_url = _get_base_url()
+                tg_text = (
+                    f"📋 {requester_name} beantragt {type_name} "
+                    f"{date_from} – {date_to}.\n"
+                    f"Zur Genehmigung: {base_url}/approvals"
+                )
+                _send_tg_message(approver_id, tg_text)
+        except Exception as e:
+            app.logger.error(f"Approval-Mail Fehler: {e}")
+    _thr.Thread(target=_do, daemon=True).start()
+
+
 def _build_rich_day_export(user_id: int, date_from: str, date_to: str):
     """Build day-by-day export matching balance view: Wochentag|Datum|Beginn|Ende|Pause|Soll|Delta|Bemerkung."""
     _WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
@@ -10877,6 +11306,87 @@ function filterHelp(q){{
   </div></div>
 </div>
 
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>✅ Absence Approval</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>What is absence approval?</b>
+      <p>Certain absence types (e.g. vacation) can be configured to require approval before becoming active in the flex-time balance. Pending absences show a yellow ⏳ badge and do <em>not</em> affect the flex-time account until approved.</p>
+    </div>
+    <div class="help-entry">
+      <b>Who can approve?</b>
+      <p>Users with the <em>Approver</em> role. Approvers access their queue via the hamburger menu → <b>Approvals</b> (<code>/approvals</code>).</p>
+    </div>
+    <div class="help-entry">
+      <b>Setup (Admin / Time Manager only)</b>
+      <p>Under <em>Admin → User overviews → Edit user</em>, in the <em>Approval</em> section:</p>
+      <ul>
+        <li><b>Is Approver:</b> enable to allow this user to approve other people's absences.</li>
+        <li><b>Approver:</b> select who approves <em>this</em> user's absences.</li>
+        <li><b>Approval required for:</b> tick which absence types need approval (e.g. Vacation, Flex day).</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Workflow</b>
+      <ul>
+        <li>Employee submits absence → status <b>⏳ Pending</b> (not counted in flex time yet).</li>
+        <li>Approver receives e-mail + Telegram notification.</li>
+        <li>Approver opens <em>/approvals</em> → clicks <b>✅ Approve</b> or <b>✗ Reject</b> (rejection requires a reason).</li>
+        <li>Employee receives e-mail + Telegram with the decision.</li>
+        <li>Approved: absence becomes active and counts in the flex-time balance.</li>
+        <li>Rejected: absence remains visible with a red ✗ badge and rejection reason; does not count.</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Bot commands (approvers only)</b>
+      <p><code>/genehmigungen</code> — list pending requests &nbsp;·&nbsp; <code>genehmigen &lt;ID&gt;</code> — approve &nbsp;·&nbsp; <code>ablehnen &lt;ID&gt; &lt;reason&gt;</code> — reject</p>
+    </div>
+  </div></div>
+</div>
+
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>🔒 Security</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body"><div class="acc-inner">
+    <div class="help-entry">
+      <b>Two-Factor Authentication (2FA / TOTP)</b>
+      <ul>
+        <li>Enable under <em>Settings → Security → Activate 2FA</em>.</li>
+        <li>Scan the QR code with Google Authenticator, Authy or any TOTP app.</li>
+        <li>8 single-use backup codes are generated — store them safely offline.</li>
+        <li>Lost authenticator: use a backup code at the 2FA prompt (each code works once).</li>
+        <li>Admin can disable 2FA for any user: <em>Admin → User overviews → Edit user</em>.</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Login lock</b>
+      <p>After <b>3 failed login attempts</b> the account is locked for <b>30 minutes</b>.</p>
+      <ul>
+        <li>An unlock link is sent to the e-mail address stored in the user profile.</li>
+        <li>Clicking the link immediately unlocks the account (valid for 24 h).</li>
+        <li>Admin / Time Manager can unlock manually: <em>Admin → User overviews → 🔓 Unlock</em>.</li>
+        <li>No e-mail stored → only manual admin unlock is possible.</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Password rules</b>
+      <ul>
+        <li>Minimum <b>10 characters</b></li>
+        <li>At least one <b>uppercase</b> and one <b>lowercase</b> letter</li>
+        <li>At least one <b>digit</b></li>
+        <li>Must not contain the username</li>
+      </ul>
+    </div>
+    <div class="help-entry">
+      <b>Backup encryption</b>
+      <p>Full backups can be encrypted with a password (AES via Fernet). The password is <em>not stored</em> — if lost, the backup cannot be decrypted. Keep it separately from the backup file.</p>
+    </div>
+  </div></div>
+</div>
+
 {admin_section_en}
 """
     return render_template_string(layout(t("help.title"), body, u, APP_VERSION))
@@ -10972,6 +11482,7 @@ def admin_users_new():
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
           <div><label>Username</label><br><input name="username" required></div>
           <div><label>Temporäres Passwort</label><br><input type="password" name="password" required></div>
+          <div><label>{t('admin.email')}</label><br><input type="email" name="user_email" placeholder="name@firma.de"></div>
         </div>
         <div style="margin-bottom:10px;">
           <label>Erfassung ab <span class="small">(leer = ab Jahresbeginn)</span></label><br>
@@ -11024,11 +11535,12 @@ def admin_users_new_post():
         add_flash(t("flash.error.user_create_failed"), "error")
         return redirect(url_for("admin_users_new"))
 
-    # Set role, admin_only, must_change_password
+    # Set role, admin_only, must_change_password, email
+    user_email = (request.form.get("user_email") or "").strip()
     db = connect()
     db.execute(
-        "UPDATE users SET admin_role=?, admin_only=?, must_change_password=1, updated_at=datetime('now') WHERE id=?",
-        (new_role or None, admin_only_val, new_id),
+        "UPDATE users SET admin_role=?, admin_only=?, must_change_password=1, email=?, updated_at=datetime('now') WHERE id=?",
+        (new_role or None, admin_only_val, user_email or None, new_id),
     )
     db.commit()
     db.close()
@@ -11063,7 +11575,8 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id FROM users WHERE id=?", (user_id,)).fetchone()
+    _all_approvers = db.execute("SELECT id, username, display_name FROM users WHERE is_approver=1 AND is_active=1 ORDER BY username").fetchall()
     db.close()
     if not r:
         abort(404)
@@ -11142,6 +11655,48 @@ def admin_users_edit(user_id: int):
           <div class="small" style="color:var(--mu);margin-top:2px;">Aktivieren für Admins ohne eigene Zeiterfassung.</div>
         </div>""" if _can_edit_role else ""
 
+    # Approver settings
+    _cur_is_approver = bool(r["is_approver"])
+    _cur_approver_id = r["approver_id"]
+    _cur_art_str = r["approval_required_types"] or ""
+    _cur_art_ids = {int(x) for x in _cur_art_str.split(",") if x.strip().isdigit()} if _cur_art_str else set()
+
+    def _art_checked(tid) -> str:
+        return "checked" if tid and tid in _cur_art_ids else ""
+
+    _approver_opts = '<option value="">' + t("admin.approval_none") + '</option>'
+    for _apr in _all_approvers:
+        _apr_sel = "selected" if _cur_approver_id and _cur_approver_id == _apr["id"] else ""
+        _apr_lbl = _html.escape(_apr["display_name"] or _apr["username"])
+        _approver_opts += f'<option value="{_apr["id"]}" {_apr_sel}>{_apr_lbl}</option>'
+
+    _approval_type_checks = ""
+    for _abt in _all_abs_types:
+        _approval_type_checks += (
+            f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
+            f'<input type="checkbox" name="art_{_abt["id"]}" value="1" {_art_checked(_abt["id"])}>'
+            f'<span>{_html.escape(_abt["name"])}</span></label>'
+        )
+
+    _approver_section = f"""
+        <div style="margin-bottom:14px;border-top:1px solid var(--bd);padding-top:12px;margin-top:4px;">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px;">{t('admin.is_approver')} / {t('admin.approval_types')}</div>
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px;font-weight:400;">
+            <input type="checkbox" name="is_approver" value="1" {"checked" if _cur_is_approver else ""}>
+            <span>{t('admin.is_approver')}</span>
+          </label>
+          <div style="margin-bottom:8px;">
+            <label style="font-size:12px;">{t('admin.approver')}</label>
+            <select name="approver_id" style="font-size:13px;padding:4px 8px;margin-top:4px;display:block;">
+              {_approver_opts}
+            </select>
+          </div>
+          <div>
+            <div style="font-size:12px;margin-bottom:4px;">{t('admin.approval_types')}:</div>
+            {_approval_type_checks}
+          </div>
+        </div>"""
+
     # Schedule list for this user
     all_scheds = _get_user_schedules_all(user_id)
     today_iso = datetime.date.today().isoformat()
@@ -11208,6 +11763,7 @@ def admin_users_edit(user_id: int):
         </div><br>
 
         {_absence_types_html}
+        {_approver_section}
 
         <button class="btn" type="submit">Speichern</button>
         <a class="btn" href="/admin/users">Zurück</a>
@@ -11312,6 +11868,27 @@ def admin_users_edit_post(user_id: int):
         db.execute(
             "UPDATE users SET admin_only=?, updated_at=datetime('now') WHERE id=?",
             (new_admin_only, user_id),
+        )
+        db.commit()
+        db.close()
+
+    # Approver settings (sysadmin or timemanager)
+    if is_sysadmin(u) or is_timemanager(u):
+        new_is_approver = 1 if request.form.get("is_approver") == "1" else 0
+        new_approver_id_raw = (request.form.get("approver_id") or "").strip()
+        new_approver_id = int(new_approver_id_raw) if new_approver_id_raw.isdigit() else None
+
+        # Collect approval_required_types from checkboxes named art_{id}
+        _adb = connect()
+        _abt_ids = [r["id"] for r in _adb.execute("SELECT id FROM absence_types WHERE active=1").fetchall()]
+        _adb.close()
+        _new_art_ids = [str(tid) for tid in _abt_ids if request.form.get(f"art_{tid}") == "1"]
+        new_art = ",".join(_new_art_ids) if _new_art_ids else None
+
+        db = connect()
+        db.execute(
+            "UPDATE users SET is_approver=?, approver_id=?, approval_required_types=?, updated_at=datetime('now') WHERE id=?",
+            (new_is_approver, new_approver_id, new_art, user_id),
         )
         db.commit()
         db.close()
@@ -11852,7 +12429,10 @@ def admin_home():
         _is_locked = False
         if _locked_until_str:
             try:
-                _is_locked = datetime.datetime.fromisoformat(_locked_until_str) > datetime.datetime.now()
+                _lu = datetime.datetime.fromisoformat(_locked_until_str)
+                if _lu.tzinfo is None:
+                    _lu = _lu.replace(tzinfo=datetime.timezone.utc)
+                _is_locked = _lu > datetime.datetime.now(tz=_get_timezone())
             except Exception:
                 pass
         locked_badge = (f" <span class='small' style='color:var(--danger);font-weight:600;'>🔒 {t('auth.too_many_attempts')}</span>"
@@ -12132,6 +12712,7 @@ window.addEventListener('DOMContentLoaded',function(){{
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
                 <div><label style="font-size:12px;">{t('admin.user_name')}</label><br><input name="username" required style="font-size:13px;padding:5px 8px;" id="nu-user"></div>
                 <div id="nu-pw-wrap"><label style="font-size:12px;">{t('admin.temp_password')}</label><br><input type="password" name="password" id="nu-pw" style="font-size:13px;padding:5px 8px;"></div>
+                <div><label style="font-size:12px;">{t('admin.email')}</label><br><input type="email" name="user_email" placeholder="name@firma.de" style="font-size:13px;padding:5px 8px;"></div>
                 <div><label style="font-size:12px;">{t('admin.tracking_start_col')}</label><br>{_date_input("tracking_start_date", today_iso)}</div>
               </div>
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
@@ -14008,6 +14589,7 @@ def _render_regional_section() -> str:
     cfg = _get_app_config()
     default_region = cfg.get("default_holiday_region") or "DE-NW"
     base_url_val   = _html.escape(cfg.get("base_url") or "")
+    current_tz     = cfg.get("timezone") or "Europe/Berlin"
     return f"""
     <div class="acc" id="acc-regional">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-regional-body')">
@@ -14024,6 +14606,11 @@ def _render_regional_section() -> str:
                      placeholder="https://zeiten.firma.de"
                      style="width:100%;max-width:400px;margin-top:4px;">
               <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.base_url_hint')}</div>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label style="font-size:12px;">{t('admin.timezone')}</label>
+              {_timezone_select("timezone", current_tz)}
+              <div class="small" style="color:var(--mu);margin-top:3px;">{t('admin.timezone_hint')}</div>
             </div>
             <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
           </form>
@@ -14481,10 +15068,17 @@ def admin_appearance_save():
 def admin_server_config_save():
     bootstrap()
     base_url = (request.form.get("base_url") or "").strip().rstrip("/")
+    chosen_tz = (request.form.get("timezone") or "Europe/Berlin").strip()
+    if chosen_tz not in [v for v, _ in _COMMON_TIMEZONES]:
+        chosen_tz = "Europe/Berlin"
     db = connect()
     db.execute(
         "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
         ("base_url", base_url),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO app_config(key, value, updated_at) VALUES(?, ?, datetime('now'))",
+        ("timezone", chosen_tz),
     )
     db.commit()
     db.close()

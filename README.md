@@ -1,4 +1,4 @@
-# Zeiterfassung v2.0.5
+# Zeiterfassung v2.0.9
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail, Telegram-Bot und einem umfassenden Admin-Bereich mit Rollentrennung.
 
@@ -353,6 +353,17 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ## Versionshistorie
 
+### v2.0.9
+- **Abwesenheits-Genehmigung:** Neue Genehmiger-Rolle (`is_approver`); pro User konfigurierbar welche Abwesenheitstypen genehmigt werden müssen und wer genehmigt; Genehmigungsübersicht `/approvals` mit Pending / Vergangene Entscheidungen; Mail + Telegram-Benachrichtigung bei Anfrage und Entscheidung; Pending-Abwesenheiten werden nicht im Gleitzeitkonto berücksichtigt; Bot-Befehle `/genehmigungen`, `genehmigen <ID>`, `ablehnen <ID> <Grund>`
+- **Zeitzone konfigurierbar:** Neue Einstellung `timezone` in `app_config`; wählbar bei Ersteinrichtung (`/setup`) und in Admin → Systemeinstellungen; alle Zeitanzeigen und Sperr-Uhrzeiten nutzen die konfigurierte Zeitzone (Standard: `Europe/Berlin`)
+- **2FA (TOTP):** Aktivierung unter Einstellungen → Sicherheit; QR-Code-Scan mit Authenticator-App; 8 Backup-Codes; Bot-Unterstützung
+- **Login-Sperre:** Nach 3 Fehlversuchen 30 Minuten Sperre; Entsperr-Link per Mail (in User-Sprache); Timezone-korrekte Anzeige der Sperrzeit; Admin-Entsperren manuell; Mail-Versand jetzt mit korrektem App-Kontext (Thread-Fix)
+- **E-Mail bei Benutzererstellung:** Feld „E-Mail" im Formular „Neuer User" (Admin-Panel); wird direkt in `users.email` gespeichert
+- **Flash Messages vollständig mehrsprachig:** Alle `add_flash()`-Aufrufe nutzen `t()`; ~130 neue `flash.error.*` / `flash.success.*` Schlüssel in DE + EN
+- **Backup-Verschlüsselung:** Optionale AES/Fernet-Verschlüsselung beim Download; Passwort nicht gespeichert
+- **Passwort-Compliance:** Bestehende Konten werden als nicht-konform markiert; Pflicht zur Änderung beim nächsten Login
+- **DB-Pfad auf Login-Seite entfernt**
+
 ### v2.0.5
 - **Kalender-Export:** .ics-Download und webcal://-Abonnement für alle Abwesenheiten; Präfix pro Nutzer konfigurierbar; Token-Reset macht alte Abos ungültig
 - **CalDAV-Server:** PROPFIND/REPORT/GET-Routen für Home Assistant CalDAV-Integration; Token-Auth (`/caldav/<token>/`) und Basic Auth (`/caldav/basic/`); Authentifizierung wählbar (Token / HTTP Basic)
@@ -406,4 +417,4 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ---
 
-*Zeiterfassung v2.0.5 – Flask + SQLite – 20 Länder*
+*Zeiterfassung v2.0.9 – Flask + SQLite – 20 Länder*
