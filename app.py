@@ -15298,6 +15298,7 @@ def admin_features_save():
 def dev_users():
     if not IS_DEV:
         abort(404)
+    u = current_user()
     db = connect()
     users = db.execute(
         "SELECT id, username, display_name, admin_role, is_approver "
@@ -15305,21 +15306,40 @@ def dev_users():
     ).fetchall()
     db.close()
     rows = "".join(
-        f'<tr><td>{u["id"]}</td><td>{u["username"]}</td>'
-        f'<td>{u["admin_role"] or "-"}</td>'
-        f'<td><a href="/dev/su/{u["id"]}" class="btn btn-sm btn-primary">'
-        f'Einloggen</a></td></tr>'
-        for u in users
+        f'<tr>'
+        f'<td>{usr["id"]}</td>'
+        f'<td><strong>{usr["username"]}</strong>'
+        f'{" · " + usr["display_name"] if usr["display_name"] else ""}</td>'
+        f'<td>{"🔧 " + usr["admin_role"] if usr["admin_role"] else "–"}</td>'
+        f'<td><a href="/dev/su/{usr["id"]}" class="btn btn-primary btn-sm">'
+        f'Einloggen</a></td>'
+        f'</tr>'
+        for usr in users
     )
-    return f"""<!doctype html><html><head>
-        <title>DEV Users</title>
-        <link rel="stylesheet" href="/static/style.css">
-    </head><body style="padding:2rem">
-    <h2>&#9888;&#65039; DEV MODE - User wechseln</h2>
-    <table class="table"><thead><tr>
-        <th>ID</th><th>Username</th><th>Rolle</th><th>Aktion</th>
-    </tr></thead><tbody>{rows}</tbody></table>
-    </body></html>"""
+    body = f"""
+    <div style="max-width:600px;margin:2rem auto">
+      <div style="background:#dc2626;color:#fff;padding:12px 16px;
+                  border-radius:8px;margin-bottom:1.5rem;font-weight:600">
+        &#9888;&#65039; DEV MODE — Nur auf Entwicklungsumgebung!
+      </div>
+      <h2 style="margin-bottom:1rem">User wechseln</h2>
+      <table class="table" style="width:100%">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Username</th>
+            <th>Rolle</th>
+            <th>Aktion</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+    """
+    return render_template_string(layout(
+        t('dev.users_title'),
+        body, u, APP_VERSION
+    ))
 
 
 @app.get("/dev/su/<int:uid>")

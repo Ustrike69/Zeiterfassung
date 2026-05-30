@@ -972,6 +972,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.feature_staffing":       "Besetzungsplanung",
         "admin.feature_staffing_hint":  "Ermöglicht Schichtplanung und Mindestbesetzungs-Überwachung",
 
+        # ── Dev Mode ─────────────────────────────────────────────────
+        "dev.users_title":              "DEV - User wechseln",
+
         # ── Help ──────────────────────────────────────────────────────
         "help.title":       "Hilfe",
         "help.search":      "Hilfe durchsuchen …",
@@ -2052,6 +2055,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.features":               "Features",
         "admin.feature_staffing":       "Staffing",
         "admin.feature_staffing_hint":  "Enables shift planning and minimum staffing monitoring",
+
+        # ── Dev Mode ─────────────────────────────────────────────────
+        "dev.users_title":              "DEV - Switch User",
 
         # ── Help ──────────────────────────────────────────────────────
         "help.title":       "Help",
