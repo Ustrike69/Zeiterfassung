@@ -1019,6 +1019,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wd.sun":                       "So",
         "wd.weekday":                   "Wochentag",
 
+        # ── Zeitschema Tagesblöcke ────────────────────────────────
+        "settings.schedule_blocks":       "Tagesblöcke",
+        "settings.schedule_add_block":    "Block hinzufügen",
+        "settings.schedule_blocks_hint":  "Mehrere Zeitblöcke pro Tag, z.B. für Split-Schichten",
+
+        # ── Gleitzeitkonto Korrekturen ────────────────────────────
+        "balance.adjustment":             "Manuelle Korrektur",
+        "balance.add_adjustment":         "Neue Korrektur",
+        "balance.adjustment_hours":       "Stunden (negativ = Abzug)",
+        "balance.adjustment_reason":      "Beschreibung",
+        "balance.adjustment_hint":        "z.B. -10 für 10h ausbezahlt",
+
         # ── Success flashes ───────────────────────────────────────
         "success.team_created":         "Team angelegt",
         "success.team_deleted":         "Team gelöscht",
@@ -1026,6 +1038,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.plan_created":         "Plan angelegt",
         "success.slot_created":         "Slot angelegt",
         "success.assignments_saved":    "Zuweisung gespeichert",
+        "success.adjustment_created":   "Korrektur gespeichert",
+        "success.adjustment_deleted":   "Korrektur gelöscht",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
@@ -2158,6 +2172,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wd.sun":                       "Sun",
         "wd.weekday":                   "Weekday",
 
+        # ── Zeitschema Tagesblöcke ────────────────────────────────
+        "settings.schedule_blocks":       "Daily blocks",
+        "settings.schedule_add_block":    "Add block",
+        "settings.schedule_blocks_hint":  "Multiple time blocks per day, e.g. for split shifts",
+
+        # ── Gleitzeitkonto Korrekturen ────────────────────────────
+        "balance.adjustment":             "Manual adjustment",
+        "balance.add_adjustment":         "New adjustment",
+        "balance.adjustment_hours":       "Hours (negative = deduct)",
+        "balance.adjustment_reason":      "Description",
+        "balance.adjustment_hint":        "e.g. -10 for 10h paid out",
+
         # ── Success flashes ───────────────────────────────────────
         "success.team_created":         "Team created",
         "success.team_deleted":         "Team deleted",
@@ -2165,6 +2191,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.plan_created":         "Plan created",
         "success.slot_created":         "Slot created",
         "success.assignments_saved":    "Assignments saved",
+        "success.adjustment_created":   "Adjustment saved",
+        "success.adjustment_deleted":   "Adjustment deleted",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",

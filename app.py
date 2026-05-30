@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev3"
+APP_VERSION = "v3.0.0.dev4"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -313,6 +313,18 @@ def _ensure_user_schedules_schema() -> None:
 
     # Ensure index
     cur.execute("CREATE INDEX IF NOT EXISTS idx_user_schedules_user_valid_from ON user_schedules(user_id, valid_from)")
+
+    # v3.0.0.dev4 – Tagesblöcke
+    cur.execute("""CREATE TABLE IF NOT EXISTS schedule_daily_blocks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id INTEGER NOT NULL
+            REFERENCES user_schedules(id) ON DELETE CASCADE,
+        weekday INTEGER NOT NULL,
+        time_from TEXT NOT NULL,
+        time_to TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0
+    )""")
+
     db.commit()
     db.close()
 
@@ -1175,6 +1187,25 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
 
     mode = (sched.get("mode") or "weekly").strip().lower()
     if mode == "daily":
+        sched_id = sched.get("id")
+        if sched_id:
+            _db2 = connect()
+            _blocks = _db2.execute(
+                "SELECT time_from, time_to FROM schedule_daily_blocks "
+                "WHERE schedule_id=? AND weekday=? ORDER BY sort_order",
+                (sched_id, wd)
+            ).fetchall()
+            _db2.close()
+            if _blocks:
+                total = 0
+                for b in _blocks:
+                    try:
+                        hf, mf = map(int, b["time_from"].split(":"))
+                        ht, mt = map(int, b["time_to"].split(":"))
+                        total += (ht * 60 + mt) - (hf * 60 + mf)
+                    except Exception:
+                        pass
+                return max(0, total)
         return int(sched.get(_weekday_col(d), 0) or 0)
 
     weekly = int(sched.get("weekly_minutes", 0) or 0)
@@ -1583,8 +1614,8 @@ def _parse_sched_form(form) -> dict:
     }
 
 
-def _sched_save_to_db(user_id: int, sched_dict: dict) -> None:
-    """Upsert a schedule row for user_id. sched_dict must contain valid_from."""
+def _sched_save_to_db(user_id: int, sched_dict: dict) -> int:
+    """Upsert a schedule row for user_id. Returns the schedule_id."""
     now = datetime.datetime.now().isoformat(timespec="seconds")
     row = {"user_id": int(user_id), "updated_at": now, **sched_dict}
     db = connect()
@@ -1595,13 +1626,124 @@ def _sched_save_to_db(user_id: int, sched_dict: dict) -> None:
     db.execute("DELETE FROM user_schedules WHERE user_id=? AND valid_from=?", (row["user_id"], row["valid_from"]))
     col_list = ", ".join(row.keys())
     ph_list = ", ".join(["?"] * len(row))
-    db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+    cur = db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+    schedule_id = cur.lastrowid
+    db.commit()
+    db.close()
+    return schedule_id
+
+
+def _parse_sched_blocks_from_form(form) -> dict[int, list[tuple[str, str]]]:
+    """Parse block_{wd}_from[] / block_{wd}_to[] from form. Returns {weekday: [(from, to), ...]}."""
+    blocks: dict[int, list] = {}
+    for wd in range(7):
+        froms = form.getlist(f"block_{wd}_from[]")
+        tos   = form.getlist(f"block_{wd}_to[]")
+        pairs = []
+        for tf, tt in zip(froms, tos):
+            tf = (tf or "").strip()
+            tt = (tt or "").strip()
+            if tf and tt and tf < tt:
+                pairs.append((tf, tt))
+        if pairs:
+            blocks[wd] = pairs
+    return blocks
+
+
+def _sched_save_blocks(schedule_id: int, blocks: dict) -> None:
+    """Replace schedule_daily_blocks for schedule_id."""
+    db = connect()
+    db.execute("DELETE FROM schedule_daily_blocks WHERE schedule_id=?", (schedule_id,))
+    for wd, pairs in blocks.items():
+        for order, (tf, tt) in enumerate(pairs):
+            db.execute(
+                "INSERT INTO schedule_daily_blocks "
+                "(schedule_id, weekday, time_from, time_to, sort_order) VALUES (?,?,?,?,?)",
+                (schedule_id, int(wd), tf, tt, order)
+            )
     db.commit()
     db.close()
 
 
+def _sched_daily_blocks_html(sched_id, mode: str) -> str:
+    """Render the Tagesblöcke section for the schedule form."""
+    _WD_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    existing: dict[int, list] = {}
+    has_blocks = False
+    if sched_id:
+        try:
+            _db = connect()
+            rows = _db.execute(
+                "SELECT weekday, time_from, time_to FROM schedule_daily_blocks "
+                "WHERE schedule_id=? ORDER BY weekday, sort_order",
+                (sched_id,)
+            ).fetchall()
+            _db.close()
+            for r in rows:
+                existing.setdefault(r["weekday"], []).append((r["time_from"], r["time_to"]))
+                has_blocks = True
+        except Exception:
+            pass
+
+    checked = "checked" if has_blocks else ""
+    display = "block" if has_blocks else "none"
+
+    wd_rows = ""
+    for wd in range(7):
+        blk_html = ""
+        for tf, tt in existing.get(wd, []):
+            blk_html += (
+                f'<div class="sdb-row" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
+                f'<input type="time" name="block_{wd}_from[]" value="{tf}" step="900" style="width:100px;">'
+                f'<span>–</span>'
+                f'<input type="time" name="block_{wd}_to[]" value="{tt}" step="900" style="width:100px;">'
+                f'<button type="button" onclick="this.parentElement.remove()" '
+                f'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>'
+                f'</div>'
+            )
+        wd_rows += (
+            f'<div style="margin-bottom:10px;">'
+            f'<div style="font-size:12px;font-weight:600;margin-bottom:4px;">{_WD_LABELS[wd]}</div>'
+            f'<div id="sdb-{wd}">{blk_html}</div>'
+            f'<button type="button" onclick="sdbAdd({wd})" '
+            f'style="font-size:12px;color:var(--ac);background:none;border:none;cursor:pointer;padding:0;">'
+            f'+ {t("settings.schedule_add_block")}</button>'
+            f'</div>'
+        )
+
+    return f"""
+        <div class="card" style="background:#fafafa;margin-top:12px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <label style="font-weight:600;">
+              <input type="checkbox" name="use_daily_blocks" value="1" {checked}
+                     id="sdb-toggle"
+                     onchange="document.getElementById('sdb-section').style.display=this.checked?'block':'none';">
+              {t('settings.schedule_blocks')}
+            </label>
+            <span class="small" style="color:#777;">{t('settings.schedule_blocks_hint')}</span>
+          </div>
+          <div id="sdb-section" style="display:{display};">
+            {wd_rows}
+          </div>
+        </div>
+        <script>
+        function sdbAdd(wd){{
+          var c=document.getElementById('sdb-'+wd);
+          var d=document.createElement('div');
+          d.className='sdb-row';
+          d.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:4px;';
+          d.innerHTML='<input type="time" name="block_'+wd+'_from[]" step="900" style="width:100px;">'
+            +'<span>–</span>'
+            +'<input type="time" name="block_'+wd+'_to[]" step="900" style="width:100px;">'
+            +'<button type="button" onclick="this.parentElement.remove()" '
+            +'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>';
+          c.appendChild(d);
+        }}
+        </script>"""
+
+
 def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bool = False,
-                     auto_breaks_enabled: bool = False) -> str:
+                     auto_breaks_enabled: bool = False, sched_id: int = None) -> str:
     """Return the complete <form> HTML for creating/editing a schedule."""
     def chk(bit):
         return "checked" if (int(sched.get("workdays_mask", 0)) & bit) else ""
@@ -1670,6 +1812,7 @@ def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bo
           </div>
           <div class="small" style="color:#777;margin-top:6px;">Format: HH:MM (z. B. 07:30). Leer oder 00:00 = kein Soll.</div>
         </div>
+        {_sched_daily_blocks_html(sched_id, mode)}
         <div style="margin-top:12px;display:flex;gap:8px;">
           <button class="btn primary" type="submit">Speichern</button>
           <a class="btn" href="{_html.escape(back_url)}">Abbrechen</a>
@@ -3456,6 +3599,39 @@ def balance_view():
         all_rows.append({"day": iso, "expected": expected, "actual": actual,
                          "delta": delta, "running": running, "flextag_min": flextag_min})
 
+    # ── Manuelle Korrekturen einmischen ──────────────────────────────────
+    try:
+        _db_adj = connect()
+        _adjustments = _db_adj.execute(
+            "SELECT ba.*, u.display_name as creator_name "
+            "FROM balance_adjustments ba "
+            "LEFT JOIN users u ON u.id=ba.created_by "
+            "WHERE ba.user_id=? AND ba.adjustment_date BETWEEN ? AND ? "
+            "ORDER BY ba.adjustment_date",
+            (u["id"], year_start, year_end)
+        ).fetchall()
+        _db_adj.close()
+        for _adj in _adjustments:
+            _adj_iso = _adj["adjustment_date"]
+            _adj_min = int(_adj["minutes"])
+            _insert_at = len(all_rows)
+            for _i, _row in enumerate(all_rows):
+                if _row["day"] > _adj_iso:
+                    _insert_at = _i
+                    break
+            _prev_running = all_rows[_insert_at - 1]["running"] if _insert_at > 0 else int(start_minutes)
+            _new_running = _prev_running + _adj_min
+            _adj_row = {
+                "day": _adj_iso, "expected": 0, "actual": 0,
+                "delta": _adj_min, "running": _new_running, "flextag_min": 0,
+                "_type": "adjustment", "_reason": _adj["reason"],
+            }
+            all_rows.insert(_insert_at, _adj_row)
+            for _r in all_rows[_insert_at + 1:]:
+                _r["running"] += _adj_min
+    except Exception:
+        pass
+
     # ── Anzeigebereich bestimmen ─────────────────────────────────────────
     if sel_month == 0:
         display_start = year_start
@@ -3569,6 +3745,28 @@ def balance_view():
     _wd_names = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     trs = ""
     for r in display_rows:
+        if r.get("_type") == "adjustment":
+            _adj_clr = "#a855f7"
+            _adj_min = r["delta"]
+            _adj_sign = "+" if _adj_min >= 0 else ""
+            _adj_h = f"{_adj_sign}{_fmt_minutes_signed(_adj_min)}"
+            _run_clr = _balance_color(r["running"])
+            _td = "style='padding:8px 6px;vertical-align:middle;'"
+            _td_r = "style='padding:8px 6px;vertical-align:middle;text-align:right;'"
+            trs += (
+                f"<tr style='border-bottom:1px solid var(--bd);"
+                f"background:color-mix(in srgb,{_adj_clr} 6%,var(--bg));'>"
+                f"<td {_td} style='padding:8px 6px;color:{_adj_clr};'>📋</td>"
+                f"<td {_td} style='padding:8px 6px;color:{_adj_clr};font-size:12px;'>"
+                f"{_fmt_date_de(r['day'])}</td>"
+                f"<td {_td} colspan='6' style='padding:8px 6px;font-size:12px;"
+                f"color:{_adj_clr};'>{t('balance.adjustment')}: "
+                f"{_html.escape(r.get('_reason',''))}</td>"
+                f"<td {_td_r}><b style='color:{_adj_clr};'>{_adj_h}</b></td>"
+                f"<td {_td_r}><b style='color:{_run_clr};'>{_fmt_minutes_signed(r['running'])}</b></td>"
+                f"</tr>"
+            )
+            continue
         _d_obj    = datetime.date.fromisoformat(r["day"])
         _wd_lbl   = _wd_names[_d_obj.weekday()]
         _blocks_d = _all_blocks_map.get(r["day"], [])
@@ -4009,6 +4207,19 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
         if iso < today_iso and expected == 0 and _is_flextag(iso, flextag_ranges):
             flextag_min = _scheduled_minutes_ignoring_absence(user_id, iso)
         running += int(actual - expected - flextag_min)
+
+    # Manuelle Korrekturen einrechnen
+    try:
+        _db_adj = connect()
+        _adj = _db_adj.execute(
+            "SELECT COALESCE(SUM(minutes),0) AS total FROM balance_adjustments "
+            "WHERE user_id=? AND adjustment_date BETWEEN ? AND ?",
+            (user_id, year_start, end_iso)
+        ).fetchone()
+        _db_adj.close()
+        running += int(_adj["total"] or 0)
+    except Exception:
+        pass
 
     return int(running)
 
@@ -9386,7 +9597,11 @@ def settings_save():
             """
             return render_template_string(layout("Zeitschema – Überschneidung", warn_body, u, APP_VERSION))
 
-    _sched_save_to_db(u["id"], sched)
+    sid = _sched_save_to_db(u["id"], sched)
+    if request.form.get("use_daily_blocks"):
+        _sched_save_blocks(sid, _parse_sched_blocks_from_form(request.form))
+    else:
+        _sched_save_blocks(sid, {})
     add_flash(t("settings.schedule_saved"), "success")
     return redirect("/settings")
 
@@ -12379,7 +12594,11 @@ def admin_schedule_edit_post(user_id: int, schedule_id: str):
         except (ValueError, Exception):
             pass
 
-    _sched_save_to_db(user_id, sched)
+    sid = _sched_save_to_db(user_id, sched)
+    if request.form.get("use_daily_blocks"):
+        _sched_save_blocks(sid, _parse_sched_blocks_from_form(request.form))
+    else:
+        _sched_save_blocks(sid, {})
     add_flash(t("flash.success.schedule_saved").format(date=_fmt_date_de(sched["valid_from"])), "success")
     return redirect(f"/admin/users/{user_id}/edit")
 
@@ -14690,7 +14909,60 @@ def _render_admin_overtime_section() -> str:
         "overtime_notify_enabled, overtime_notify_interval, overtime_last_notified "
         "FROM users WHERE is_active=1 ORDER BY display_name, username"
     ).fetchall()
+    _adj_users = db.execute(
+        "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    _adj_rows = db.execute("""
+        SELECT ba.*, u.display_name as uname, u.username,
+               cb.display_name as cname
+        FROM balance_adjustments ba
+        JOIN users u ON u.id=ba.user_id
+        LEFT JOIN users cb ON cb.id=ba.created_by
+        ORDER BY ba.adjustment_date DESC
+        LIMIT 50
+    """).fetchall()
     db.close()
+
+    def _fmt_adj_h(m):
+        h = m / 60
+        sign = "+" if m >= 0 else ""
+        return f"{sign}{h:.2f}h".replace(".00h","h")
+
+    _adj_trs = ""
+    for _a in _adj_rows:
+        _udisp = _html.escape(_a["uname"] or _a["username"] or "?")
+        _cdisp = _html.escape(_a["cname"] or "–")
+        _hdisp = _fmt_adj_h(int(_a["minutes"]))
+        _clr   = "#16a34a" if int(_a["minutes"]) >= 0 else "#dc2626"
+        _adj_trs += (
+            f"<tr>"
+            f"<td style='padding:4px 6px;font-size:12px;'>{_a['adjustment_date']}</td>"
+            f"<td style='padding:4px 6px;font-size:12px;'>{_udisp}</td>"
+            f"<td style='padding:4px 6px;font-size:12px;font-weight:600;color:{_clr};'>{_hdisp}</td>"
+            f"<td style='padding:4px 6px;font-size:12px;'>{_html.escape(_a['reason'])}</td>"
+            f"<td style='padding:4px 6px;font-size:12px;color:var(--mu);'>{_cdisp}</td>"
+            f"<td style='padding:4px 6px;'>"
+            f"<form method='post' action='/admin/balance-adjustment' style='margin:0;'>"
+            f"<input type='hidden' name='action' value='delete'>"
+            f"<input type='hidden' name='adj_id' value='{_a['id']}'>"
+            f"<button class='btn btn-sm' type='submit' style='color:#dc2626;font-size:11px;padding:1px 6px;'"
+            + f" onclick=\"return confirm('{t('confirm.delete')}')\">×</button>"
+            f"</form></td>"
+            f"</tr>"
+        )
+    _adj_table = ""
+    if _adj_trs:
+        _adj_table = f"""
+        <div class="table-scroll" style="margin-top:12px;">
+          <table style="font-size:12px;">
+            <thead><tr>
+              <th>Datum</th><th>{t('common.name')}</th>
+              <th>Stunden</th><th>{t('balance.adjustment_reason')}</th>
+              <th>Erstellt von</th><th></th>
+            </tr></thead>
+            <tbody>{_adj_trs}</tbody>
+          </table>
+        </div>"""
 
     def _mins_to_h(m) -> str:
         if m is None:
@@ -14844,9 +15116,77 @@ def _render_admin_overtime_section() -> str:
             </div>
           </form>
 
+          <hr style="margin:14px 0;">
+
+          <!-- Manuelle Korrekturen -->
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('balance.add_adjustment')}</div>
+          <form method="post" action="/admin/balance-adjustment"
+                onsubmit="sessionStorage.setItem('openAcc','acc-overtime')"
+                style="margin-bottom:16px;">
+            <input type="hidden" name="action" value="create">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+              <div>
+                <label style="font-size:12px;">{t('common.name')}</label>
+                <select name="user_id" style="display:block;margin-top:4px;min-width:140px;">
+                  {"".join('<option value="' + str(u2["id"]) + '">' + _html.escape(u2["display_name"] or u2["username"]) + '</option>' for u2 in _adj_users)}
+                </select>
+              </div>
+              <div>
+                <label style="font-size:12px;">Datum</label>
+                <input type="date" name="date" required style="display:block;margin-top:4px;">
+              </div>
+              <div>
+                <label style="font-size:12px;">{t('balance.adjustment_hours')}</label>
+                <input type="number" name="hours" step="0.25" required
+                       placeholder="{t('balance.adjustment_hint')}"
+                       style="display:block;margin-top:4px;width:130px;">
+              </div>
+              <div style="flex:1;min-width:150px;">
+                <label style="font-size:12px;">{t('balance.adjustment_reason')}</label>
+                <input type="text" name="reason" required maxlength="120"
+                       style="display:block;margin-top:4px;width:100%;">
+              </div>
+              <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+            </div>
+          </form>
+          {_adj_table}
+
         </div>
       </div>
     </div>"""
+
+
+@app.post("/admin/balance-adjustment")
+@timemanager_required
+def admin_balance_adjustment():
+    bootstrap()
+    u = current_user()
+    action = request.form.get("action")
+    db = connect()
+    if action == "create":
+        user_id = int(request.form.get("user_id", 0))
+        try:
+            hours = float((request.form.get("hours") or "0").replace(",", "."))
+        except ValueError:
+            hours = 0.0
+        minutes = int(round(hours * 60))
+        reason  = request.form.get("reason", "").strip()
+        date    = request.form.get("date", "").strip()
+        if user_id and reason and date:
+            db.execute(
+                "INSERT INTO balance_adjustments "
+                "(user_id, minutes, reason, adjustment_date, created_by) VALUES (?,?,?,?,?)",
+                (user_id, minutes, reason, date, u["id"])
+            )
+            db.commit()
+            add_flash(t("success.adjustment_created"), "success")
+    elif action == "delete":
+        adj_id = int(request.form.get("adj_id", 0))
+        db.execute("DELETE FROM balance_adjustments WHERE id=?", (adj_id,))
+        db.commit()
+        add_flash(t("success.adjustment_deleted"), "success")
+    db.close()
+    return redirect("/admin#acc-overtime")
 
 
 @app.post("/admin/overtime/save")
