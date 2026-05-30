@@ -969,10 +969,54 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # ── Features ─────────────────────────────────────────────────
         "admin.features":               "Features",
-        "admin.feature_staffing":       "Besetzungsplanung",
+        "admin.feature_staffing":       "Besetzungsplanung aktivieren",
         "admin.feature_staffing_hint":  "Ermöglicht Schichtplanung und Mindestbesetzungs-Überwachung",
 
-        # ── Dev Mode ─────────────────────────────────────────────────
+        # ── Teams ─────────────────────────────────────────────────
+        "admin.teams":                  "Teams / Abteilungen",
+        "admin.team_name":              "Team-Name",
+        "admin.team_color":             "Farbe",
+        "admin.team_members":           "Mitglieder",
+        "admin.add_team":               "Neues Team",
+        "admin.no_teams":               "Keine Teams vorhanden",
+        "admin.no_team_members":        "Keine Team-Mitglieder",
+
+        # ── Staffing ──────────────────────────────────────────────
+        "admin.staffing":               "Besetzungsplanung",
+        "staffing.plan":                "Besetzungsplan",
+        "staffing.plan_name":           "Plan-Name",
+        "staffing.add_plan":            "Neuen Plan anlegen",
+        "staffing.no_plans":            "Keine Pläne vorhanden",
+        "staffing.add_slot":            "Slot hinzufügen",
+        "staffing.no_slots":            "Keine Slots vorhanden",
+        "staffing.slot_label":          "Bezeichnung",
+        "staffing.slot_type":           "Typ",
+        "staffing.slot_vm":             "Vormittag",
+        "staffing.slot_nm":             "Nachmittag",
+        "staffing.slot_special":        "Sondertermin",
+        "staffing.min_staff":           "Mindestbesetzung",
+        "staffing.weekdays":            "Wochentage",
+        "staffing.nth_week":            "Welche Wochen",
+
+        # ── Wochentage ────────────────────────────────────────────
+        "wd.mon":                       "Mo",
+        "wd.tue":                       "Di",
+        "wd.wed":                       "Mi",
+        "wd.thu":                       "Do",
+        "wd.fri":                       "Fr",
+        "wd.sat":                       "Sa",
+        "wd.sun":                       "So",
+        "wd.weekday":                   "Wochentag",
+
+        # ── Success flashes ───────────────────────────────────────
+        "success.team_created":         "Team angelegt",
+        "success.team_deleted":         "Team gelöscht",
+        "success.team_updated":         "Team aktualisiert",
+        "success.plan_created":         "Plan angelegt",
+        "success.slot_created":         "Slot angelegt",
+        "success.assignments_saved":    "Zuweisung gespeichert",
+
+        # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
 
         # ── Help ──────────────────────────────────────────────────────
@@ -2053,10 +2097,54 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # ── Features ─────────────────────────────────────────────────
         "admin.features":               "Features",
-        "admin.feature_staffing":       "Staffing",
+        "admin.feature_staffing":       "Enable staffing",
         "admin.feature_staffing_hint":  "Enables shift planning and minimum staffing monitoring",
 
-        # ── Dev Mode ─────────────────────────────────────────────────
+        # ── Teams ─────────────────────────────────────────────────
+        "admin.teams":                  "Teams / Departments",
+        "admin.team_name":              "Team Name",
+        "admin.team_color":             "Color",
+        "admin.team_members":           "Members",
+        "admin.add_team":               "New Team",
+        "admin.no_teams":               "No teams yet",
+        "admin.no_team_members":        "No team members",
+
+        # ── Staffing ──────────────────────────────────────────────
+        "admin.staffing":               "Staffing",
+        "staffing.plan":                "Staffing Plan",
+        "staffing.plan_name":           "Plan Name",
+        "staffing.add_plan":            "Add Plan",
+        "staffing.no_plans":            "No plans yet",
+        "staffing.add_slot":            "Add Slot",
+        "staffing.no_slots":            "No slots yet",
+        "staffing.slot_label":          "Label",
+        "staffing.slot_type":           "Type",
+        "staffing.slot_vm":             "Morning",
+        "staffing.slot_nm":             "Afternoon",
+        "staffing.slot_special":        "Special",
+        "staffing.min_staff":           "Minimum staff",
+        "staffing.weekdays":            "Weekdays",
+        "staffing.nth_week":            "Which weeks",
+
+        # ── Weekdays ──────────────────────────────────────────────
+        "wd.mon":                       "Mon",
+        "wd.tue":                       "Tue",
+        "wd.wed":                       "Wed",
+        "wd.thu":                       "Thu",
+        "wd.fri":                       "Fri",
+        "wd.sat":                       "Sat",
+        "wd.sun":                       "Sun",
+        "wd.weekday":                   "Weekday",
+
+        # ── Success flashes ───────────────────────────────────────
+        "success.team_created":         "Team created",
+        "success.team_deleted":         "Team deleted",
+        "success.team_updated":         "Team updated",
+        "success.plan_created":         "Plan created",
+        "success.slot_created":         "Slot created",
+        "success.assignments_saved":    "Assignments saved",
+
+        # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",
 
         # ── Help ──────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev1"
+APP_VERSION = "v3.0.0.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -69,6 +69,26 @@ def _get_app_config() -> dict:
 
 def _feature_enabled(key: str) -> bool:
     return _get_app_config().get(f"feature_{key}", "0") == "1"
+
+
+def _slot_applies_on_date(slot, iso_date: str) -> bool:
+    d = datetime.date.fromisoformat(iso_date)
+    wd = d.weekday()
+    stype = slot["slot_type"]
+    if stype in ("vm", "nm"):
+        days = [int(x) for x in str(slot["weekdays"]).split(",")]
+        return wd in days
+    elif stype == "special":
+        if slot["special_weekday"] is None:
+            return False
+        if wd != int(slot["special_weekday"]):
+            return False
+        if not slot["nth_week"]:
+            return False
+        week_num = (d.day - 1) // 7 + 1
+        weeks = [int(x) for x in str(slot["nth_week"]).split(",")]
+        return week_num in weeks
+    return False
 
 
 _COMMON_TIMEZONES = [
@@ -12826,6 +12846,8 @@ window.addEventListener('DOMContentLoaded',function(){{
 <div class="tab-bar">
   {"" if not _is_sysadm else f'<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">{t("admin.tab_system")}</button>'}
   <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">{t('admin.tab_users')}</button>
+  <a href="/admin/teams" class="tab-btn" style="text-decoration:none;">👥 {t('admin.teams')}</a>
+  {"" if not _feature_enabled("staffing") else f'<a href="/admin/staffing" class="tab-btn" style="text-decoration:none;">📋 {t("admin.staffing")}</a>'}
 </div>
 
     <!-- Section 1: Benutzerverwaltung -->
@@ -14199,6 +14221,353 @@ def _render_admin_absences_section() -> str:
     </div>"""
 
 
+def _render_admin_teams(teams, all_users, team_members) -> str:
+    _WD_LABELS = [t('wd.mon'), t('wd.tue'), t('wd.wed'), t('wd.thu'), t('wd.fri'), t('wd.sat'), t('wd.sun')]
+    team_rows = ""
+    for tm in teams:
+        tid = tm["id"]
+        color = _html.escape(tm["color"] or "#4a9eff")
+        name  = _html.escape(tm["name"])
+        desc  = _html.escape(tm["description"] or "")
+        cnt   = tm["member_count"]
+        member_ids = team_members.get(tid, [])
+        checkboxes = "".join(
+            f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
+            f'<input type="checkbox" name="user_ids" value="{u["id"]}"'
+            f'{" checked" if u["id"] in member_ids else ""}>'
+            f'{_html.escape(u["display_name"] or u["username"])}</label>'
+            for u in all_users
+        )
+        team_rows += f"""
+        <div class="acc" style="margin-bottom:8px;">
+          <button class="acc-hdr" type="button"
+                  onclick="accToggle('tm-body-{tid}')"
+                  style="background:none;border:1px solid var(--br);border-radius:8px;">
+            <span style="display:flex;align-items:center;gap:8px;">
+              <span style="width:14px;height:14px;border-radius:50%;
+                           background:{color};display:inline-block;flex-shrink:0;"></span>
+              <strong>{name}</strong>
+              <span style="color:var(--mu);font-size:12px;">{cnt} {t('admin.team_members')}</span>
+              {('<span style="color:var(--mu);font-size:12px;">' + desc + '</span>') if desc else ''}
+            </span>
+            <span class="acc-arr">▼</span>
+          </button>
+          <div class="acc-body" id="tm-body-{tid}" style="display:none;">
+            <div class="acc-inner">
+              <form method="post" action="/admin/teams">
+                <input type="hidden" name="action" value="members">
+                <input type="hidden" name="team_id" value="{tid}">
+                <p style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.team_members')}</p>
+                {checkboxes}
+                <div style="display:flex;gap:8px;margin-top:12px;">
+                  <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                  <form method="post" action="/admin/teams" style="margin:0;">
+                    <input type="hidden" name="action" value="delete">
+                    <input type="hidden" name="team_id" value="{tid}">
+                    <button class="btn btn-sm" type="submit"
+                            style="color:#dc2626;"
+                            onclick="return confirm('{t('confirm.delete')}')">{t('btn.delete')}</button>
+                  </form>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>"""
+
+    return f"""
+    <div style="max-width:700px;margin:1.5rem auto;">
+      <h2 style="margin-bottom:1.5rem;">{t('admin.teams')}</h2>
+
+      <!-- Neues Team -->
+      <div style="background:var(--ca);border:1px solid var(--br);border-radius:10px;
+                  padding:16px;margin-bottom:1.5rem;">
+        <h3 style="margin:0 0 12px;">{t('admin.add_team')}</h3>
+        <form method="post" action="/admin/teams">
+          <input type="hidden" name="action" value="create">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+            <div>
+              <label style="font-size:12px;">{t('admin.team_name')} *</label>
+              <input type="text" name="name" required maxlength="60"
+                     style="display:block;margin-top:4px;min-width:180px;">
+            </div>
+            <div>
+              <label style="font-size:12px;">{t('admin.team_color')}</label>
+              <input type="color" name="color" value="#4a9eff"
+                     style="display:block;margin-top:4px;width:48px;height:34px;padding:2px;">
+            </div>
+            <div style="flex:1;min-width:160px;">
+              <label style="font-size:12px;">Beschreibung</label>
+              <input type="text" name="description" maxlength="120"
+                     style="display:block;margin-top:4px;width:100%;">
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Teams Liste -->
+      {team_rows if team_rows else f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>'}
+
+      <div style="margin-top:1.5rem;">
+        <a href="/admin" class="btn btn-sm">← {t('btn.back')}</a>
+      </div>
+    </div>"""
+
+
+def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
+    assigned = {}
+    for a in all_assignments:
+        assigned.setdefault(a["slot_id"], set()).add(a["user_id"])
+
+    slots_by_plan = {}
+    for s in slots:
+        slots_by_plan.setdefault(s["plan_id"], []).append(s)
+
+    _WD_MAP = {0: t('wd.mon'), 1: t('wd.tue'), 2: t('wd.wed'),
+               3: t('wd.thu'), 4: t('wd.fri'), 5: t('wd.sat'), 6: t('wd.sun')}
+    _STYPE = {"vm": t('staffing.slot_vm'), "nm": t('staffing.slot_nm'),
+              "special": t('staffing.slot_special')}
+
+    def _wd_label(slot):
+        if slot["slot_type"] == "special":
+            wd = _WD_MAP.get(int(slot["special_weekday"] or 0), "")
+            weeks = slot["nth_week"] or ""
+            return f"{wd} ({weeks}. Wo.)"
+        days = [_WD_MAP.get(int(x), "") for x in str(slot["weekdays"]).split(",")]
+        return ", ".join(days)
+
+    plan_html = ""
+    plans_by_team = {}
+    for p in plans:
+        plans_by_team.setdefault(p["team_id"], []).append(p)
+
+    for tm in teams:
+        tid = tm["id"]
+        team_plans = plans_by_team.get(tid, [])
+        team_color = _html.escape(tm["color"] or "#4a9eff")
+
+        # members of this team for assignment checkboxes
+        db_tmp = connect()
+        team_user_rows = db_tmp.execute(
+            "SELECT u.id, u.username, u.display_name FROM users u "
+            "JOIN user_teams ut ON ut.user_id=u.id "
+            "WHERE ut.team_id=? AND u.is_active=1 ORDER BY u.display_name",
+            (tid,)
+        ).fetchall()
+        db_tmp.close()
+
+        plans_html = ""
+        for p in team_plans:
+            pid = p["id"]
+            pname = _html.escape(p["name"])
+            plan_slots = slots_by_plan.get(pid, [])
+
+            slots_html = ""
+            for s in plan_slots:
+                sid = s["id"]
+                slabel = _html.escape(s["label"])
+                stype_label = _STYPE.get(s["slot_type"], s["slot_type"])
+                wd_str = _wd_label(s)
+                assigned_ids = assigned.get(sid, set())
+                chk = "".join(
+                    f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:13px;">'
+                    f'<input type="checkbox" name="user_ids" value="{tu["id"]}"'
+                    f'{" checked" if tu["id"] in assigned_ids else ""}>'
+                    f'{_html.escape(tu["display_name"] or tu["username"])}</label>'
+                    for tu in team_user_rows
+                )
+                slots_html += f"""
+                <div style="background:var(--ca);border:1px solid var(--br);border-radius:8px;
+                             padding:12px;margin-bottom:8px;">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;
+                               flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+                    <div>
+                      <strong>{slabel}</strong>
+                      <span style="margin-left:8px;font-size:12px;color:var(--mu);">
+                        {stype_label} · {wd_str} · min. {s["min_staff"]}
+                      </span>
+                    </div>
+                    <form method="post" action="/admin/staffing" style="margin:0;">
+                      <input type="hidden" name="action" value="delete_slot">
+                      <input type="hidden" name="slot_id" value="{sid}">
+                      <button class="btn btn-sm" type="submit"
+                              style="color:#dc2626;font-size:11px;"
+                              onclick="return confirm('{t('confirm.delete')}')">{t('btn.delete')}</button>
+                    </form>
+                  </div>
+                  <form method="post" action="/admin/staffing">
+                    <input type="hidden" name="action" value="save_assignments">
+                    <input type="hidden" name="slot_id" value="{sid}">
+                    {chk if chk else f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>'}
+                    {('<button class="btn primary btn-sm" type="submit" style="margin-top:6px;">' + t('btn.save') + '</button>') if chk else ''}
+                  </form>
+                </div>"""
+
+            # Slot anlegen
+            wd_checkboxes = "".join(
+                f'<label style="font-size:12px;display:flex;align-items:center;gap:4px;">'
+                f'<input type="checkbox" name="wd_{i}" value="{i}" checked> {_WD_MAP[i]}</label>'
+                for i in range(5)
+            )
+            plans_html += f"""
+            <div style="background:var(--bg);border:1px solid var(--br);border-radius:10px;
+                         padding:14px;margin-bottom:12px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                <strong style="font-size:15px;">{pname}</strong>
+                <span style="font-size:12px;color:var(--mu);">{p["description"] or ""}</span>
+              </div>
+              {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
+
+              <!-- Slot anlegen -->
+              <details style="margin-top:8px;">
+                <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
+                  + {t('staffing.add_slot')}
+                </summary>
+                <form method="post" action="/admin/staffing"
+                      style="margin-top:10px;padding:12px;background:var(--ca);
+                             border-radius:8px;border:1px solid var(--br);">
+                  <input type="hidden" name="action" value="create_slot">
+                  <input type="hidden" name="plan_id" value="{pid}">
+                  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_label')} *</label>
+                      <input type="text" name="label" required maxlength="60"
+                             placeholder="{t('staffing.slot_vm')}"
+                             style="display:block;margin-top:4px;min-width:140px;">
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_type')}</label>
+                      <select name="slot_type" style="display:block;margin-top:4px;"
+                              onchange="toggleSlotType(this,'{pid}')">
+                        <option value="vm">{t('staffing.slot_vm')}</option>
+                        <option value="nm">{t('staffing.slot_nm')}</option>
+                        <option value="special">{t('staffing.slot_special')}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.min_staff')}</label>
+                      <input type="number" name="min_staff" value="1" min="1" max="99"
+                             style="display:block;margin-top:4px;width:70px;">
+                    </div>
+                  </div>
+                  <div id="wd-normal-{pid}" style="margin-bottom:10px;">
+                    <label style="font-size:12px;display:block;margin-bottom:4px;">
+                      {t('staffing.weekdays')}
+                    </label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                      {wd_checkboxes}
+                    </div>
+                    <input type="hidden" name="weekdays" id="wd-val-{pid}" value="0,1,2,3,4">
+                  </div>
+                  <div id="wd-special-{pid}" style="display:none;margin-bottom:10px;">
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                      <div>
+                        <label style="font-size:12px;">{t('wd.weekday')}</label>
+                        <select name="special_weekday" style="display:block;margin-top:4px;">
+                          {"".join(f'<option value="{i}">{_WD_MAP[i]}</option>' for i in range(7))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style="font-size:12px;">{t('staffing.nth_week')}</label>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
+                          {"".join(f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;"><input type="checkbox" name="nth_w_{i}" value="{i}"> {i}.</label>' for i in range(1,6))}
+                        </div>
+                        <input type="hidden" name="nth_week" id="nth-val-{pid}" value="">
+                      </div>
+                    </div>
+                  </div>
+                  <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+                </form>
+              </details>
+            </div>"""
+
+        plan_html += f"""
+        <div style="margin-bottom:1.5rem;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <span style="width:12px;height:12px;border-radius:50%;
+                         background:{team_color};display:inline-block;"></span>
+            <strong style="font-size:16px;">{_html.escape(tm["name"])}</strong>
+          </div>
+          {plans_html if plans_html else f'<p style="font-size:13px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_plans")}</p>'}
+
+          <!-- Plan anlegen -->
+          <details>
+            <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);
+                            margin-bottom:4px;">
+              + {t('staffing.add_plan')}
+            </summary>
+            <form method="post" action="/admin/staffing"
+                  style="margin-top:8px;padding:12px;background:var(--ca);
+                         border-radius:8px;border:1px solid var(--br);">
+              <input type="hidden" name="action" value="create_plan">
+              <input type="hidden" name="team_id" value="{tid}">
+              <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+                <div>
+                  <label style="font-size:12px;">{t('staffing.plan_name')} *</label>
+                  <input type="text" name="name" required maxlength="80"
+                         style="display:block;margin-top:4px;min-width:160px;">
+                </div>
+                <div style="flex:1;min-width:140px;">
+                  <label style="font-size:12px;">Beschreibung</label>
+                  <input type="text" name="description" maxlength="120"
+                         style="display:block;margin-top:4px;width:100%;">
+                </div>
+                <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+              </div>
+            </form>
+          </details>
+        </div>"""
+
+    no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")} – <a href="/admin/teams">{t("admin.teams")}</a></p>' if not teams else ""
+
+    return f"""
+    <div style="max-width:750px;margin:1.5rem auto;">
+      <h2 style="margin-bottom:1.5rem;">{t('admin.staffing')}</h2>
+      {no_teams_hint}
+      {plan_html}
+      <div style="margin-top:1.5rem;">
+        <a href="/admin" class="btn btn-sm">← {t('btn.back')}</a>
+        <a href="/admin/teams" class="btn btn-sm" style="margin-left:8px;">{t('admin.teams')}</a>
+      </div>
+    </div>
+    <script>
+    function toggleSlotType(sel, pid) {{
+      var normal  = document.getElementById('wd-normal-' + pid);
+      var special = document.getElementById('wd-special-' + pid);
+      if (!normal || !special) return;
+      if (sel.value === 'special') {{
+        normal.style.display = 'none';
+        special.style.display = 'block';
+      }} else {{
+        normal.style.display = 'block';
+        special.style.display = 'none';
+      }}
+    }}
+    // Weekday checkboxes → hidden input
+    document.addEventListener('change', function(e) {{
+      if (!e.target.name || !e.target.name.startsWith('wd_')) return;
+      var pid = e.target.closest('form').querySelector('[name=plan_id]').value;
+      var checked = [];
+      e.target.closest('form').querySelectorAll('[name^="wd_"]').forEach(function(cb) {{
+        if (cb.checked) checked.push(cb.value);
+      }});
+      var hid = document.getElementById('wd-val-' + pid);
+      if (hid) hid.value = checked.join(',');
+    }});
+    // nth_week checkboxes → hidden input
+    document.addEventListener('change', function(e) {{
+      if (!e.target.name || !e.target.name.startsWith('nth_w_')) return;
+      var pid = e.target.closest('form').querySelector('[name=plan_id]').value;
+      var checked = [];
+      e.target.closest('form').querySelectorAll('[name^="nth_w_"]').forEach(function(cb) {{
+        if (cb.checked) checked.push(cb.value);
+      }});
+      var hid = document.getElementById('nth-val-' + pid);
+      if (hid) hid.value = checked.join(',');
+    }});
+    </script>"""
+
+
 def _render_features_section() -> str:
     checked = 'checked' if _feature_enabled('staffing') else ''
     return f"""
@@ -15271,6 +15640,147 @@ def admin_regional_save():
         del _g._app_config_cache
     add_flash(t("flash.success.regional_saved"), "success")
     return redirect("/admin#acc-regional")
+
+
+@app.route("/admin/teams", methods=["GET", "POST"])
+@timemanager_required
+def admin_teams():
+    bootstrap()
+    db = connect()
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "create":
+            name  = request.form.get("name", "").strip()
+            desc  = request.form.get("description", "").strip()
+            color = request.form.get("color", "#4a9eff").strip()
+            if name:
+                db.execute(
+                    "INSERT INTO teams (name, description, color) VALUES (?,?,?)",
+                    (name, desc, color)
+                )
+                db.commit()
+                add_flash(t("success.team_created"), "success")
+        elif action == "delete":
+            tid = int(request.form.get("team_id", 0))
+            db.execute("DELETE FROM teams WHERE id=?", (tid,))
+            db.commit()
+            add_flash(t("success.team_deleted"), "success")
+        elif action == "members":
+            tid = int(request.form.get("team_id", 0))
+            user_ids = request.form.getlist("user_ids")
+            db.execute("DELETE FROM user_teams WHERE team_id=?", (tid,))
+            for uid in user_ids:
+                db.execute(
+                    "INSERT OR IGNORE INTO user_teams (user_id, team_id) VALUES (?,?)",
+                    (int(uid), tid)
+                )
+            db.commit()
+            add_flash(t("success.team_updated"), "success")
+        db.close()
+        return redirect(url_for("admin_teams"))
+
+    teams = db.execute("""
+        SELECT t.*, COUNT(ut.user_id) as member_count
+        FROM teams t
+        LEFT JOIN user_teams ut ON ut.team_id = t.id
+        GROUP BY t.id ORDER BY t.name
+    """).fetchall()
+    all_users = db.execute(
+        "SELECT id, username, display_name FROM users "
+        "WHERE is_active=1 ORDER BY display_name, username"
+    ).fetchall()
+    team_members = {}
+    for tm in teams:
+        rows = db.execute(
+            "SELECT user_id FROM user_teams WHERE team_id=?", (tm["id"],)
+        ).fetchall()
+        team_members[tm["id"]] = [r["user_id"] for r in rows]
+    db.close()
+
+    body = _render_admin_teams(teams, all_users, team_members)
+    return render_template_string(layout(t("admin.teams"), body, current_user(), APP_VERSION))
+
+
+@app.route("/admin/staffing", methods=["GET", "POST"])
+@timemanager_required
+def admin_staffing():
+    bootstrap()
+    if not _feature_enabled("staffing"):
+        abort(404)
+    u = current_user()
+    db = connect()
+
+    if request.method == "POST":
+        action = request.form.get("action")
+
+        if action == "create_plan":
+            name    = request.form.get("name", "").strip()
+            team_id = int(request.form.get("team_id", 0))
+            desc    = request.form.get("description", "").strip()
+            if name and team_id:
+                db.execute(
+                    "INSERT INTO staffing_plans (team_id, name, description) VALUES (?,?,?)",
+                    (team_id, name, desc)
+                )
+                db.commit()
+                add_flash(t("success.plan_created"), "success")
+
+        elif action == "create_slot":
+            plan_id    = int(request.form.get("plan_id", 0))
+            label      = request.form.get("label", "").strip()
+            stype      = request.form.get("slot_type", "vm")
+            weekdays   = request.form.get("weekdays", "0,1,2,3,4")
+            nth_week   = request.form.get("nth_week", "") or None
+            special_wd = request.form.get("special_weekday", "") or None
+            min_staff  = int(request.form.get("min_staff", 1))
+            if plan_id and label:
+                db.execute(
+                    "INSERT INTO staffing_slots "
+                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff)
+                )
+                db.commit()
+                add_flash(t("success.slot_created"), "success")
+
+        elif action == "delete_slot":
+            slot_id = int(request.form.get("slot_id", 0))
+            db.execute("DELETE FROM staffing_slots WHERE id=?", (slot_id,))
+            db.commit()
+
+        elif action == "save_assignments":
+            slot_id  = int(request.form.get("slot_id", 0))
+            user_ids = request.form.getlist("user_ids")
+            db.execute("DELETE FROM staffing_assignments WHERE slot_id=?", (slot_id,))
+            for uid in user_ids:
+                db.execute(
+                    "INSERT OR IGNORE INTO staffing_assignments (slot_id, user_id) VALUES (?,?)",
+                    (slot_id, int(uid))
+                )
+            db.commit()
+            add_flash(t("success.assignments_saved"), "success")
+
+        db.close()
+        return redirect(url_for("admin_staffing"))
+
+    teams   = db.execute("SELECT * FROM teams ORDER BY name").fetchall()
+    plans   = db.execute("""
+        SELECT sp.*, t.name as team_name, t.color as team_color
+        FROM staffing_plans sp
+        JOIN teams t ON t.id = sp.team_id
+        ORDER BY t.name, sp.name
+    """).fetchall()
+    slots   = db.execute("""
+        SELECT ss.*, sp.name as plan_name
+        FROM staffing_slots ss
+        JOIN staffing_plans sp ON sp.id = ss.plan_id
+        ORDER BY ss.plan_id, ss.sort_order
+    """).fetchall()
+    all_assignments = db.execute("SELECT * FROM staffing_assignments").fetchall()
+    db.close()
+
+    body = _render_admin_staffing(teams, plans, slots, all_assignments, u)
+    return render_template_string(layout(t("admin.staffing"), body, u, APP_VERSION))
 
 
 @app.post("/admin/features")

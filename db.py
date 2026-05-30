@@ -520,6 +520,42 @@ def init_db():
         if not _col_exists(db, "users", col):
             db.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
 
+    # v3.0.0.dev2 – Staffing
+    db.execute("""CREATE TABLE IF NOT EXISTS staffing_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS staffing_slots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL REFERENCES staffing_plans(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        slot_type TEXT NOT NULL DEFAULT 'vm',
+        weekdays TEXT NOT NULL DEFAULT '0,1,2,3,4',
+        nth_week TEXT DEFAULT NULL,
+        special_weekday INTEGER DEFAULT NULL,
+        min_staff INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER DEFAULT 0
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS staffing_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slot_id INTEGER NOT NULL REFERENCES staffing_slots(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE(slot_id, user_id)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS balance_adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        minutes INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        adjustment_date TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id),
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+
     # v3.0.0 – Feature-Flags
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")
