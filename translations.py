@@ -967,6 +967,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.appearance_preview":        "Vorschau in der Navigation",
         "admin.appearance_reset":          "Auf Standard zurücksetzen",
 
+        # ── Features ─────────────────────────────────────────────────
+        "admin.features":               "Features",
+        "admin.feature_staffing":       "Besetzungsplanung",
+        "admin.feature_staffing_hint":  "Ermöglicht Schichtplanung und Mindestbesetzungs-Überwachung",
+
         # ── Help ──────────────────────────────────────────────────────
         "help.title":       "Hilfe",
         "help.search":      "Hilfe durchsuchen …",
@@ -2042,6 +2047,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.appearance_label_color":    "Label color",
         "admin.appearance_preview":        "Preview in navigation",
         "admin.appearance_reset":          "Reset to default",
+
+        # ── Features ─────────────────────────────────────────────────
+        "admin.features":               "Features",
+        "admin.feature_staffing":       "Staffing",
+        "admin.feature_staffing_hint":  "Enables shift planning and minimum staffing monitoring",
 
         # ── Help ──────────────────────────────────────────────────────
         "help.title":       "Help",

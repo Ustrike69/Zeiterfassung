@@ -498,6 +498,32 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_absence_approvals_absence ON absence_approvals(absence_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_absence_approvals_approver ON absence_approvals(approver_id, status)")
 
+    # v3.0.0 – Teams
+    db.execute("""CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        color TEXT DEFAULT '#4a9eff',
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS user_teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        UNIQUE(user_id, team_id)
+    )""")
+    for col, defn in [
+        ("primary_team_id", "INTEGER DEFAULT NULL"),
+        ("team_restriction", "TEXT DEFAULT NULL"),
+        ("is_superuser",     "INTEGER DEFAULT 0"),
+    ]:
+        if not _col_exists(db, "users", col):
+            db.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+
+    # v3.0.0 – Feature-Flags
+    db.execute("""INSERT OR IGNORE INTO app_config (key, value)
+        VALUES ('feature_staffing', '0')""")
+
     db.commit()
     db.close()
 

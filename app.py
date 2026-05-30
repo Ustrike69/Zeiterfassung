@@ -18,7 +18,15 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0"
+APP_VERSION = "v3.0.0.dev1"
+
+IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
+if IS_DEV:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "⚠️  DEV MODE AKTIV — niemals in Produktion nutzen!"
+    )
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -57,6 +65,10 @@ def _get_app_config() -> dict:
         result = {}
     g._app_config_cache = result
     return result
+
+
+def _feature_enabled(key: str) -> bool:
+    return _get_app_config().get(f"feature_{key}", "0") == "1"
 
 
 _COMMON_TIMEZONES = [
@@ -12709,6 +12721,7 @@ def admin_home():
     _html_bot       = _tab(_render_bot_section(), "system") if _is_sysadm else ""
     _html_update    = _tab(_render_update_section(), "system") if _is_sysadm else ""
     _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
+    _html_features  = _tab(_render_features_section(), "system") if _is_sysadm else ""
     _new_user_btn   = f'<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">{t("admin.new_user_btn")}</button>' if _is_sysadm else ""
     _default_tab    = "system" if _is_sysadm else "users"
 
@@ -12999,6 +13012,9 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 9: Überstunden-Defaults -->
     {_html_ot_defs}
+
+    <!-- Section 9b: Features -->
+    {_html_features}
 
     <!-- Section 10: Backup & Restore -->
     {_html_backup}
@@ -14183,6 +14199,32 @@ def _render_admin_absences_section() -> str:
     </div>"""
 
 
+def _render_features_section() -> str:
+    checked = 'checked' if _feature_enabled('staffing') else ''
+    return f"""
+    <div class="acc" id="acc-features">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-features-body')">
+        <span>{t('admin.features')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-features-body">
+        <div class="acc-inner">
+          <form method="post" action="/admin/features" onsubmit="sessionStorage.setItem('openAcc','acc-features')">
+            <div style="margin-bottom:16px;">
+              <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                <input type="checkbox" name="feature_staffing" {checked} style="margin-top:3px;">
+                <div>
+                  <div style="font-weight:600;font-size:14px;">{t('admin.feature_staffing')}</div>
+                  <div style="font-size:12px;color:var(--mu);margin-top:2px;">{t('admin.feature_staffing_hint')}</div>
+                </div>
+              </label>
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+          </form>
+        </div>
+      </div>
+    </div>"""
+
+
 def _render_overtime_defaults_section() -> str:
     cfg = _get_app_config()
     def_plus_h  = cfg.get("overtime_default_limit_plus") or ""
@@ -15229,6 +15271,79 @@ def admin_regional_save():
         del _g._app_config_cache
     add_flash(t("flash.success.regional_saved"), "success")
     return redirect("/admin#acc-regional")
+
+
+@app.post("/admin/features")
+@sysadmin_required
+def admin_features_save():
+    bootstrap()
+    val = "1" if request.form.get("feature_staffing") else "0"
+    db = connect()
+    db.execute(
+        "INSERT OR REPLACE INTO app_config (key, value, updated_at) VALUES (?, ?, datetime('now'))",
+        ("feature_staffing", val),
+    )
+    db.commit()
+    db.close()
+    from flask import g as _g
+    if hasattr(_g, "_app_config_cache"):
+        del _g._app_config_cache
+    add_flash(t("success.settings_saved"), "success")
+    return redirect("/admin#acc-features")
+
+
+# ── DEV-Mode routes (only active when ZEITERFASSUNG_DEV_MODE=1) ──────────────
+
+@app.get("/dev/users")
+def dev_users():
+    if not IS_DEV:
+        abort(404)
+    db = connect()
+    users = db.execute(
+        "SELECT id, username, display_name, admin_role, is_approver "
+        "FROM users WHERE is_active=1 ORDER BY username"
+    ).fetchall()
+    db.close()
+    rows = "".join(
+        f'<tr><td>{u["id"]}</td><td>{u["username"]}</td>'
+        f'<td>{u["admin_role"] or "-"}</td>'
+        f'<td><a href="/dev/su/{u["id"]}" class="btn btn-sm btn-primary">'
+        f'Einloggen</a></td></tr>'
+        for u in users
+    )
+    return f"""<!doctype html><html><head>
+        <title>DEV Users</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head><body style="padding:2rem">
+    <h2>&#9888;&#65039; DEV MODE - User wechseln</h2>
+    <table class="table"><thead><tr>
+        <th>ID</th><th>Username</th><th>Rolle</th><th>Aktion</th>
+    </tr></thead><tbody>{rows}</tbody></table>
+    </body></html>"""
+
+
+@app.get("/dev/su/<int:uid>")
+def dev_su(uid):
+    if not IS_DEV:
+        abort(404)
+    db = connect()
+    u = db.execute(
+        "SELECT id FROM users WHERE id=? AND is_active=1", (uid,)
+    ).fetchone()
+    db.close()
+    if not u:
+        abort(404)
+    session["user_id"] = uid
+    session.modified = True
+    return redirect("/")
+
+
+@app.get("/dev/su/stop")
+def dev_su_stop():
+    if not IS_DEV:
+        abort(404)
+    session.clear()
+    return redirect("/dev/users")
 
 
 if __name__ == "__main__":

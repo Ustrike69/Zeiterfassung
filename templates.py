@@ -1,5 +1,18 @@
 def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impersonation_banner: str = "", show_back: bool = True, extra_root_css: str = "", app_label: str = "", app_label_color: str = "#f59e0b") -> str:
+    import os as _os, html as _html_mod
     from translations import t as _t
+    _is_dev = _os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
+    if _is_dev:
+        _uname = _html_mod.escape((user or {}).get("display_name") or (user or {}).get("username") or "?")
+        _dev_banner = (
+            f'<div style="background:#dc2626;color:#fff;padding:8px;'
+            f'text-align:center;font-size:13px;font-weight:600;">'
+            f'&#9888;&#65039; DEV MODE &middot; Eingeloggt als {_uname}'
+            f' <a href="/dev/users" style="color:#fff;text-decoration:underline;'
+            f'margin-left:12px">User wechseln</a></div>'
+        )
+    else:
+        _dev_banner = ""
     nav_html = ""
     if user:
         if user.get("admin_only"):
@@ -178,7 +191,7 @@ def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impers
   </div>
   {nav_html}
 </header>
-{impersonation_banner}
+{_dev_banner}{impersonation_banner}
 <div class="main">
 {body}
 </div>
