@@ -1,6 +1,8 @@
-# Zeiterfassung v2.0.9
+# Zeiterfassung v3.0.0
 
 Mehrbenutzer-Zeiterfassungs-Web-App auf Basis von Flask + SQLite. Erfassung von Arbeitszeiten, Abwesenheiten und Dienstreisen mit automatischer Saldoberechnung, Kontierungsfunktion, CSV-Export per E-Mail, Telegram-Bot und einem umfassenden Admin-Bereich mit Rollentrennung.
+
+Teams/Abteilungen, Abwesenheits-Genehmigung, Besetzungsplanung, manuelle Gleitzeitkorrekturen, mehrere Zeitblöcke pro Schema-Tag.
 
 Vollständig mehrsprachig (Deutsch / Englisch), europäische Feiertagsdatenbank für 20 Länder.
 
@@ -36,14 +38,17 @@ docker run -d -p 5000:5000 -v ze_data:/data \
 4. [Kalender](#kalender)
 5. [Gleitzeitkonto](#gleitzeitkonto)
 6. [Abwesenheiten](#abwesenheiten)
-7. [Dienstreisen](#dienstreisen)
-8. [Kontierung](#kontierung)
-9. [Einstellungen](#einstellungen)
-10. [Export](#export)
-11. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
-12. [Admin-Bereich](#admin-bereich)
-13. [Technischer Betrieb](#technischer-betrieb)
-14. [Versionshistorie](#versionshistorie)
+7. [Abwesenheits-Genehmigung](#abwesenheits-genehmigung)
+8. [Teams / Abteilungen](#teams--abteilungen)
+9. [Besetzungsplanung](#besetzungsplanung)
+10. [Dienstreisen](#dienstreisen)
+11. [Kontierung](#kontierung)
+12. [Einstellungen](#einstellungen)
+13. [Export](#export)
+14. [Monats- und Jahresabschluss](#monats--und-jahresabschluss)
+15. [Admin-Bereich](#admin-bereich)
+16. [Technischer Betrieb](#technischer-betrieb)
+17. [Versionshistorie](#versionshistorie)
 
 ---
 
@@ -153,6 +158,49 @@ Tag | Datum | Beginn | Ende | Pause | Soll | Delta | (Desktop: kum. Saldo + Stat
 
 Iteriert über alle Tage ab `tracking_start_date` bis gestern (Stand gestern). Flextag-Tage reduzieren den Saldo zusätzlich um die Sollzeit.
 
+### Manuelle Korrekturen
+
+Zeitmanager können manuelle Gutschriften oder Abzüge anlegen (z.B. Auszahlung von Überstunden). Korrekturen erscheinen als eigene Zeile in der Gleitzeitkonto-Ansicht und fließen in den Saldo ein.
+
+---
+
+## Abwesenheits-Genehmigung
+
+Optionaler Genehmigungsworkflow pro Nutzer.
+
+- Genehmiger-Rolle (`is_approver`) — wird in der Benutzerverwaltung aktiviert
+- Pro Nutzer konfigurierbar: welcher Genehmiger zuständig ist und welche Abwesenheitstypen genehmigt werden müssen
+- Genehmigungsübersicht unter `/approvals`: Pending-Anfragen + vergangene Entscheidungen
+- Benachrichtigung per Mail + Telegram bei Anfrage und Entscheidung
+- Teamkalender bei Genehmigung einsehbar — Überschneidungswarnung
+- **Pending-Abwesenheiten** fließen nicht ins Gleitzeitkonto ein; erst nach Genehmigung wirksam
+- Bot-Befehle: `/genehmigungen`, `genehmigen <ID>`, `ablehnen <ID> <Grund>`
+
+---
+
+## Teams / Abteilungen
+
+Strukturierung von Nutzern in Teams/Abteilungen mit Farben.
+
+- Nutzer können mehreren Teams zugeordnet werden; ein Haupt-Team ist im Kalender sichtbar
+- Zeitmanager und Genehmiger können auf bestimmte Teams eingeschränkt werden
+- Team-Kalender: wer ist wann abwesend (für Zeitmanager + Genehmiger)
+- Verwaltung unter Admin → Systemeinstellungen → Teams
+
+---
+
+## Besetzungsplanung
+
+Optionales Feature (Feature-Flag in Admin → Systemeinstellungen → Features).
+
+- Pläne pro Team anlegen (mehrere Pläne je Team möglich)
+- Slots definieren: täglich, bestimmte Wochentage, nth_weekday oder festes Datum
+- Zeitschema als Basis für Anwesenheitszeiten (Sync optional)
+- **Wochenansicht**: Mini-Zeitleisten pro Mitarbeiter, Soll vs. Ist-Besetzung
+- **Monatsansicht**: Besetzungszahl je Slot + Unterbesetzungswarnung bei Unterschreitung der Mindestbesetzung
+- Tagesdetail bei Klick auf einen Tag
+- Mindestbesetzung (`min_staff`) pro Slot konfigurierbar
+
 ---
 
 ## Abwesenheiten
@@ -207,7 +255,7 @@ Aufruf unter `/settings`. Accordion-Bereiche:
 | **Passwort** | Passwortänderung mit Stärke-Anzeige |
 | **Sprache** | Deutsch / Englisch wählbar |
 | **Urlaub** | Jahresanspruch, Übertrag-Regelung (Standard 31.03. oder Ausnahme) |
-| **Zeitschema** | Aktuelle + alle Schemas, Bearbeiten/Löschen/Neu anlegen |
+| **Zeitschema** | Aktuelle + alle Schemas, Bearbeiten/Löschen/Neu anlegen; mehrere Zeitblöcke pro Tag möglich; optionaler Sync in Besetzungsplan |
 | **Gleitzeitkonto** | Aktivieren/Deaktivieren + Startsaldo |
 | **Kontierung** | Aktivieren/Deaktivieren + Startdatum |
 
@@ -270,6 +318,8 @@ Aufruf unter `/admin`. Accordion-Layout mit zwei Tabs.
 | **Regionale Einstellungen** | Standard-Region (System) + zweistufige Länder/Region-Auswahl |
 | **Erscheinungsbild** | Akzentfarbe, Navigationsfarbe, App-Label für Dev/Prod-Unterscheidung; Schnell-Presets |
 | **Backup & Restore** | Vollständig (.db.gz) / Einstellungen (.json) / User-Daten (.json); automatisches Backup mit Zeitplan |
+| **Teams** | Teams/Abteilungen mit Farben anlegen, Nutzer zuordnen, Zeitmanager/Genehmiger auf Teams einschränken |
+| **Features** | Feature-Flags aktivieren/deaktivieren (z.B. Besetzungsplanung) |
 | **Telegram Bot** | Bot-Token, Anthropic API Key, Admin-IDs; Service starten/stoppen/neu starten direkt aus UI |
 | **System Update** | Git pull + pip install + Neustart direkt aus der App; Commit-Info und System-Info |
 
@@ -284,6 +334,9 @@ Aufruf unter `/admin`. Accordion-Layout mit zwei Tabs.
 | **Urlaubsverwaltung** | Übertrag-Ausnahmen (31.03.-Regel) je User |
 | **Abschlüsse** | Monats- und Jahresabschlüsse; Entsperren |
 | **Abwesenheitstypen & Regionen** | Nutzerindividuelle Abwesenheitstypen; Region pro Nutzer |
+| **Genehmigungen** | Genehmiger-Rolle, zuständiger Genehmiger und genehmigungspflichtige Typen je User |
+| **Teams-Zuordnung** | Haupt-Team und weitere Teams pro User; Team-Einschränkung für Zeitmanager/Genehmiger |
+| **Gleitzeitkorrekturen** | Manuelle Gutschriften/Abzüge anlegen und verwalten |
 
 ### Schutzregeln
 
@@ -339,7 +392,7 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 | Datei | Beschreibung |
 |-------|-------------|
-| `app.py` | Alle Routes und Business-Logik (~12.000 Zeilen) |
+| `app.py` | Alle Routes und Business-Logik (~15.000 Zeilen) |
 | `db.py` | Datenbankinitialisierung und Migrationen |
 | `auth.py` | Session-basierte Authentifizierung, Rollen-Decorators |
 | `templates.py` | HTML-Layout-Wrapper (f-strings) |
@@ -352,6 +405,14 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 ---
 
 ## Versionshistorie
+
+### v3.0.0
+- **Teams/Abteilungen:** Neue Tabellen `teams` + `user_teams`; Teams mit Farben; Haupt-Team pro User; Zeitmanager/Genehmiger auf Teams einschränkbar (`team_restriction`); Team-Kalender für Zeitmanager und Genehmiger
+- **Abwesenheits-Genehmigung:** Genehmiger-Rolle (`is_approver`), zuständiger Genehmiger + genehmigungspflichtige Typen pro User; Genehmigungsübersicht `/approvals`; Mail + Telegram-Benachrichtigung; Überschneidungswarnung; Teamkalender bei Genehmigung; Pending-Abwesenheiten nicht im Gleitzeitkonto; Bot: `genehmigen <ID>`, `ablehnen <ID> <Grund>`
+- **Besetzungsplanung:** Feature-Flag in Admin → Features; Pläne und Slots pro Team (`staffing_plans`, `staffing_slots`, `staffing_assignments`); Slot-Typen: täglich/Wochentage/nth_weekday/Datum; Wochenansicht + Monatsansicht + Tagesdetail; Mindestbesetzung pro Slot; Unterbesetzungswarnung
+- **Gleitzeitkonto – manuelle Korrekturen:** Neue Tabelle `balance_adjustments`; Zeitmanager kann Gutschriften/Abzüge anlegen; Korrekturen in Gleitzeitkonto-Ansicht sichtbar
+- **Zeitschema – mehrere Tagesblöcke:** Neue Tabelle `schedule_daily_blocks`; beliebig viele Zeitblöcke pro Schematag; optionaler Sync in Besetzungsplan (`sync_to_staffing`, `sync_plan_id`); Zeitmanager kann Schema bearbeiten + sperren (`allow_self_edit`)
+- **Superuser Dev-Mode:** `is_superuser`-Flag; aktivierbar via Umgebungsvariable `ZEITERFASSUNG_DEV_MODE=1`
 
 ### v2.0.9
 - **Abwesenheits-Genehmigung:** Neue Genehmiger-Rolle (`is_approver`); pro User konfigurierbar welche Abwesenheitstypen genehmigt werden müssen und wer genehmigt; Genehmigungsübersicht `/approvals` mit Pending / Vergangene Entscheidungen; Mail + Telegram-Benachrichtigung bei Anfrage und Entscheidung; Pending-Abwesenheiten werden nicht im Gleitzeitkonto berücksichtigt; Bot-Befehle `/genehmigungen`, `genehmigen <ID>`, `ablehnen <ID> <Grund>`
@@ -417,4 +478,4 @@ Environment="MAIL_FROM=Zeiterfassung <user@beispiel.de>"
 
 ---
 
-*Zeiterfassung v2.0.9 – Flask + SQLite – 20 Länder*
+*Zeiterfassung v3.0.0 – Flask + SQLite – 20 Länder*

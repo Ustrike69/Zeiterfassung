@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v2.0.9"
+APP_VERSION = "v3.0.0"
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
@@ -10540,6 +10540,11 @@ function filterHelp(q){{
         <p>An einem Flextag ist das Soll = 0. Dennoch wird die <em>eigentlich geplante</em> Sollzeit vom Gleitzeitkonto abgezogen – der Flextag „verbraucht" Gleitzeit. Dadurch ist ein Flextag wirtschaftlich äquivalent zu einem Urlaubstag, belastet aber das Urlaubskonto nicht.</p>
       </div>
       <div class="help-entry">
+        <b>Manuelle Korrekturen</b>
+        <p>Zeitmanager können manuelle Gutschriften oder Abzüge anlegen – z.B. für Überstunden-Auszahlungen oder Korrekturbuchungen. Korrekturen erscheinen als eigene Zeile in der Gleitzeitkonto-Ansicht und fließen in den Saldo ein.</p>
+        <p>Anlegen unter <em>Admin → Benutzerübersichten → Gleitzeitkonto → Korrekturen</em>. Jede Korrektur hat Datum, Betrag in Minuten und einen Freitext-Grund.</p>
+      </div>
+      <div class="help-entry">
         <b>Bericht als RTF-Datei</b>
         <p>Über den Telegram-Bot-Befehl <code>/bericht</code> bzw. <code>/bericht jahr</code> wird ein RTF-Dokument mit farbiger Darstellung (grün/rot) erzeugt und zugeschickt, sobald der Bericht länger als eine Bildschirmseite wäre.</p>
       </div>
@@ -10580,7 +10585,117 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 6. Dienstreisen -->
+<!-- 6. Teams/Abteilungen -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>👥 Teams / Abteilungen</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Wozu dienen Teams?</b>
+        <p>Teams / Abteilungen gruppieren Nutzer. Zeitmanager und Genehmiger können auf bestimmte Teams eingeschränkt werden, sodass sie nur die Mitglieder ihrer Teams sehen und verwalten.</p>
+      </div>
+      <div class="help-entry">
+        <b>Team-Zuordnung</b>
+        <p>Ein Nutzer kann mehreren Teams angehören. Das <b>Haupt-Team</b> wird im Kalender und in Übersichten angezeigt. Verwaltung unter <em>Admin → Benutzerübersichten → Teams-Zuordnung</em>.</p>
+      </div>
+      <div class="help-entry">
+        <b>Team-Kalender</b>
+        <p>Zeitmanager und Genehmiger sehen einen Team-Kalender: wer aus ihrem Team ist wann abwesend. Nützlich bei der Prüfung von Abwesenheitsanträgen.</p>
+      </div>
+      <div class="help-entry">
+        <b>Einschränkung auf Teams</b>
+        <p>Über <em>Admin → Benutzerübersichten → Benutzer bearbeiten → Team-Einschränkung</em> kann ein Zeitmanager oder Genehmiger auf bestimmte Teams begrenzt werden – er sieht dann nur die Mitglieder dieser Teams.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 7. Abwesenheits-Genehmigung -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>✅ Abwesenheits-Genehmigung</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Genehmiger-Rolle aktivieren</b>
+        <p>In <em>Admin → Benutzerübersichten → Benutzer bearbeiten</em> kann ein Nutzer als Genehmiger markiert werden (<em>„Ist Genehmiger"</em>). Genehmiger erhalten Benachrichtigungen bei neuen Anträgen.</p>
+      </div>
+      <div class="help-entry">
+        <b>Genehmigungspflicht pro User konfigurieren</b>
+        <p>Pro Nutzer lässt sich festlegen: welcher Genehmiger zuständig ist und welche Abwesenheitstypen genehmigungspflichtig sind. Einstellung unter <em>Admin → Benutzerübersichten → Benutzer bearbeiten → Genehmigung</em>.</p>
+      </div>
+      <div class="help-entry">
+        <b>Genehmigungsübersicht (/approvals)</b>
+        <p>Genehmiger sehen unter <em>/approvals</em> alle offenen Anträge sowie vergangene Entscheidungen. Bei Klick auf einen Antrag ist der Team-Kalender sichtbar – inklusive Überschneidungswarnung wenn andere Teammitglieder im gleichen Zeitraum abwesend sind.</p>
+      </div>
+      <div class="help-entry">
+        <b>Auswirkung auf Gleitzeitkonto</b>
+        <p><b>Pending</b>-Abwesenheiten werden im Gleitzeitkonto <em>nicht</em> berücksichtigt. Erst nach Genehmigung ist die Abwesenheit wirksam und reduziert das Soll.</p>
+        <div class="warn-box">⚠️ Abgelehnte oder ausstehende Abwesenheiten zählen nicht als Urlaubsverbrauch und beeinflussen den Saldo nicht.</div>
+      </div>
+      <div class="help-entry">
+        <b>Benachrichtigungen</b>
+        <p>Beim Einreichen eines Antrags: Mail + Telegram an den Genehmiger.<br>
+        Bei Genehmigung oder Ablehnung: Mail + Telegram an den Antragsteller (mit Ablehnungsgrund).</p>
+      </div>
+      <div class="help-entry">
+        <b>Telegram-Bot-Befehle (Genehmiger)</b>
+        <ul>
+          <li><code>/genehmigungen</code> — offene Anträge anzeigen</li>
+          <li><code>genehmigen &lt;ID&gt;</code> — Antrag genehmigen</li>
+          <li><code>ablehnen &lt;ID&gt; &lt;Grund&gt;</code> — Antrag ablehnen mit Begründung</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 8. Besetzungsplanung -->
+<div class="acc help-acc">
+  <button class="acc-hdr" type="button" onclick="haccToggle(this)">
+    <span>📋 Besetzungsplanung</span><span class="acc-arr">▼</span>
+  </button>
+  <div class="acc-body">
+    <div class="acc-inner">
+      <div class="help-entry">
+        <b>Feature aktivieren</b>
+        <p>Die Besetzungsplanung ist ein optionales Feature. Aktivierung unter <em>Admin → Systemeinstellungen → Features → Besetzungsplanung</em>. Nach Aktivierung erscheint der Menüpunkt für Zeitmanager und Genehmiger.</p>
+      </div>
+      <div class="help-entry">
+        <b>Pläne anlegen</b>
+        <p>Pro Team können mehrere Besetzungspläne angelegt werden (z.B. „Regelbetrieb", „Sommerschicht"). Nur aktive Pläne werden in der Ansicht angezeigt.</p>
+      </div>
+      <div class="help-entry">
+        <b>Slots definieren</b>
+        <p>Ein Slot beschreibt einen Zeitraum mit Mindestbesetzung. Verfügbare Slot-Typen:</p>
+        <ul>
+          <li><b>Täglich</b> — gilt jeden Arbeitstag</li>
+          <li><b>Wochentage</b> — gilt nur an bestimmten Wochentagen</li>
+          <li><b>nth_weekday</b> — z.B. „1. Montag im Monat"</li>
+          <li><b>Datum</b> — festes Einzeldatum</li>
+        </ul>
+        <p>Je Slot: Beginn- und Endzeit, Mindestbesetzung (<em>min_staff</em>), Mitarbeiter-Zuordnung.</p>
+      </div>
+      <div class="help-entry">
+        <b>Wochenansicht</b>
+        <p>Mini-Zeitleisten je Mitarbeiter für eine Woche. Zeigt auf einen Blick wer wann eingeplant ist. Anwesenheitszeiten werden aus dem Zeitschema des Mitarbeiters übernommen (wenn Sync aktiviert).</p>
+      </div>
+      <div class="help-entry">
+        <b>Monatsansicht</b>
+        <p>Zeigt pro Tag die tatsächliche Besetzungszahl je Slot. Tage mit Unterbesetzung (Ist &lt; min_staff) werden hervorgehoben. Klick auf einen Tag öffnet das Tagesdetail.</p>
+      </div>
+      <div class="help-entry">
+        <b>Zeitschema-Sync</b>
+        <p>In den Zeitschema-Einstellungen eines Users kann „Sync in Besetzungsplan" aktiviert werden. Die Arbeitszeiten des Schemas werden dann automatisch als Anwesenheit in den verknüpften Plan übernommen.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 9. Dienstreisen -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>✈ Dienstreisen</span><span class="acc-arr">▼</span>
@@ -10603,7 +10718,7 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 7. Kontierung -->
+<!-- 10. Kontierung -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>📋 Kontierung</span><span class="acc-arr">▼</span>
@@ -10630,7 +10745,7 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 8. Abschlüsse -->
+<!-- 11. Abschlüsse -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>🔒 Abschlüsse</span><span class="acc-arr">▼</span>
@@ -10654,7 +10769,7 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 9. Einstellungen -->
+<!-- 12. Einstellungen -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>⚙️ Einstellungen</span><span class="acc-arr">▼</span>
@@ -10680,7 +10795,13 @@ function filterHelp(q){{
         <p><b>Wochenmodus</b>: Gleiche tägliche Soll-Zeit, verteilt auf alle Arbeitstage der Woche.<br>
         <b>Tagesmodus</b>: Unterschiedliche Soll-Zeit pro Wochentag (z.B. Mo–Do 8h, Fr 6h).<br>
         <b>Arbeitstage</b>: Welche Wochentage als Arbeitstage zählen (Standard: Mo–Fr).<br>
-        <b>Gültig ab</b>: Mehrere Schemata mit unterschiedlichen Startdaten sind möglich – das zuletzt gültige wird je Tag angewendet.</p>
+        <b>Gültig ab</b>: Mehrere Schemata mit unterschiedlichen Startdaten sind möglich – das zuletzt gültige wird je Tag angewendet.<br>
+        <b>Mehrere Zeitblöcke pro Tag</b>: Pro Schema-Tag können beliebig viele Zeitblöcke hinterlegt werden (z.B. Kernzeit + Nachmittagsschicht).<br>
+        <b>Sync in Besetzungsplan</b>: Optional – Zeitschema-Blöcke werden automatisch als Anwesenheit in den verknüpften Besetzungsplan übernommen.</p>
+      </div>
+      <div class="help-entry">
+        <b>Schema bearbeiten (Nutzer)</b>
+        <p>Wenn vom Admin freigegeben (<em>Selbst bearbeiten erlaubt</em>), kann der Nutzer sein Zeitschema unter <em>Einstellungen → Zeitschema</em> selbst anpassen.</p>
       </div>
       <div class="help-entry">
         <b>Kontierung</b>
@@ -10690,7 +10811,7 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 10. Kalender-Integration -->
+<!-- 13. Kalender-Integration -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>📅 Kalender-Integration</span><span class="acc-arr">▼</span>
@@ -10736,7 +10857,7 @@ function filterHelp(q){{
   </div>
 </div>
 
-<!-- 11. Telegram-Bot -->
+<!-- 14. Telegram-Bot -->
 <div class="acc help-acc">
   <button class="acc-hdr" type="button" onclick="haccToggle(this)">
     <span>🤖 Telegram-Bot</span><span class="acc-arr">▼</span>

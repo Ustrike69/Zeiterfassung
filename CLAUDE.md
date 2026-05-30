@@ -4,7 +4,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-**Zeiterfassung** (v2.0.9) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
+**Zeiterfassung** (v3.0.0) is a multi-user time tracking web app built with Flask + SQLite, deployed at `/opt/zeiterfassung`, running as a Gunicorn systemd service. Users record work time blocks, absences, and business trips; the app computes flex-time balances against configurable work schedules. Fully bilingual (DE/EN), with a European public holiday database covering 20 countries.
 
 ## Running the Application
 
@@ -140,7 +140,14 @@ Key tables:
 | `time_blocks` | Multiple time blocks per day (current model) |
 | `time_entries` | Legacy single-entry-per-day |
 | `absences` | Linked to `absence_types` |
+| `teams` | id, name, description, color |
+| `user_teams` | user_id, team_id (M:N mapping) |
 | `absence_approvals` | Approval records per absence: `absence_id`, `approver_id`, `status` (pending/approved/rejected), `comment` |
+| `staffing_plans` | id, team_id, name, active — Besetzungspläne pro Team |
+| `staffing_slots` | id, plan_id, slot_type, weekdays, nth_week, time_from, time_to, min_staff |
+| `staffing_assignments` | id, slot_id, user_id, assignment_type |
+| `balance_adjustments` | id, user_id, minutes, reason, adjustment_date — manuelle Gleitzeitkorrekturen |
+| `schedule_daily_blocks` | id, schedule_id, weekday, time_from, time_to — mehrere Zeitblöcke pro Schematag |
 | `absence_types` | Urlaub, Krank, Flextag, Sonstige (+ custom) |
 | `calendar_days` | Holiday/weekend flags by ISO date + region; composite PK (day, region) |
 | `contoured_days` | Days marked as contoured (user_id, day) |
@@ -200,10 +207,21 @@ Key tables:
 | `totp_secret` | TEXT | Fernet-encrypted TOTP secret |
 | `totp_enabled` | INTEGER | 1 = 2FA active |
 | `totp_backup_codes` | TEXT | Fernet-encrypted JSON array of one-time backup codes |
+| `primary_team_id` | INTEGER | FK → teams.id; Haupt-Team des Users |
+| `team_restriction` | TEXT | Komma-sep. Team-IDs; schränkt Zeitmanager/Genehmiger auf diese Teams ein |
+| `is_superuser` | INTEGER | 1 = Superuser (nur aktiv wenn `ZEITERFASSUNG_DEV_MODE=1`) |
 
 ## Schedule System
 
 `workdays_mask` bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64. Default Mon–Fri = 31.
+
+### user_schedules – Additional Columns (v3.0.0)
+
+| Column | Description |
+|--------|-------------|
+| `sync_to_staffing` | 1 = Zeitschema-Zeiten in Besetzungsplan übernehmen |
+| `sync_plan_id` | FK → staffing_plans.id; Zielplan für den Sync |
+| `allow_self_edit` | 1 = Nutzer darf das Schema selbst bearbeiten |
 
 Two modes (`mode` in `user_schedules`):
 - `weekly` — `weekly_minutes` divided evenly across mask-matching days
@@ -350,4 +368,5 @@ Admin can act as another user:
 - **JS strings from Python**: Pre-compute `t()` values into Python vars (e.g., `_lbl = t('key')`), then embed via `repr(_lbl)` in `<script>` blocks to avoid quote conflicts.
 - `_calc_balance_end_at` must stay in sync with `balance_view` logic — both use `_iter_days`
 - `bootstrap()` called on every route → runs `init_db()` + `seed_defaults()` + `seed_all_regions()`
-- App version: `APP_VERSION = "v2.0.9"` at top of `app.py`
+- App version: `APP_VERSION = "v3.0.0"` at top of `app.py`
+- Dev-Mode: `ZEITERFASSUNG_DEV_MODE=1` env var activates superuser features and debug tooling
