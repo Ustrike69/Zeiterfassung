@@ -982,6 +982,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.no_team_members":        "Keine Team-Mitglieder",
 
         # ── Staffing ──────────────────────────────────────────────
+        "nav.staffing":                 "Besetzung",
         "admin.staffing":               "Besetzungsplanung",
         "staffing.plan":                "Besetzungsplan",
         "staffing.plan_name":           "Plan-Name",
@@ -997,6 +998,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.min_staff":           "Mindestbesetzung",
         "staffing.weekdays":            "Wochentage",
         "staffing.nth_week":            "Welche Wochen",
+        "staffing.week_view":           "Wochenansicht",
+        "staffing.month_view":          "Monatsansicht",
+        "staffing.present":             "Anwesend",
+        "staffing.absent":              "Abwesend",
+        "staffing.understaffed":        "Unterbesetzt",
+        "staffing.ok":                  "Besetzt",
+        "staffing.manage_plans":        "Pläne verwalten",
+        "staffing.assign_staff":        "Mitarbeiter zuweisen",
+        "staffing.available":           "Verfügbar",
+        "staffing.assigned":            "Zugewiesen",
 
         # ── Wochentage ────────────────────────────────────────────
         "wd.mon":                       "Mo",
@@ -2110,6 +2121,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.no_team_members":        "No team members",
 
         # ── Staffing ──────────────────────────────────────────────
+        "nav.staffing":                 "Staffing",
         "admin.staffing":               "Staffing",
         "staffing.plan":                "Staffing Plan",
         "staffing.plan_name":           "Plan Name",
@@ -2125,6 +2137,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.min_staff":           "Minimum staff",
         "staffing.weekdays":            "Weekdays",
         "staffing.nth_week":            "Which weeks",
+        "staffing.week_view":           "Week view",
+        "staffing.month_view":          "Month view",
+        "staffing.present":             "Present",
+        "staffing.absent":              "Absent",
+        "staffing.understaffed":        "Understaffed",
+        "staffing.ok":                  "Staffed",
+        "staffing.manage_plans":        "Manage plans",
+        "staffing.assign_staff":        "Assign staff",
+        "staffing.available":           "Available",
+        "staffing.assigned":            "Assigned",
 
         # ── Weekdays ──────────────────────────────────────────────
         "wd.mon":                       "Mon",

@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev2"
+APP_VERSION = "v3.0.0.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14346,7 +14346,6 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
         team_plans = plans_by_team.get(tid, [])
         team_color = _html.escape(tm["color"] or "#4a9eff")
 
-        # members of this team for assignment checkboxes
         db_tmp = connect()
         team_user_rows = db_tmp.execute(
             "SELECT u.id, u.username, u.display_name FROM users u "
@@ -14369,38 +14368,56 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 stype_label = _STYPE.get(s["slot_type"], s["slot_type"])
                 wd_str = _wd_label(s)
                 assigned_ids = assigned.get(sid, set())
-                chk = "".join(
-                    f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:13px;">'
-                    f'<input type="checkbox" name="user_ids" value="{tu["id"]}"'
-                    f'{" checked" if tu["id"] in assigned_ids else ""}>'
-                    f'{_html.escape(tu["display_name"] or tu["username"])}</label>'
-                    for tu in team_user_rows
-                )
+
+                available_cards = ""
+                assigned_cards  = ""
+                for tu in team_user_rows:
+                    uname = _html.escape(tu["display_name"] or tu["username"])
+                    card = (
+                        f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
+                        f'ondragstart="drag(event)">'
+                        f'<span class="user-dot" style="background:{team_color}"></span>'
+                        f'{uname}</div>'
+                    )
+                    if tu["id"] in assigned_ids:
+                        assigned_cards += card
+                    else:
+                        available_cards += card
+
+                no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
+
                 slots_html += f"""
-                <div style="background:var(--ca);border:1px solid var(--br);border-radius:8px;
-                             padding:12px;margin-bottom:8px;">
-                  <div style="display:flex;justify-content:space-between;align-items:flex-start;
-                               flex-wrap:wrap;gap:8px;margin-bottom:8px;">
-                    <div>
-                      <strong>{slabel}</strong>
-                      <span style="margin-left:8px;font-size:12px;color:var(--mu);">
-                        {stype_label} · {wd_str} · min. {s["min_staff"]}
-                      </span>
-                    </div>
-                    <form method="post" action="/admin/staffing" style="margin:0;">
-                      <input type="hidden" name="action" value="delete_slot">
-                      <input type="hidden" name="slot_id" value="{sid}">
-                      <button class="btn btn-sm" type="submit"
-                              style="color:#dc2626;font-size:11px;"
-                              onclick="return confirm('{t('confirm.delete')}')">{t('btn.delete')}</button>
-                    </form>
+                <div class="slot-card" data-slot-id="{sid}">
+                  <div class="slot-header">
+                    <span class="slot-label"><strong>{slabel}</strong></span>
+                    <span class="slot-type-badge" style="font-size:11px;background:var(--ca);
+                          border-radius:4px;padding:2px 6px;">{stype_label}</span>
+                    <span class="slot-days" style="font-size:12px;color:var(--mu);">{wd_str}</span>
+                    <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
+                    <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
+                            onclick="deleteSlot({sid})">×</button>
                   </div>
-                  <form method="post" action="/admin/staffing">
-                    <input type="hidden" name="action" value="save_assignments">
-                    <input type="hidden" name="slot_id" value="{sid}">
-                    {chk if chk else f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>'}
-                    {('<button class="btn primary btn-sm" type="submit" style="margin-top:6px;">' + t('btn.save') + '</button>') if chk else ''}
-                  </form>
+                  {no_members}
+                  <div class="slot-body">
+                    <div class="assign-col">
+                      <h6>{t('staffing.available')}</h6>
+                      <div class="droptarget" id="available-{sid}"
+                           ondragover="allowDrop(event)"
+                           ondrop="drop(event,{sid},'available')">
+                        {available_cards}
+                      </div>
+                    </div>
+                    <div class="assign-col">
+                      <h6>{t('staffing.assigned')}</h6>
+                      <div class="droptarget" id="assigned-{sid}"
+                           ondragover="allowDrop(event)"
+                           ondrop="drop(event,{sid},'assigned')">
+                        {assigned_cards}
+                      </div>
+                    </div>
+                  </div>
+                  <button class="btn primary btn-sm" style="margin-top:8px;"
+                          onclick="saveAssignments({sid})">{t('btn.save')}</button>
                 </div>"""
 
             # Slot anlegen
@@ -14417,7 +14434,6 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 <span style="font-size:12px;color:var(--mu);">{p["description"] or ""}</span>
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
-
               <!-- Slot anlegen -->
               <details style="margin-top:8px;">
                 <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
@@ -14451,12 +14467,8 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     </div>
                   </div>
                   <div id="wd-normal-{pid}" style="margin-bottom:10px;">
-                    <label style="font-size:12px;display:block;margin-bottom:4px;">
-                      {t('staffing.weekdays')}
-                    </label>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                      {wd_checkboxes}
-                    </div>
+                    <label style="font-size:12px;display:block;margin-bottom:4px;">{t('staffing.weekdays')}</label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;">{wd_checkboxes}</div>
                     <input type="hidden" name="weekdays" id="wd-val-{pid}" value="0,1,2,3,4">
                   </div>
                   <div id="wd-special-{pid}" style="display:none;margin-bottom:10px;">
@@ -14489,11 +14501,9 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
             <strong style="font-size:16px;">{_html.escape(tm["name"])}</strong>
           </div>
           {plans_html if plans_html else f'<p style="font-size:13px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_plans")}</p>'}
-
           <!-- Plan anlegen -->
           <details>
-            <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);
-                            margin-bottom:4px;">
+            <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);margin-bottom:4px;">
               + {t('staffing.add_plan')}
             </summary>
             <form method="post" action="/admin/staffing"
@@ -14521,49 +14531,89 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
     no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")} – <a href="/admin/teams">{t("admin.teams")}</a></p>' if not teams else ""
 
     return f"""
-    <div style="max-width:750px;margin:1.5rem auto;">
+    <style>
+    .slot-card{{border:1px solid var(--br);border-radius:8px;padding:1rem;margin-bottom:1rem;}}
+    .slot-header{{display:flex;gap:8px;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;}}
+    .slot-body{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}}
+    @media(max-width:500px){{.slot-body{{grid-template-columns:1fr;}}}}
+    .assign-col h6{{font-size:12px;color:var(--mu);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;}}
+    .droptarget{{min-height:80px;background:var(--ca);border:2px dashed var(--br);border-radius:6px;padding:8px;transition:border-color .15s,background .15s;}}
+    .droptarget.dragover{{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 10%,var(--ca));}}
+    .user-card{{background:var(--bg);border:1px solid var(--br);border-radius:4px;padding:4px 8px;margin-bottom:4px;cursor:grab;display:flex;align-items:center;gap:6px;font-size:13px;user-select:none;}}
+    .user-card:hover{{opacity:.85;}}
+    .user-card:active{{cursor:grabbing;}}
+    .user-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0;}}
+    </style>
+    <div style="max-width:800px;margin:1.5rem auto;">
       <h2 style="margin-bottom:1.5rem;">{t('admin.staffing')}</h2>
       {no_teams_hint}
       {plan_html}
       <div style="margin-top:1.5rem;">
         <a href="/admin" class="btn btn-sm">← {t('btn.back')}</a>
         <a href="/admin/teams" class="btn btn-sm" style="margin-left:8px;">{t('admin.teams')}</a>
+        <a href="/staffing" class="btn btn-sm" style="margin-left:8px;">📋 {t('nav.staffing')}</a>
       </div>
     </div>
     <script>
-    function toggleSlotType(sel, pid) {{
-      var normal  = document.getElementById('wd-normal-' + pid);
-      var special = document.getElementById('wd-special-' + pid);
-      if (!normal || !special) return;
-      if (sel.value === 'special') {{
-        normal.style.display = 'none';
-        special.style.display = 'block';
-      }} else {{
-        normal.style.display = 'block';
-        special.style.display = 'none';
-      }}
+    function allowDrop(e){{e.preventDefault();}}
+    function drag(e){{
+      e.dataTransfer.setData("userId",e.target.dataset.userId);
     }}
-    // Weekday checkboxes → hidden input
-    document.addEventListener('change', function(e) {{
-      if (!e.target.name || !e.target.name.startsWith('wd_')) return;
-      var pid = e.target.closest('form').querySelector('[name=plan_id]').value;
-      var checked = [];
-      e.target.closest('form').querySelectorAll('[name^="wd_"]').forEach(function(cb) {{
-        if (cb.checked) checked.push(cb.value);
-      }});
-      var hid = document.getElementById('wd-val-' + pid);
-      if (hid) hid.value = checked.join(',');
+    function drop(e,slotId,target){{
+      e.preventDefault();
+      var uid=e.dataTransfer.getData("userId");
+      var card=document.querySelector('[data-user-id="'+uid+'"]');
+      if(card)e.currentTarget.appendChild(card);
+      e.currentTarget.classList.remove("dragover");
+    }}
+    document.querySelectorAll(".droptarget").forEach(function(el){{
+      el.addEventListener("dragover",function(e){{e.preventDefault();el.classList.add("dragover");}});
+      el.addEventListener("dragleave",function(){{el.classList.remove("dragover");}});
     }});
-    // nth_week checkboxes → hidden input
-    document.addEventListener('change', function(e) {{
-      if (!e.target.name || !e.target.name.startsWith('nth_w_')) return;
-      var pid = e.target.closest('form').querySelector('[name=plan_id]').value;
-      var checked = [];
-      e.target.closest('form').querySelectorAll('[name^="nth_w_"]').forEach(function(cb) {{
-        if (cb.checked) checked.push(cb.value);
+    function saveAssignments(slotId){{
+      var assigned=document.querySelectorAll("#assigned-"+slotId+" .user-card");
+      var userIds=[].map.call(assigned,function(c){{return c.dataset.userId;}});
+      var form=document.createElement("form");
+      form.method="POST";form.action="/admin/staffing";
+      [["action","save_assignments"],["slot_id",slotId]].forEach(function(p){{
+        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
       }});
-      var hid = document.getElementById('nth-val-' + pid);
-      if (hid) hid.value = checked.join(',');
+      userIds.forEach(function(uid){{
+        var i=document.createElement("input");i.type="hidden";i.name="user_ids";i.value=uid;form.appendChild(i);
+      }});
+      document.body.appendChild(form);form.submit();
+    }}
+    function deleteSlot(slotId){{
+      if(!confirm("{t('confirm.delete')}"))return;
+      var form=document.createElement("form");
+      form.method="POST";form.action="/admin/staffing";
+      [["action","delete_slot"],["slot_id",slotId]].forEach(function(p){{
+        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
+      }});
+      document.body.appendChild(form);form.submit();
+    }}
+    function toggleSlotType(sel,pid){{
+      var normal=document.getElementById('wd-normal-'+pid);
+      var special=document.getElementById('wd-special-'+pid);
+      if(!normal||!special)return;
+      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
+      else{{normal.style.display='block';special.style.display='none';}}
+    }}
+    document.addEventListener('change',function(e){{
+      if(!e.target.name||!e.target.name.startsWith('wd_'))return;
+      var f=e.target.closest('form');if(!f)return;
+      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
+      var pid=pEl.value;var checked=[];
+      f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+      var hid=document.getElementById('wd-val-'+pid);if(hid)hid.value=checked.join(',');
+    }});
+    document.addEventListener('change',function(e){{
+      if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
+      var f=e.target.closest('form');if(!f)return;
+      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
+      var pid=pEl.value;var checked=[];
+      f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+      var hid=document.getElementById('nth-val-'+pid);if(hid)hid.value=checked.join(',');
     }});
     </script>"""
 
@@ -15699,6 +15749,366 @@ def admin_teams():
 
     body = _render_admin_teams(teams, all_users, team_members)
     return render_template_string(layout(t("admin.teams"), body, current_user(), APP_VERSION))
+
+
+_MONTH_NAMES = ["", "Januar", "Februar", "März", "April", "Mai", "Juni",
+                "Juli", "August", "September", "Oktober", "November", "Dezember"]
+
+
+def _get_staffing_week_data(plan_id: int) -> dict:
+    today    = datetime.date.today()
+    week_arg = request.args.get("week", "")
+    try:
+        monday = datetime.date.fromisoformat(week_arg) if week_arg else None
+    except ValueError:
+        monday = None
+    if monday is None:
+        monday = today - datetime.timedelta(days=today.weekday())
+
+    days = [monday + datetime.timedelta(days=i) for i in range(5)]
+
+    db = connect()
+    slots = db.execute(
+        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY sort_order",
+        (plan_id,)
+    ).fetchall()
+    assignments = db.execute("""
+        SELECT sa.*, u.username, u.display_name
+        FROM staffing_assignments sa
+        JOIN users u ON u.id = sa.user_id
+        WHERE sa.slot_id IN (SELECT id FROM staffing_slots WHERE plan_id=?)
+    """, (plan_id,)).fetchall()
+
+    assign_map = {}
+    for a in assignments:
+        assign_map.setdefault(a["slot_id"], []).append(a)
+
+    user_ids = list({a["user_id"] for a in assignments})
+    absences = []
+    if user_ids:
+        ph     = ",".join("?" * len(user_ids))
+        d_from = days[0].isoformat()
+        d_to   = days[-1].isoformat()
+        absences = db.execute(
+            f"SELECT user_id, date_from, date_to FROM absences "
+            f"WHERE user_id IN ({ph}) AND date_from <= ? AND date_to >= ?",
+            (*user_ids, d_to, d_from)
+        ).fetchall()
+    db.close()
+
+    def is_absent(uid, iso):
+        return any(
+            ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
+            for ab in absences
+        )
+
+    result = {"monday": monday, "days": days, "slots": []}
+    for slot in slots:
+        slot_days = []
+        for day in days:
+            iso = day.isoformat()
+            if not _slot_applies_on_date(slot, iso):
+                slot_days.append(None)
+                continue
+            assigned_list = assign_map.get(slot["id"], [])
+            present = [a for a in assigned_list if not is_absent(a["user_id"], iso)]
+            absent  = [a for a in assigned_list if is_absent(a["user_id"], iso)]
+            count   = len(present)
+            min_s   = slot["min_staff"]
+            status  = "ok" if count >= min_s else ("warn" if count > 0 else "empty")
+            slot_days.append({"present": present, "absent": absent,
+                               "count": count, "min_staff": min_s, "status": status})
+        result["slots"].append({"slot": slot, "days": slot_days})
+    return result
+
+
+def _get_staffing_month_data(plan_id: int) -> dict:
+    today = datetime.date.today()
+    year  = request.args.get("y", type=int, default=today.year)
+    month = request.args.get("m", type=int, default=today.month)
+
+    days_in_month = calendar.monthrange(year, month)[1]
+    days = [datetime.date(year, month, d) for d in range(1, days_in_month + 1)]
+
+    db = connect()
+    slots = db.execute(
+        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY sort_order",
+        (plan_id,)
+    ).fetchall()
+    assignments = db.execute("""
+        SELECT sa.*, u.username, u.display_name
+        FROM staffing_assignments sa
+        JOIN users u ON u.id = sa.user_id
+        WHERE sa.slot_id IN (SELECT id FROM staffing_slots WHERE plan_id=?)
+    """, (plan_id,)).fetchall()
+
+    assign_map = {}
+    for a in assignments:
+        assign_map.setdefault(a["slot_id"], []).append(a)
+
+    user_ids = list({a["user_id"] for a in assignments})
+    absences = []
+    if user_ids:
+        ph     = ",".join("?" * len(user_ids))
+        d_from = days[0].isoformat()
+        d_to   = days[-1].isoformat()
+        absences = db.execute(
+            f"SELECT user_id, date_from, date_to FROM absences "
+            f"WHERE user_id IN ({ph}) AND date_from <= ? AND date_to >= ?",
+            (*user_ids, d_to, d_from)
+        ).fetchall()
+    db.close()
+
+    def is_absent(uid, iso):
+        return any(
+            ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
+            for ab in absences
+        )
+
+    result = {"year": year, "month": month, "days": []}
+    for day in days:
+        iso = day.isoformat()
+        day_slots = []
+        has_warning = False
+        for slot in slots:
+            if not _slot_applies_on_date(slot, iso):
+                continue
+            assigned_list = assign_map.get(slot["id"], [])
+            present_count = sum(1 for a in assigned_list if not is_absent(a["user_id"], iso))
+            min_s  = slot["min_staff"]
+            status = "ok" if present_count >= min_s else ("warn" if present_count > 0 else "empty")
+            if status != "ok":
+                has_warning = True
+            day_slots.append({"label": slot["label"], "count": present_count,
+                               "min_staff": min_s, "status": status})
+        result["days"].append({"date": day, "iso": iso,
+                                "slots": day_slots, "has_warning": has_warning})
+    return result
+
+
+def _render_staffing_week(data: dict, plan_id: int) -> str:
+    monday = data["monday"]
+    days   = data["days"]
+    today  = datetime.date.today()
+
+    prev_mon = (monday - datetime.timedelta(days=7)).isoformat()
+    next_mon = (monday + datetime.timedelta(days=7)).isoformat()
+    this_mon = (today - datetime.timedelta(days=today.weekday())).isoformat()
+    kw       = monday.isocalendar()[1]
+    d_from   = monday.strftime("%d.%m")
+    d_to     = (monday + datetime.timedelta(days=4)).strftime("%d.%m.%Y")
+
+    nav = (
+        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;">'
+        f'<a href="/staffing?plan_id={plan_id}&view=week&week={prev_mon}" class="btn btn-sm">◀</a>'
+        f'<strong>KW {kw} &nbsp;{d_from}–{d_to}</strong>'
+        f'<a href="/staffing?plan_id={plan_id}&view=week&week={next_mon}" class="btn btn-sm">▶</a>'
+        f'<a href="/staffing?plan_id={plan_id}&view=week&week={this_mon}" class="btn btn-sm">Heute</a>'
+        f'</div>'
+    )
+
+    _WD = ["Mo", "Di", "Mi", "Do", "Fr"]
+    _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
+    _SC = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
+
+    th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid var(--br);'></th>"
+    for day in days:
+        today_bg = "background:color-mix(in srgb,var(--ac) 8%,var(--bg));" if day == today else ""
+        th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
+               f"border-bottom:2px solid var(--br);{today_bg}'>"
+               f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
+
+    rows = ""
+    for entry in data["slots"]:
+        slot = entry["slot"]
+        cells = (
+            f"<td style='padding:6px 10px;font-size:13px;white-space:nowrap;"
+            f"border-right:1px solid var(--br);'>"
+            f"<strong>{_html.escape(slot['label'])}</strong><br>"
+            f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
+        )
+        for day_data in entry["days"]:
+            if day_data is None:
+                cells += "<td style='padding:6px 10px;background:var(--ca);'></td>"
+                continue
+            status = day_data["status"]
+            color  = _SC[status]
+            present_html = " ".join(
+                f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
+                f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
+                f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
+                for a in day_data["present"]
+            )
+            absent_html = " ".join(
+                f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
+                f'padding:1px 5px;font-size:11px;text-decoration:line-through;white-space:nowrap;">'
+                f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
+                for a in day_data["absent"]
+            )
+            cells += (
+                f'<td style="padding:6px 10px;border-left:3px solid {color};">'
+                f'<div style="font-size:12px;font-weight:700;color:{color};margin-bottom:4px;">'
+                f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{present_html}{absent_html}</div>'
+                f'</td>'
+            )
+        rows += f"<tr style='border-bottom:1px solid var(--br);'>{cells}</tr>"
+
+    if not rows:
+        rows = f"<tr><td colspan='6' style='padding:1rem;color:var(--mu);'>{t('staffing.no_slots')}</td></tr>"
+
+    return f"""{nav}
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr>{th}</tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>"""
+
+
+def _render_staffing_month(data: dict, plan_id: int) -> str:
+    year  = data["year"]
+    month = data["month"]
+    today = datetime.date.today()
+
+    prev_y, prev_m = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
+
+    nav = (
+        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">'
+        f'<a href="/staffing?plan_id={plan_id}&view=month&y={prev_y}&m={prev_m}" class="btn btn-sm">◀</a>'
+        f'<strong>{_MONTH_NAMES[month]} {year}</strong>'
+        f'<a href="/staffing?plan_id={plan_id}&view=month&y={next_y}&m={next_m}" class="btn btn-sm">▶</a>'
+        f'</div>'
+    )
+
+    wd_headers = "".join(
+        f'<th style="padding:4px 6px;font-size:12px;color:var(--mu);text-align:center;'
+        f'font-weight:600;">{d}</th>'
+        for d in ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    )
+
+    first_wd = data["days"][0]["date"].weekday()
+    tds = ["<td></td>"] * first_wd
+
+    _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
+
+    for day_data in data["days"]:
+        day  = day_data["date"]
+        is_we     = day.weekday() >= 5
+        is_today  = day == today
+        warn      = day_data["has_warning"]
+        border    = "border:2px solid #dc2626;" if warn else "border:1px solid var(--br);"
+        bg        = "background:var(--ca);" if is_we else ""
+        today_ol  = "outline:2px solid var(--ac);outline-offset:-2px;" if is_today else ""
+        slot_lines = "".join(
+            f'<div style="font-size:10px;line-height:1.5;white-space:nowrap;">'
+            f'{_html.escape(s["label"][:7])} {s["count"]}/{s["min_staff"]} {_SI[s["status"]]}</div>'
+            for s in day_data["slots"]
+        )
+        tds.append(
+            f'<td style="padding:4px;vertical-align:top;{border}{bg}{today_ol}'
+            f'min-width:72px;">'
+            f'<div style="font-size:11px;font-weight:700;margin-bottom:2px;">{day.day}</div>'
+            f'{slot_lines}</td>'
+        )
+
+    # Pad to full weeks and build rows
+    while len(tds) % 7:
+        tds.append("<td style='background:var(--ca);'></td>")
+
+    rows = ""
+    for i in range(0, len(tds), 7):
+        rows += "<tr>" + "".join(tds[i:i+7]) + "</tr>"
+
+    return f"""{nav}
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
+        <thead><tr>{wd_headers}</tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>"""
+
+
+def _render_staffing_view(plans, plan_id, view, data, u) -> str:
+    plan_opts = "".join(
+        f'<option value="{p["id"]}"{"  selected" if p["id"] == plan_id else ""}>'
+        f'{_html.escape(p["team_name"])} – {_html.escape(p["name"])}</option>'
+        for p in plans
+    )
+    plan_selector = (
+        f'<form method="get" action="/staffing" style="display:inline-flex;gap:6px;align-items:center;">'
+        f'<select name="plan_id" onchange="this.form.submit()" style="font-size:13px;">'
+        f'{plan_opts}</select>'
+        f'<input type="hidden" name="view" value="{view}">'
+        f'</form>'
+    ) if plans else ""
+
+    view_btns = (
+        f'<a href="/staffing?plan_id={plan_id or ""}&view=week" '
+        f'class="btn btn-sm{"  primary" if view=="week" else ""}">{t("staffing.week_view")}</a> '
+        f'<a href="/staffing?plan_id={plan_id or ""}&view=month" '
+        f'class="btn btn-sm{"  primary" if view=="month" else ""}">{t("staffing.month_view")}</a>'
+    )
+
+    if not plans:
+        body_html = f'<p style="color:var(--mu);margin-top:1rem;">{t("staffing.no_plans")}</p>'
+    elif view == "week":
+        body_html = _render_staffing_week(data, plan_id)
+    else:
+        body_html = _render_staffing_month(data, plan_id)
+
+    manage_link = ""
+    if u.get("admin_role") in ("sysadmin", "timemanager"):
+        manage_link = (
+            f'<a href="/admin/staffing" class="btn btn-sm" style="margin-left:8px;">'
+            f'⚙ {t("staffing.manage_plans")}</a>'
+        )
+
+    return f"""
+    <div style="max-width:960px;margin:1rem auto;">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:1.25rem;">
+        <h2 style="margin:0;">{t('nav.staffing')}</h2>
+        {plan_selector}
+        <div style="display:flex;gap:4px;">{view_btns}</div>
+        {manage_link}
+      </div>
+      {body_html}
+    </div>"""
+
+
+@app.get("/staffing")
+@login_required
+def staffing_view():
+    bootstrap()
+    if not _feature_enabled("staffing"):
+        abort(404)
+    u = current_user()
+    if not (u.get("admin_role") in ("sysadmin", "timemanager") or u.get("is_approver")):
+        abort(403)
+
+    view    = request.args.get("view", "week")
+    plan_id = request.args.get("plan_id", type=int)
+
+    db = connect()
+    plans = db.execute("""
+        SELECT sp.*, t.name as team_name
+        FROM staffing_plans sp
+        JOIN teams t ON t.id = sp.team_id
+        WHERE sp.active = 1
+        ORDER BY t.name, sp.name
+    """).fetchall()
+    db.close()
+
+    if not plan_id and plans:
+        plan_id = plans[0]["id"]
+
+    data = {}
+    if plan_id:
+        data = _get_staffing_week_data(plan_id) if view == "week" else _get_staffing_month_data(plan_id)
+
+    body = _render_staffing_view(plans, plan_id, view, data, u)
+    return render_template_string(layout(t("nav.staffing"), body, u, APP_VERSION))
 
 
 @app.route("/admin/staffing", methods=["GET", "POST"])

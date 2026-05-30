@@ -21,6 +21,15 @@ def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impers
             items = [("/", _t("nav.dashboard")), ("/absences", _t("nav.absences")), ("/business_trips", _t("nav.trips")), ("/calendar", _t("nav.calendar")), ("/periods", _t("nav.periods")), ("/settings", _t("nav.settings")), ("/export", _t("nav.export")), ("/help", _t("nav.help"))]
             if user.get("is_approver"):
                 items.append(("/approvals", _t("nav.approvals")))
+            try:
+                from app import _feature_enabled as _fe
+                if _fe("staffing") and (
+                    user.get("admin_role") in ("sysadmin", "timemanager")
+                    or user.get("is_approver")
+                ):
+                    items.append(("/staffing", _t("nav.staffing")))
+            except Exception:
+                pass
             if user.get("is_admin"):
                 items.append(("/admin", _t("nav.admin")))
         items.append(("/logout", _t("nav.logout")))
