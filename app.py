@@ -16528,8 +16528,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             _badge_bg = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
             lead_html = " ".join(
                 f'<span style="background:#eab308;color:#000;border-radius:3px;'
-                f'padding:1px 5px;font-size:11px;white-space:nowrap;font-weight:600;">'
-                f'👑 {_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
+                f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
+                f'♦ {_html.escape((a["display_name"] or a["username"] or "?")[:8])}</span>'
                 for a in day_data.get("lead_present", [])
             )
             staff_html = " ".join(
