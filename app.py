@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev11"
+APP_VERSION = "v3.0.0.dev12"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14721,12 +14721,18 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
 
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
+                _srole       = s.get("slot_role") or "staff"
+                _srole_label = t("staffing.role_lead") if _srole == "lead" else t("staffing.role_staff")
+                _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
+                _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
                 slots_html += f"""
                 <div class="slot-card" data-slot-id="{sid}">
                   <div class="slot-header">
                     <span class="slot-label"><strong>{slabel}</strong></span>
                     <span class="slot-type-badge" style="font-size:11px;background:var(--ca);
                           border-radius:4px;padding:2px 6px;">{stype_label}</span>
+                    <span style="font-size:11px;background:{_srole_bg};color:{_srole_color};
+                          border-radius:4px;padding:2px 6px;">{_srole_label}</span>
                     <span class="slot-days" style="font-size:12px;color:var(--mu);">{wd_str}</span>
                     {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
                     <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
@@ -14800,6 +14806,13 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                       <label style="font-size:12px;">{t('staffing.min_staff')}</label>
                       <input type="number" name="min_staff" value="1" min="1" max="99"
                              style="display:block;margin-top:4px;width:70px;">
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_role')}</label>
+                      <select name="slot_role" style="display:block;margin-top:4px;">
+                        <option value="staff">{t('staffing.role_staff')}</option>
+                        <option value="lead">{t('staffing.role_lead')}</option>
+                      </select>
                     </div>
                     <div>
                       <label style="font-size:12px;">Von – Bis</label>
@@ -16369,7 +16382,8 @@ def _get_staffing_month_data(plan_id: int) -> dict:
                 has_warning = True
             day_slots.append({"label": slot["label"], "count": present_count,
                                "min_staff": min_s, "status": status,
-                               "time_from": slot["time_from"], "time_to": slot["time_to"]})
+                               "time_from": slot["time_from"], "time_to": slot["time_to"],
+                               "slot_role": slot.get("slot_role") or "staff"})
         result["days"].append({"date": day, "iso": iso,
                                 "slots": day_slots, "has_warning": has_warning})
     return result
@@ -16410,13 +16424,21 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
 
     rows = ""
     for entry in data["slots"]:
-        slot = entry["slot"]
+        slot      = entry["slot"]
+        slot_role = slot.get("slot_role") or "staff"
+        is_lead   = (slot_role == "lead")
         _slot_time = (f" {slot['time_from']}–{slot['time_to']}"
                       if slot["time_from"] and slot["time_to"] else "")
+        _lead_badge = (
+            f'<span style="font-size:10px;background:#eab308;color:#000;border-radius:3px;'
+            f'padding:1px 4px;margin-left:4px;">{t("staffing.role_lead")}</span>'
+            if is_lead else ""
+        )
+        _lbl_extra = "border-left:3px solid #eab308;background:rgba(234,179,8,0.06);" if is_lead else ""
         cells = (
             f"<td style='padding:6px 10px;font-size:13px;white-space:nowrap;"
-            f"border-right:1px solid var(--br);'>"
-            f"<strong>{_html.escape(slot['label'])}</strong>"
+            f"border-right:1px solid var(--br);{_lbl_extra}'>"
+            f"<strong>{_html.escape(slot['label'])}</strong>{_lead_badge}"
             f"<span style='font-size:11px;color:var(--ac);margin-left:4px;'>{_slot_time}</span><br>"
             f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
         )
@@ -16427,9 +16449,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 continue
             status = day_data["status"]
             color  = _SC[status]
-            _badge_bg = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
+            _badge_bg    = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
+            _present_bg  = "#eab308" if is_lead else "#16a34a"
+            _present_fg  = "#000"    if is_lead else "#fff"
             present_html = " ".join(
-                f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
+                f'<span style="background:{_present_bg};color:{_present_fg};border-radius:3px;'
                 f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
                 f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
                 for a in day_data["present"]
@@ -16440,6 +16464,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
                 for a in day_data["absent"]
             )
+            _lead_warn = (
+                f'<div style="font-size:11px;color:#dc2626;margin-top:2px;">'
+                f'<span title="{t("staffing.no_lead")}">⚠️ {t("staffing.role_lead")}</span></div>'
+                if is_lead and day_data["count"] == 0 else ""
+            )
             cells += (
                 f"<td style='padding:6px 10px;border-left:3px solid {color};cursor:pointer;'"
                 f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\">"
@@ -16447,9 +16476,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
                 f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
                 f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{present_html}{absent_html}</div>'
+                f'{_lead_warn}'
                 f'</td>'
             )
-        rows += f"<tr style='border-bottom:1px solid var(--br);'>{cells}</tr>"
+        _row_bg = "background:rgba(234,179,8,0.04);" if is_lead else ""
+        rows += f"<tr style='border-bottom:1px solid var(--br);{_row_bg}'>{cells}</tr>"
 
     if not rows:
         rows = f"<tr><td colspan='6' style='padding:1rem;color:var(--mu);'>{t('staffing.no_slots')}</td></tr>"
@@ -16515,14 +16546,20 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
         today_ol  = "outline:2px solid var(--ac);outline-offset:-2px;" if is_today else ""
         accepted_badge = '<span style="float:right;font-size:9px;color:#16a34a;font-weight:700;">✓</span>' if is_accepted else ""
 
-        slot_lines = "".join(
-            f'<div style="font-size:10px;line-height:1.6;white-space:nowrap;'
-            f'color:{_slot_badge_color(s["status"])};font-weight:600;">'
-            f'{_html.escape(s["label"])} '
-            f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}'
-            f'</div>'
-            for s in day_data["slots"]
-        )
+        slot_lines = ""
+        for s in day_data["slots"]:
+            slot_lines += (
+                f'<div style="font-size:10px;line-height:1.6;white-space:nowrap;'
+                f'color:{_slot_badge_color(s["status"])};font-weight:600;">'
+                f'{_html.escape(s["label"])} '
+                f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}'
+                f'</div>'
+            )
+            if s.get("slot_role") == "lead" and s["count"] == 0:
+                slot_lines += (
+                    f'<div style="font-size:9px;color:#dc2626;white-space:nowrap;">'
+                    f'{t("staffing.lead_warning")}</div>'
+                )
         tds.append(
             f'<td style="padding:4px;vertical-align:top;cursor:pointer;{border}{bg}{today_ol}'
             f"min-width:72px;\" onclick=\"location.href='/staffing/day?date={iso}&plan_id={plan_id}'\">"
@@ -17127,12 +17164,15 @@ def admin_staffing():
             min_staff  = int(request.form.get("min_staff", 1))
             time_from  = request.form.get("time_from", "").strip() or None
             time_to    = request.form.get("time_to", "").strip() or None
+            slot_role  = request.form.get("slot_role", "staff")
+            if slot_role not in ("staff", "lead"):
+                slot_role = "staff"
             if plan_id and label:
                 db.execute(
                     "INSERT INTO staffing_slots "
-                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff, time_from, time_to) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
-                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff, time_from, time_to)
+                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff, time_from, time_to, slot_role) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff, time_from, time_to, slot_role)
                 )
                 db.commit()
                 add_flash(t("success.slot_created"), "success")

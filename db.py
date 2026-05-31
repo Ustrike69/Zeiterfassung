@@ -551,6 +551,10 @@ def init_db():
         db.execute("ALTER TABLE staffing_slots ADD COLUMN time_from TEXT DEFAULT NULL")
     if not _col_exists(db, "staffing_slots", "time_to"):
         db.execute("ALTER TABLE staffing_slots ADD COLUMN time_to TEXT DEFAULT NULL")
+    if not _col_exists(db, "staffing_slots", "slot_role"):
+        db.execute(
+            "ALTER TABLE staffing_slots ADD COLUMN slot_role TEXT DEFAULT 'staff'"
+        )
     db.execute("""CREATE TABLE IF NOT EXISTS staffing_assignments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slot_id INTEGER NOT NULL REFERENCES staffing_slots(id) ON DELETE CASCADE,

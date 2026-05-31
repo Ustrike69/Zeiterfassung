@@ -1061,6 +1061,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.no_pending_overrides":    "Keine offenen Sondereinsatz-Anfragen",
         "mail.override_request_subject":    "Zeiterfassung - Sondereinsatz Anfrage",
         "mail.override_request_body":       "Du wurdest für einen Sondereinsatz angefragt.\n\nTage: {dates}\nNotiz: {note}\n\nAntworten: {url}",
+        "staffing.slot_role":               "Rolle",
+        "staffing.role_staff":              "Mitarbeiter",
+        "staffing.role_lead":               "Leiter",
+        "staffing.no_lead":                 "Kein Leiter anwesend",
+        "staffing.lead_warning":            "⚠️ Kein Leiter",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
@@ -2235,6 +2240,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.no_pending_overrides":    "No pending special assignment requests",
         "mail.override_request_subject":    "Zeiterfassung - Special Assignment Request",
         "mail.override_request_body":       "You have been requested for a special assignment.\n\nDates: {dates}\nNote: {note}\n\nRespond here: {url}",
+        "staffing.slot_role":               "Role",
+        "staffing.role_staff":              "Staff",
+        "staffing.role_lead":               "Lead",
+        "staffing.no_lead":                 "No lead present",
+        "staffing.lead_warning":            "⚠️ No lead",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",
