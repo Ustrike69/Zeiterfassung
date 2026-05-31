@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev10"
+APP_VERSION = "v3.0.0.dev11"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -3728,6 +3728,32 @@ def balance_view():
             if display_start <= _iso <= display_end:
                 _day_status.setdefault(_iso, []).append((_ab["type_name"], _ab["type_color"] or "#6c757d"))
             _cur += datetime.timedelta(days=1)
+    # Sonderschichten (staffing_overrides) für diesen User
+    if _feature_enabled("staffing"):
+        _db2_so = connect()
+        try:
+            _overrides = _db2_so.execute("""
+                SELECT so.iso_date, ss.label as slot_label,
+                       ss.time_from, ss.time_to,
+                       sp.name as plan_name
+                FROM staffing_overrides so
+                JOIN staffing_slots ss ON ss.id = so.slot_id
+                JOIN staffing_plans sp ON sp.id = so.plan_id
+                WHERE so.user_id = ?
+                AND so.status IN ('assigned', 'confirmed')
+                AND so.iso_date BETWEEN ? AND ?
+            """, (u["id"], display_start, display_end)).fetchall()
+            for _ov in _overrides:
+                _iso = str(_ov["iso_date"])[:10]
+                _time_str = ""
+                if _ov["time_from"] and _ov["time_to"]:
+                    _time_str = f' {_ov["time_from"]}-{_ov["time_to"]}'
+                _label = f'⭐ {_ov["slot_label"]}{_time_str}'
+                _day_status.setdefault(_iso, []).append(
+                    (_label, "#f59e0b")
+                )
+        finally:
+            _db2_so.close()
     _holiday_days: set = set()
     _bal_region = _get_user_holiday_region(u["id"])
     for _hol in _db2.execute(
@@ -6025,6 +6051,27 @@ def calendar_year_list():
     missing_all    = _get_missing_entry_days(uid, year)
 
     day_badges: dict = {}
+    if _feature_enabled("staffing"):
+        _db_so_y = connect()
+        try:
+            _so_rows_y = _db_so_y.execute("""
+                SELECT so.iso_date, ss.label as slot_label,
+                       ss.time_from, ss.time_to
+                FROM staffing_overrides so
+                JOIN staffing_slots ss ON ss.id = so.slot_id
+                WHERE so.user_id = ?
+                AND so.status IN ('assigned', 'confirmed')
+                AND so.iso_date BETWEEN ? AND ?
+            """, (uid, y_start, y_end)).fetchall()
+            for _so in _so_rows_y:
+                _iso = str(_so["iso_date"])[:10]
+                _time_str = ""
+                if _so["time_from"] and _so["time_to"]:
+                    _time_str = f' {_so["time_from"]}-{_so["time_to"]}'
+                _label = f'⭐ {_so["slot_label"]}{_time_str}'
+                day_badges.setdefault(_iso, []).append((_label, "#f59e0b"))
+        finally:
+            _db_so_y.close()
     for a in abs_rows:
         d0  = datetime.date.fromisoformat(a["date_from"])
         d1  = datetime.date.fromisoformat(a["date_to"])
@@ -6170,6 +6217,27 @@ def calendar_view():
     exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
 
     day_badges = {}
+    if _feature_enabled("staffing"):
+        _db_so = connect()
+        try:
+            _so_rows = _db_so.execute("""
+                SELECT so.iso_date, ss.label as slot_label,
+                       ss.time_from, ss.time_to
+                FROM staffing_overrides so
+                JOIN staffing_slots ss ON ss.id = so.slot_id
+                WHERE so.user_id = ?
+                AND so.status IN ('assigned', 'confirmed')
+                AND so.iso_date BETWEEN ? AND ?
+            """, (u["id"], first_iso, last_iso)).fetchall()
+            for _so in _so_rows:
+                _iso = str(_so["iso_date"])[:10]
+                _time_str = ""
+                if _so["time_from"] and _so["time_to"]:
+                    _time_str = f' {_so["time_from"]}-{_so["time_to"]}'
+                _label = f'⭐ {_so["slot_label"]}{_time_str}'
+                day_badges.setdefault(_iso, []).append((_label, "#f59e0b", True, True))
+        finally:
+            _db_so.close()
     for a in abs_rows:
         d0 = datetime.date.fromisoformat(a["date_from"])
         d1 = datetime.date.fromisoformat(a["date_to"])
@@ -6530,6 +6598,8 @@ function toggleKontiert(iso,ev){{
 
       <div class="cal-year-wrap"></div>
     </div>
+
+    {"" if not _feature_enabled("staffing") else f'<div style="font-size:11px;color:var(--mu);margin-top:6px;padding:4px 2px;"><span style="color:#f59e0b">⭐</span> {t("staffing.override_title")}</div>'}
 
     {cal_js}
     """
