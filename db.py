@@ -194,6 +194,10 @@ def init_db():
     );
     """)
 
+    # Migration: updated_at Spalte zu absence_types hinzufügen falls fehlt
+    if not _col_exists(db, "absence_types", "updated_at"):
+        db.execute("ALTER TABLE absence_types ADD COLUMN updated_at TEXT")
+
     # Rename legacy 'Sonstiges' → 'Sonstige'
     db.execute("UPDATE absence_types SET name='Sonstige', updated_at=datetime('now') WHERE name='Sonstiges'")
 
