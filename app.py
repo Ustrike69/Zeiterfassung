@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev7"
+APP_VERSION = "v3.0.0.dev8"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16286,6 +16286,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 continue
             status = day_data["status"]
             color  = _SC[status]
+            _badge_bg = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
             present_html = " ".join(
                 f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
                 f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
@@ -16300,7 +16301,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             )
             cells += (
                 f'<td style="padding:6px 10px;border-left:3px solid {color};">'
-                f'<div style="font-size:12px;font-weight:700;color:{color};margin-bottom:4px;">'
+                f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
+                f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
                 f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
                 f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{present_html}{absent_html}</div>'
                 f'</td>'
@@ -16351,13 +16353,26 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
         is_we     = day.weekday() >= 5
         is_today  = day == today
         warn      = day_data["has_warning"]
-        border    = "border:2px solid #dc2626;" if warn else "border:1px solid var(--br);"
+        if warn:
+            any_empty = any(s["status"] == "empty" for s in day_data["slots"])
+            border = "border:2px solid #dc2626;background:rgba(220,38,38,0.05);" if any_empty \
+                     else "border:2px solid #d97706;background:rgba(217,119,6,0.05);"
+        else:
+            border = "border:1px solid var(--br);"
         bg        = "background:var(--ca);" if is_we else ""
         today_ol  = "outline:2px solid var(--ac);outline-offset:-2px;" if is_today else ""
+
+        def _slot_badge_color(status):
+            if status == "ok":   return "#16a34a"
+            if status == "warn": return "#d97706"
+            return "#dc2626"
+
         slot_lines = "".join(
-            f'<div style="font-size:10px;line-height:1.5;white-space:nowrap;">'
-            + (f'{s["time_from"]}–{s["time_to"]} ' if s.get("time_from") and s.get("time_to") else f'{_html.escape(s["label"][:6])} ')
-            + f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}</div>'
+            f'<div style="font-size:10px;line-height:1.6;white-space:nowrap;'
+            f'color:{_slot_badge_color(s["status"])};font-weight:600;">'
+            f'{_html.escape(s["label"])} '
+            f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}'
+            f'</div>'
             for s in day_data["slots"]
         )
         tds.append(
