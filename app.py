@@ -16505,8 +16505,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     rows = ""
     for entry in data["slots"]:
         slot = entry["slot"]
-        _slot_time = (
-            f'<br><small style="font-size:10px;color:var(--mu);">{slot["time_from"]}–{slot["time_to"]}</small>'
+        _slot_time_div = (
+            f"<div style='font-size:10px;color:var(--mu);margin-top:2px;'>{slot['time_from']}–{slot['time_to']}</div>"
             if slot["time_from"] and slot["time_to"] else ""
         )
         _min_lead_hint = (
@@ -16514,10 +16514,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             if int(slot["min_lead"] or 0) > 0 else ""
         )
         cells = (
-            f"<td style='padding:6px 10px;font-size:13px;white-space:nowrap;"
-            f"border-right:1px solid var(--br);'>"
-            f"<strong>{_html.escape(slot['label'])}</strong>{_min_lead_hint}{_slot_time}<br>"
-            f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
+            f"<td style='padding:6px 10px;font-size:13px;"
+            f"border-right:1px solid var(--br);min-width:120px;'>"
+            f"<div><strong>{_html.escape(slot['label'])}</strong>{_min_lead_hint}</div>"
+            f"{_slot_time_div}"
+            f"<div style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</div></td>"
         )
         for di, day_data in enumerate(entry["days"]):
             day_iso = days[di].isoformat()
