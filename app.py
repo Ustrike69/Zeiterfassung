@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev9"
+APP_VERSION = "v3.0.0.dev10"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16252,7 +16252,18 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             for ab in absences
         )
 
-    result = {"year": year, "month": month, "days": []}
+    # Accepted dates
+    try:
+        _acc_rows = db.execute(
+            "SELECT iso_date FROM staffing_day_accepted WHERE plan_id=? "
+            "AND iso_date BETWEEN ? AND ?",
+            (plan_id, days[0].isoformat(), days[-1].isoformat())
+        ).fetchall()
+        accepted_dates = {r["iso_date"] for r in _acc_rows}
+    except Exception:
+        accepted_dates = set()
+
+    result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates}
     for day in days:
         iso = day.isoformat()
         day_slots = []
@@ -16308,7 +16319,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     for day in days:
         today_bg = "background:color-mix(in srgb,var(--ac) 8%,var(--bg));" if day == today else ""
         th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
-               f"border-bottom:2px solid var(--br);{today_bg}'>"
+               f"border-bottom:2px solid var(--br);cursor:pointer;{today_bg}' "
+               f"onclick=\"window.location='/staffing/day/{day.isoformat()}?plan_id={plan_id}'\">"
                f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
 
     rows = ""
@@ -16388,27 +16400,33 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
 
     first_wd = data["days"][0]["date"].weekday()
     tds = ["<td></td>"] * first_wd
+    accepted_dates = data.get("accepted_dates", set())
 
     _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
 
+    def _slot_badge_color(status):
+        if status == "ok":   return "#16a34a"
+        if status == "warn": return "#d97706"
+        return "#dc2626"
+
     for day_data in data["days"]:
         day  = day_data["date"]
+        iso  = day_data["iso"]
         is_we     = day.weekday() >= 5
         is_today  = day == today
         warn      = day_data["has_warning"]
-        if warn:
+        is_accepted = iso in accepted_dates
+        if warn and not is_accepted:
             any_empty = any(s["status"] == "empty" for s in day_data["slots"])
             border = "border:2px solid #dc2626;background:rgba(220,38,38,0.05);" if any_empty \
                      else "border:2px solid #d97706;background:rgba(217,119,6,0.05);"
+        elif is_accepted and warn:
+            border = "border:1px solid #16a34a;background:rgba(22,163,74,0.04);"
         else:
             border = "border:1px solid var(--br);"
         bg        = "background:var(--ca);" if is_we else ""
         today_ol  = "outline:2px solid var(--ac);outline-offset:-2px;" if is_today else ""
-
-        def _slot_badge_color(status):
-            if status == "ok":   return "#16a34a"
-            if status == "warn": return "#d97706"
-            return "#dc2626"
+        accepted_badge = '<span style="float:right;font-size:9px;color:#16a34a;font-weight:700;">✓</span>' if is_accepted else ""
 
         slot_lines = "".join(
             f'<div style="font-size:10px;line-height:1.6;white-space:nowrap;'
@@ -16419,9 +16437,10 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
             for s in day_data["slots"]
         )
         tds.append(
-            f'<td style="padding:4px;vertical-align:top;{border}{bg}{today_ol}'
-            f'min-width:72px;">'
-            f'<div style="font-size:11px;font-weight:700;margin-bottom:2px;">{day.day}</div>'
+            f'<td style="padding:4px;vertical-align:top;cursor:pointer;{border}{bg}{today_ol}'
+            f'min-width:72px;" onclick="window.location=\'/staffing/day/{iso}?plan_id={plan_id}\'">'
+            f'<div style="font-size:11px;font-weight:700;margin-bottom:2px;">'
+            f'{day.day}{accepted_badge}</div>'
             f'{slot_lines}</td>'
         )
 
@@ -16487,6 +16506,438 @@ def _render_staffing_view(plans, plan_id, view, data, u) -> str:
       </div>
       {body_html}
     </div>"""
+
+
+def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
+                          team_users, absent_ids, absences,
+                          overrides, accepted, u) -> str:
+    _WD_NAMES = [t("wd.mon"), t("wd.tue"), t("wd.wed"), t("wd.thu"),
+                 t("wd.fri"), t("wd.sat"), t("wd.sun")]
+    prev_d = (d - datetime.timedelta(days=1)).isoformat()
+    next_d = (d + datetime.timedelta(days=1)).isoformat()
+    wd_name = _WD_NAMES[d.weekday()]
+    date_str = d.strftime("%d.%m.%Y")
+
+    accepted_html = ""
+    if accepted:
+        note_txt = _html.escape(accepted["note"] or "")
+        accepted_html = (
+            f'<span style="background:#16a34a;color:#fff;border-radius:4px;'
+            f'padding:2px 10px;font-size:12px;font-weight:600;">'
+            f'{t("staffing.accepted_badge")}'
+            f'{(" – " + note_txt) if note_txt else ""}</span>'
+        )
+    else:
+        has_warn = any(s["status"] != "ok" for s in slot_data)
+        if has_warn:
+            accepted_html = f"""
+            <form method="post" action="/staffing/day/{iso_date}/accept" style="display:inline;">
+              <input type="hidden" name="plan_id" value="{plan_id}">
+              <input type="text" name="note" placeholder="{t('staffing.accept_note')}"
+                     style="font-size:12px;padding:3px 8px;margin-right:4px;width:180px;">
+              <button class="btn btn-sm" type="submit"
+                      style="background:#d97706;color:#fff;">{t('staffing.accept_day')}</button>
+            </form>"""
+
+    absence_map = {}
+    for ab in absences:
+        absence_map[ab["user_id"]] = _html.escape(ab["typ"])
+
+    slots_html = ""
+    for sd in slot_data:
+        slot   = sd["slot"]
+        status = sd["status"]
+        count  = sd["count"]
+        min_s  = sd["min_staff"]
+        sid    = slot["id"]
+        _SI    = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
+        _BC    = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
+        badge_bg = _BC[status]
+        time_str = (f" {slot['time_from']}–{slot['time_to']}"
+                    if slot["time_from"] and slot["time_to"] else "")
+
+        present_rows = "".join(
+            f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
+            f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
+            f'padding:1px 6px;font-size:11px;">✓</span>'
+            f'{_html.escape(a.get("display_name") or a.get("username") or "?")}'
+            f'{"<span style=\"font-size:10px;color:#a855f7;\"> ⭐ Sonder</span>" if a.get("iso_date") else ""}'
+            f'</div>'
+            for a in sd["present"]
+        ) or f'<div style="color:var(--mu);font-size:12px;">–</div>'
+
+        absent_rows = "".join(
+            f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
+            f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
+            f'padding:1px 6px;font-size:11px;">✗</span>'
+            f'{_html.escape(a.get("display_name") or a.get("username") or "?")}'
+            f'<span style="font-size:10px;color:var(--mu);">'
+            f'{absence_map.get(a["user_id"], "")}</span>'
+            f'</div>'
+            for a in sd["absent"]
+        ) if sd["absent"] else ""
+
+        override_form = ""
+        if status != "ok":
+            avail_users = [
+                u2 for u2 in team_users
+                if u2["id"] not in absent_ids
+                and not any(a.get("user_id") == u2["id"] for a in sd["present"])
+            ]
+            user_opts = "".join(
+                '<option value="' + str(u2["id"]) + '">'
+                + _html.escape(u2["display_name"] or u2["username"]) + '</option>'
+                for u2 in avail_users
+            )
+            day_checks = "".join(
+                f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;margin-right:6px;">'
+                f'<input type="checkbox" name="dates" value="{(d + datetime.timedelta(days=i)).isoformat()}"'
+                f'{" checked" if i == 0 else ""}>'
+                f'{_WD_NAMES[(d.weekday() + i) % 7]} '
+                f'{(d + datetime.timedelta(days=i)).strftime("%d.%m")}'
+                f'</label>'
+                for i in range(7)
+            )
+            override_form = f"""
+            <div class="staff-section" style="margin-top:10px;padding-top:10px;
+                         border-top:1px solid var(--br);">
+              <div style="font-size:11px;color:var(--mu);font-weight:600;margin-bottom:6px;">
+                ➕ {t('staffing.override_title')}
+              </div>
+              <form method="post" action="/staffing/day/{iso_date}/override">
+                <input type="hidden" name="plan_id" value="{plan_id}">
+                <input type="hidden" name="slot_id" value="{sid}">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+                  <div>
+                    <label style="font-size:11px;color:var(--mu);">Mitarbeiter</label>
+                    <select name="user_id" style="display:block;margin-top:3px;font-size:13px;">
+                      {user_opts if user_opts else '<option value="">–</option>'}
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size:11px;color:var(--mu);">{t('staffing.override_note')}</label>
+                    <input type="text" name="note" maxlength="120"
+                           style="display:block;margin-top:3px;font-size:13px;min-width:160px;">
+                  </div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+                  <span style="font-size:11px;color:var(--mu);margin-right:4px;">{t('staffing.override_dates')}:</span>
+                  {day_checks}
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                  <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
+                    <input type="checkbox" name="require_confirm" value="1">
+                    {t('staffing.override_require_confirm')}
+                  </label>
+                  <button class="btn primary btn-sm" type="submit"
+                          id="override-btn-{sid}">{t('staffing.override_assign')}</button>
+                </div>
+              </form>
+              <script>
+              document.querySelector('[name=require_confirm]') && document.querySelector('[name=require_confirm]').addEventListener('change', function(){{
+                var btn = document.getElementById('override-btn-{sid}');
+                if(btn) btn.textContent = this.checked ? '{t("staffing.override_request")}' : '{t("staffing.override_assign")}';
+              }});
+              </script>
+            </div>""" if avail_users else ""
+
+        slots_html += f"""
+        <div class="slot-day-card status-{status}">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+            <strong style="font-size:14px;">{_html.escape(slot['label'])}</strong>
+            <span style="font-size:12px;color:var(--mu);">{time_str}</span>
+            <span style="background:{badge_bg};color:#fff;border-radius:4px;
+                         padding:1px 8px;font-size:12px;font-weight:700;margin-left:auto;">
+              {count}/{min_s} {_SI[status]}
+            </span>
+          </div>
+          <div class="staff-section">
+            <div class="staff-section-hdr">✅ {t('staffing.present')} ({count})</div>
+            {present_rows}
+          </div>
+          {('<div class="staff-section"><div class="staff-section-hdr">🏖 ' + t("staffing.absent") + '</div>' + absent_rows + '</div>') if absent_rows else ""}
+          {override_form}
+        </div>"""
+
+    return f"""
+    <style>
+    .slot-day-card{{border-radius:8px;padding:1rem;margin-bottom:1rem;border:2px solid;}}
+    .slot-day-card.status-ok   {{border-color:#16a34a;background:rgba(22,163,74,.05);}}
+    .slot-day-card.status-warn {{border-color:#d97706;background:rgba(217,119,6,.05);}}
+    .slot-day-card.status-empty{{border-color:#dc2626;background:rgba(220,38,38,.05);}}
+    .staff-section{{margin-top:.5rem;font-size:13px;}}
+    .staff-section-hdr{{font-size:11px;color:var(--mu);margin-bottom:4px;font-weight:600;text-transform:uppercase;}}
+    </style>
+    <div style="max-width:700px;margin:1rem auto;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;flex-wrap:wrap;">
+        <a href="/staffing/day/{prev_d}?plan_id={plan_id}" class="btn btn-sm">◀</a>
+        <div>
+          <strong style="font-size:16px;">{wd_name}, {date_str}</strong>
+          <span style="font-size:13px;color:var(--mu);margin-left:8px;">{_html.escape(plan['name'])}</span>
+        </div>
+        <a href="/staffing/day/{next_d}?plan_id={plan_id}" class="btn btn-sm">▶</a>
+        <a href="/staffing?plan_id={plan_id}&view=month" class="btn btn-sm" style="margin-left:4px;">↩</a>
+        <div style="margin-left:auto;">{accepted_html}</div>
+      </div>
+      {slots_html if slots_html else f'<p style="color:var(--mu);">{t("staffing.no_slots")}</p>'}
+    </div>"""
+
+
+def _render_override_respond(pending, u) -> str:
+    if not pending:
+        return f'<div style="max-width:600px;margin:1rem auto;"><p style="color:var(--mu);">{t("staffing.no_pending_overrides")}</p></div>'
+
+    rows = ""
+    for o in pending:
+        rows += f"""
+        <div style="border:1px solid var(--br);border-radius:8px;padding:14px;margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+            <div>
+              <strong>{_html.escape(o["plan_name"])}</strong>
+              <span style="color:var(--mu);font-size:13px;margin-left:8px;">
+                {_html.escape(o["team_name"])}
+              </span><br>
+              <span style="font-size:13px;">{o["iso_date"]} · {_html.escape(o["slot_label"])}</span>
+              {('<br><span style="font-size:12px;color:var(--mu);">' + _html.escape(o["note"]) + '</span>') if o["note"] else ""}
+            </div>
+            <div style="display:flex;gap:6px;">
+              <form method="post" action="/staffing/override/respond">
+                <input type="hidden" name="override_id" value="{o['id']}">
+                <input type="hidden" name="action" value="confirm">
+                <button class="btn primary btn-sm" type="submit">✓ {t('staffing.override_confirmed')}</button>
+              </form>
+              <form method="post" action="/staffing/override/respond">
+                <input type="hidden" name="override_id" value="{o['id']}">
+                <input type="hidden" name="action" value="decline">
+                <button class="btn btn-sm" type="submit" style="color:#dc2626;">✗ {t('staffing.override_declined')}</button>
+              </form>
+            </div>
+          </div>
+        </div>"""
+
+    return f"""
+    <div style="max-width:600px;margin:1rem auto;">
+      <h2 style="margin-bottom:1rem;">{t('staffing.my_overrides')}</h2>
+      {rows}
+    </div>"""
+
+
+@app.get("/staffing/day/<iso_date>")
+@login_required
+def staffing_day_view(iso_date: str):
+    bootstrap()
+    if not _feature_enabled("staffing"):
+        abort(404)
+    u = current_user()
+    if not (u.get("admin_role") in ("sysadmin", "timemanager") or u.get("is_approver")):
+        abort(403)
+    try:
+        d = datetime.date.fromisoformat(iso_date)
+    except ValueError:
+        abort(400)
+
+    plan_id = request.args.get("plan_id", type=int)
+    if not plan_id:
+        return redirect("/staffing")
+
+    db = connect()
+    try:
+        plan = db.execute(
+            "SELECT sp.*, t.name as team_name, t.id as team_id "
+            "FROM staffing_plans sp JOIN teams t ON t.id=sp.team_id WHERE sp.id=?",
+            (plan_id,)
+        ).fetchone()
+        if not plan:
+            abort(404)
+
+        slots = db.execute(
+            "SELECT * FROM staffing_slots WHERE plan_id=? "
+            "ORDER BY COALESCE(time_from,'99:99'), sort_order",
+            (plan_id,)
+        ).fetchall()
+
+        team_users = db.execute("""
+            SELECT u.id, u.username, u.display_name
+            FROM users u JOIN user_teams ut ON ut.user_id=u.id
+            WHERE ut.team_id=? AND u.is_active=1 ORDER BY u.display_name
+        """, (plan["team_id"],)).fetchall()
+
+        assignments = db.execute("""
+            SELECT sa.*, u.username, u.display_name
+            FROM staffing_assignments sa JOIN users u ON u.id=sa.user_id
+            WHERE sa.slot_id IN (SELECT id FROM staffing_slots WHERE plan_id=?)
+        """, (plan_id,)).fetchall()
+        assign_map = {}
+        for a in assignments:
+            assign_map.setdefault(a["slot_id"], []).append(a)
+
+        user_ids = [u2["id"] for u2 in team_users]
+        absences = []
+        if user_ids:
+            ph = ",".join("?" * len(user_ids))
+            absences = db.execute(
+                f"SELECT a.user_id, a.date_from, a.date_to, at.name as typ "
+                f"FROM absences a JOIN absence_types at ON at.id=a.type_id "
+                f"WHERE a.user_id IN ({ph}) AND a.date_from<=? AND a.date_to>=?",
+                (*user_ids, iso_date, iso_date)
+            ).fetchall()
+        absent_ids = {a["user_id"] for a in absences}
+
+        overrides = db.execute("""
+            SELECT so.*, u.username, u.display_name, ss.label as slot_label
+            FROM staffing_overrides so
+            JOIN users u ON u.id=so.user_id
+            JOIN staffing_slots ss ON ss.id=so.slot_id
+            WHERE so.plan_id=? AND so.iso_date=?
+        """, (plan_id, iso_date)).fetchall()
+
+        accepted = db.execute(
+            "SELECT * FROM staffing_day_accepted WHERE plan_id=? AND iso_date=?",
+            (plan_id, iso_date)
+        ).fetchone()
+    finally:
+        db.close()
+
+    slot_data = []
+    for slot in slots:
+        if not _slot_applies_on_date(slot, iso_date):
+            continue
+        assigned = assign_map.get(slot["id"], [])
+        override_users = [o for o in overrides
+                          if o["slot_id"] == slot["id"]
+                          and o["status"] in ("assigned", "confirmed")]
+        _tf, _tt = slot["time_from"], slot["time_to"]
+        present = [a for a in assigned
+                   if a["user_id"] not in absent_ids
+                   and (not (_tf and _tt) or _user_works_in_slot(a["user_id"], iso_date, _tf, _tt))
+                  ] + list(override_users)
+        absent_in_slot = [a for a in assigned if a["user_id"] in absent_ids]
+        count = len(present)
+        min_s = slot["min_staff"]
+        status = "ok" if count >= min_s else ("warn" if count > 0 else "empty")
+        slot_data.append({
+            "slot": slot, "present": present, "absent": absent_in_slot,
+            "overrides": override_users, "count": count,
+            "min_staff": min_s, "status": status,
+        })
+
+    body = _render_staffing_day(
+        iso_date, d, plan, plan_id, slot_data,
+        team_users, absent_ids, absences, overrides, accepted, u
+    )
+    return render_template_string(layout(
+        f"{d.strftime('%d.%m.%Y')} – {_html.escape(plan['name'])}",
+        body, u, APP_VERSION
+    ))
+
+
+@app.post("/staffing/day/<iso_date>/accept")
+@timemanager_required
+def staffing_day_accept(iso_date: str):
+    bootstrap()
+    if not _feature_enabled("staffing"):
+        abort(404)
+    plan_id = int(request.form.get("plan_id", 0))
+    note    = request.form.get("note", "").strip()
+    u = current_user()
+    db = connect()
+    db.execute(
+        "INSERT OR REPLACE INTO staffing_day_accepted (plan_id, iso_date, accepted_by, note) "
+        "VALUES (?,?,?,?)",
+        (plan_id, iso_date, u["id"], note)
+    )
+    db.commit()
+    db.close()
+    add_flash(t("staffing.day_accepted"), "success")
+    return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+
+
+@app.post("/staffing/day/<iso_date>/override")
+@timemanager_required
+def staffing_override_create(iso_date: str):
+    bootstrap()
+    if not _feature_enabled("staffing"):
+        abort(404)
+    plan_id = int(request.form.get("plan_id", 0))
+    slot_id = int(request.form.get("slot_id", 0))
+    user_id = int(request.form.get("user_id", 0))
+    dates   = request.form.getlist("dates")
+    require = 1 if request.form.get("require_confirm") else 0
+    note    = request.form.get("note", "").strip()
+    u = current_user()
+
+    if not (plan_id and slot_id and user_id and dates):
+        add_flash(t("flash.error.missing_fields"), "error")
+        return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+
+    db = connect()
+    for dt in dates:
+        db.execute(
+            "INSERT OR IGNORE INTO staffing_overrides "
+            "(plan_id, slot_id, user_id, iso_date, require_confirm, status, note, created_by) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (plan_id, slot_id, user_id, dt, require,
+             "pending" if require else "assigned", note, u["id"])
+        )
+
+    if require:
+        target = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if target and target.get("email"):
+            try:
+                dates_str = ", ".join(dates)
+                _send_mail_simple(
+                    target["email"],
+                    t("mail.override_request_subject", target.get("language", "de")),
+                    t("mail.override_request_body", target.get("language", "de")).format(
+                        dates=dates_str, note=note or "–",
+                        url=f"{_get_base_url()}/staffing/override/respond"
+                    )
+                )
+            except Exception as e:
+                app.logger.error(f"Override mail error: {e}")
+
+    db.commit()
+    db.close()
+    add_flash(t("staffing.override_sent") if require else t("staffing.override_assigned"), "success")
+    return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+
+
+@app.route("/staffing/override/respond", methods=["GET", "POST"])
+@login_required
+def staffing_override_respond():
+    bootstrap()
+    u = current_user()
+    db = connect()
+
+    if request.method == "POST":
+        oid    = int(request.form.get("override_id", 0))
+        action = request.form.get("action")
+        status = "confirmed" if action == "confirm" else "declined"
+        db.execute(
+            "UPDATE staffing_overrides SET status=?, confirmed_at=? WHERE id=? AND user_id=?",
+            (status, datetime.datetime.now().isoformat(), oid, u["id"])
+        )
+        db.commit()
+        db.close()
+        add_flash(
+            t("staffing.override_confirmed") if status == "confirmed"
+            else t("staffing.override_declined"), "success"
+        )
+        return redirect("/staffing/override/respond")
+
+    pending = db.execute("""
+        SELECT so.*, ss.label as slot_label, sp.name as plan_name, t.name as team_name
+        FROM staffing_overrides so
+        JOIN staffing_slots ss ON ss.id=so.slot_id
+        JOIN staffing_plans sp ON sp.id=so.plan_id
+        JOIN teams t ON t.id=sp.team_id
+        WHERE so.user_id=? AND so.status='pending'
+        ORDER BY so.iso_date
+    """, (u["id"],)).fetchall()
+    db.close()
+
+    body = _render_override_respond(pending, u)
+    return render_template_string(layout(t("staffing.my_overrides"), body, u, APP_VERSION))
 
 
 @app.get("/staffing")

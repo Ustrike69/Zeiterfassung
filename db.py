@@ -562,6 +562,30 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     )""")
 
+    # v3.0.0.dev10 – Tagesdetail + Sondereinsätze
+    db.execute("""CREATE TABLE IF NOT EXISTS staffing_day_accepted (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL REFERENCES staffing_plans(id) ON DELETE CASCADE,
+        iso_date TEXT NOT NULL,
+        accepted_by INTEGER REFERENCES users(id),
+        note TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(plan_id, iso_date)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS staffing_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL REFERENCES staffing_plans(id) ON DELETE CASCADE,
+        slot_id INTEGER NOT NULL REFERENCES staffing_slots(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        iso_date TEXT NOT NULL,
+        require_confirm INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'assigned',
+        note TEXT DEFAULT '',
+        created_by INTEGER REFERENCES users(id),
+        confirmed_at TEXT DEFAULT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+
     # v3.0.0 – Feature-Flags
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")

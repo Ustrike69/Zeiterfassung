@@ -1041,6 +1041,27 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.adjustment_created":   "Korrektur gespeichert",
         "success.adjustment_deleted":   "Korrektur gelöscht",
 
+        # ── Staffing Tagesdetail + Sondereinsatz ─────────────────
+        "staffing.day_detail":              "Tagesdetail",
+        "staffing.day_accepted":            "Tag als akzeptiert markiert",
+        "staffing.accept_day":              "Unterbesetzung akzeptieren",
+        "staffing.accept_note":             "Notiz (optional)",
+        "staffing.accepted_badge":          "✓ Akzeptiert",
+        "staffing.override_title":          "Sondereinsatz",
+        "staffing.override_assign":         "Direkt zuweisen",
+        "staffing.override_request":        "Anfrage senden",
+        "staffing.override_require_confirm":"Bestätigung erforderlich",
+        "staffing.override_note":           "Notiz für Mitarbeiter",
+        "staffing.override_dates":          "An folgenden Tagen",
+        "staffing.override_assigned":       "Sondereinsatz zugewiesen",
+        "staffing.override_sent":           "Anfrage gesendet",
+        "staffing.override_confirmed":      "Sondereinsatz bestätigt",
+        "staffing.override_declined":       "Sondereinsatz abgelehnt",
+        "staffing.my_overrides":            "Meine Sondereinsätze",
+        "staffing.no_pending_overrides":    "Keine offenen Sondereinsatz-Anfragen",
+        "mail.override_request_subject":    "Zeiterfassung - Sondereinsatz Anfrage",
+        "mail.override_request_body":       "Du wurdest für einen Sondereinsatz angefragt.\n\nTage: {dates}\nNotiz: {note}\n\nAntworten: {url}",
+
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
 
@@ -2193,6 +2214,27 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.assignments_saved":    "Assignments saved",
         "success.adjustment_created":   "Adjustment saved",
         "success.adjustment_deleted":   "Adjustment deleted",
+
+        # ── Staffing Day Detail + Special Assignment ─────────────
+        "staffing.day_detail":              "Day detail",
+        "staffing.day_accepted":            "Day marked as accepted",
+        "staffing.accept_day":              "Accept understaffing",
+        "staffing.accept_note":             "Note (optional)",
+        "staffing.accepted_badge":          "✓ Accepted",
+        "staffing.override_title":          "Special assignment",
+        "staffing.override_assign":         "Assign directly",
+        "staffing.override_request":        "Send request",
+        "staffing.override_require_confirm":"Require confirmation",
+        "staffing.override_note":           "Note for employee",
+        "staffing.override_dates":          "On following days",
+        "staffing.override_assigned":       "Special assignment created",
+        "staffing.override_sent":           "Request sent",
+        "staffing.override_confirmed":      "Special assignment confirmed",
+        "staffing.override_declined":       "Special assignment declined",
+        "staffing.my_overrides":            "My special assignments",
+        "staffing.no_pending_overrides":    "No pending special assignment requests",
+        "mail.override_request_subject":    "Zeiterfassung - Special Assignment Request",
+        "mail.override_request_body":       "You have been requested for a special assignment.\n\nDates: {dates}\nNote: {note}\n\nRespond here: {url}",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",

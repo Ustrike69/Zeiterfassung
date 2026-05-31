@@ -28,6 +28,18 @@ def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impers
                     or user.get("is_approver")
                 ):
                     items.append(("/staffing", _t("nav.staffing")))
+                if _fe("staffing"):
+                    from db import connect as _dbc
+                    _db_n = _dbc()
+                    _n_ov = _db_n.execute(
+                        "SELECT COUNT(*) FROM staffing_overrides "
+                        "WHERE user_id=? AND status='pending'",
+                        (user["id"],)
+                    ).fetchone()[0]
+                    _db_n.close()
+                    if _n_ov:
+                        items.append(("/staffing/override/respond",
+                                      f"{_t('staffing.my_overrides')} ({_n_ov})"))
             except Exception:
                 pass
             if user.get("is_admin"):
