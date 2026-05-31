@@ -262,7 +262,13 @@ def layout(title, body, user, version, show_back=True):
                        app_label_color=app_label_color if _HEX_COLOR_RE.match(app_label_color) else "#f59e0b")
 
 
+_bootstrap_done = False
+
 def bootstrap():
+    global _bootstrap_done
+    if _bootstrap_done:
+        return
+    _bootstrap_done = True
     init_db()
     seed_defaults()
     # keep older DBs compatible
