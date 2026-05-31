@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev4"
+APP_VERSION = "v3.0.0.dev6"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14612,6 +14612,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     <span class="slot-type-badge" style="font-size:11px;background:var(--ca);
                           border-radius:4px;padding:2px 6px;">{stype_label}</span>
                     <span class="slot-days" style="font-size:12px;color:var(--mu);">{wd_str}</span>
+                    {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
                     <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
                     <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
                             onclick="deleteSlot({sid})">×</button>
@@ -14683,6 +14684,14 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                       <label style="font-size:12px;">{t('staffing.min_staff')}</label>
                       <input type="number" name="min_staff" value="1" min="1" max="99"
                              style="display:block;margin-top:4px;width:70px;">
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">Von – Bis</label>
+                      <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+                        <input type="time" name="time_from" step="900" style="width:96px;">
+                        <span style="color:var(--mu);">–</span>
+                        <input type="time" name="time_to" step="900" style="width:96px;">
+                      </div>
                     </div>
                   </div>
                   <div id="wd-normal-{pid}" style="margin-bottom:10px;">
@@ -16220,7 +16229,8 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             if status != "ok":
                 has_warning = True
             day_slots.append({"label": slot["label"], "count": present_count,
-                               "min_staff": min_s, "status": status})
+                               "min_staff": min_s, "status": status,
+                               "time_from": slot["time_from"], "time_to": slot["time_to"]})
         result["days"].append({"date": day, "iso": iso,
                                 "slots": day_slots, "has_warning": has_warning})
     return result
@@ -16261,10 +16271,13 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     rows = ""
     for entry in data["slots"]:
         slot = entry["slot"]
+        _slot_time = (f" {slot['time_from']}–{slot['time_to']}"
+                      if slot["time_from"] and slot["time_to"] else "")
         cells = (
             f"<td style='padding:6px 10px;font-size:13px;white-space:nowrap;"
             f"border-right:1px solid var(--br);'>"
-            f"<strong>{_html.escape(slot['label'])}</strong><br>"
+            f"<strong>{_html.escape(slot['label'])}</strong>"
+            f"<span style='font-size:11px;color:var(--ac);margin-left:4px;'>{_slot_time}</span><br>"
             f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
         )
         for day_data in entry["days"]:
@@ -16343,7 +16356,8 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
         today_ol  = "outline:2px solid var(--ac);outline-offset:-2px;" if is_today else ""
         slot_lines = "".join(
             f'<div style="font-size:10px;line-height:1.5;white-space:nowrap;">'
-            f'{_html.escape(s["label"][:7])} {s["count"]}/{s["min_staff"]} {_SI[s["status"]]}</div>'
+            + (f'{s["time_from"]}–{s["time_to"]} ' if s.get("time_from") and s.get("time_to") else f'{_html.escape(s["label"][:6])} ')
+            + f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}</div>'
             for s in day_data["slots"]
         )
         tds.append(
@@ -16483,12 +16497,14 @@ def admin_staffing():
             nth_week   = request.form.get("nth_week", "") or None
             special_wd = request.form.get("special_weekday", "") or None
             min_staff  = int(request.form.get("min_staff", 1))
+            time_from  = request.form.get("time_from", "").strip() or None
+            time_to    = request.form.get("time_to", "").strip() or None
             if plan_id and label:
                 db.execute(
                     "INSERT INTO staffing_slots "
-                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff)
+                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff, time_from, time_to) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff, time_from, time_to)
                 )
                 db.commit()
                 add_flash(t("success.slot_created"), "success")

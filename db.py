@@ -538,8 +538,14 @@ def init_db():
         nth_week TEXT DEFAULT NULL,
         special_weekday INTEGER DEFAULT NULL,
         min_staff INTEGER NOT NULL DEFAULT 1,
-        sort_order INTEGER DEFAULT 0
+        sort_order INTEGER DEFAULT 0,
+        time_from TEXT DEFAULT NULL,
+        time_to TEXT DEFAULT NULL
     )""")
+    if not _col_exists(db, "staffing_slots", "time_from"):
+        db.execute("ALTER TABLE staffing_slots ADD COLUMN time_from TEXT DEFAULT NULL")
+    if not _col_exists(db, "staffing_slots", "time_to"):
+        db.execute("ALTER TABLE staffing_slots ADD COLUMN time_to TEXT DEFAULT NULL")
     db.execute("""CREATE TABLE IF NOT EXISTS staffing_assignments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slot_id INTEGER NOT NULL REFERENCES staffing_slots(id) ON DELETE CASCADE,
