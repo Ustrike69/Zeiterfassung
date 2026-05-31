@@ -14721,7 +14721,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
 
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
-                _srole       = s.get("slot_role") or "staff"
+                _srole       = s["slot_role"] or "staff"
                 _srole_label = t("staffing.role_lead") if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
@@ -16311,7 +16311,7 @@ def _get_staffing_week_data(plan_id: int) -> dict:
                 "count":     count,
                 "min_staff": min_s,
                 "status":    status,
-                "slot_role": slot.get("slot_role") or "staff",
+                "slot_role": slot["slot_role"] or "staff",
             })
         result["slots"].append({"slot": slot, "days": slot_days})
     return result
@@ -16398,7 +16398,7 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             day_slots.append({"label": slot["label"], "count": present_count,
                                "min_staff": min_s, "status": status,
                                "time_from": slot["time_from"], "time_to": slot["time_to"],
-                               "slot_role": slot.get("slot_role") or "staff"})
+                               "slot_role": slot["slot_role"] or "staff"})
         result["days"].append({"date": day, "iso": iso,
                                 "slots": day_slots, "has_warning": has_warning})
     return result
@@ -16440,7 +16440,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     rows = ""
     for entry in data["slots"]:
         slot      = entry["slot"]
-        slot_role = slot.get("slot_role") or "staff"
+        slot_role = slot["slot_role"] or "staff"
         is_lead   = (slot_role == "lead")
         _slot_time = (f" {slot['time_from']}–{slot['time_to']}"
                       if slot["time_from"] and slot["time_to"] else "")
@@ -16570,7 +16570,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
                 f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}'
                 f'</div>'
             )
-            if s.get("slot_role") == "lead" and s["count"] == 0:
+            if s["slot_role"] == "lead" and s["count"] == 0:
                 slot_lines += (
                     f'<div style="font-size:9px;color:#dc2626;white-space:nowrap;">'
                     f'{t("staffing.lead_warning")}</div>'
