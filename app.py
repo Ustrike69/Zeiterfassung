@@ -16494,11 +16494,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
     _SC = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
 
-    th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid var(--br);background:var(--ca);'></th>"
+    th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid rgba(128,128,128,0.5);background:var(--ca);'></th>"
     for day in days:
         today_bg = "background:color-mix(in srgb,var(--ac) 12%,var(--ca));" if day == today else "background:var(--ca);"
         th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
-               f"border-bottom:2px solid var(--br);border-left:1px solid var(--br);cursor:pointer;{today_bg}' "
+               f"border-bottom:2px solid rgba(128,128,128,0.5);border-left:2px solid rgba(128,128,128,0.35);cursor:pointer;{today_bg}' "
                f"onclick=\"location.href='/staffing/day?date={day.isoformat()}&plan_id={plan_id}'\">"
                f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
 
@@ -16523,7 +16523,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
         )
         for di, day_data in enumerate(entry["days"]):
             day_iso   = days[di].isoformat()
-            _r_border = "" if di == 4 else "border-right:1px solid var(--br);"
+            _r_border = "" if di == 4 else "border-right:2px solid rgba(128,128,128,0.35);"
             if day_data is None:
                 cells += (f"<td style='padding:6px 10px;{row_bg}{_r_border}cursor:pointer;'"
                           f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>")
@@ -16564,14 +16564,14 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'{_lead_warn}'
                 f'</td>'
             )
-        rows += f"<tr style='border-bottom:1px solid var(--br);'>{cells}</tr>"
+        rows += f"<tr style='border-bottom:1px solid rgba(128,128,128,0.2);'>{cells}</tr>"
 
     if not rows:
         rows = f"<tr><td colspan='6' style='padding:1rem;color:var(--mu);'>{t('staffing.no_slots')}</td></tr>"
 
     return f"""{nav}
     <div style="overflow-x:auto;">
-      <div style="border:1px solid var(--br);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+      <div style="border:2px solid rgba(128,128,128,0.35);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr>{th}</tr></thead>
           <tbody>{rows}</tbody>
