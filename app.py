@@ -16320,7 +16320,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
         today_bg = "background:color-mix(in srgb,var(--ac) 8%,var(--bg));" if day == today else ""
         th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
                f"border-bottom:2px solid var(--br);cursor:pointer;{today_bg}' "
-               f"onclick=\"window.location='/staffing/day/{day.isoformat()}?plan_id={plan_id}'\">"
+               f"onclick=\"location.href='/staffing/day?date={day.isoformat()}&plan_id={plan_id}'\">"
                f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
 
     rows = ""
@@ -16335,9 +16335,10 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             f"<span style='font-size:11px;color:var(--ac);margin-left:4px;'>{_slot_time}</span><br>"
             f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
         )
-        for day_data in entry["days"]:
+        for di, day_data in enumerate(entry["days"]):
+            day_iso = days[di].isoformat()
             if day_data is None:
-                cells += "<td style='padding:6px 10px;background:var(--ca);'></td>"
+                cells += f"<td style='padding:6px 10px;background:var(--ca);cursor:pointer;' onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>"
                 continue
             status = day_data["status"]
             color  = _SC[status]
@@ -16355,7 +16356,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 for a in day_data["absent"]
             )
             cells += (
-                f'<td style="padding:6px 10px;border-left:3px solid {color};">'
+                f"<td style='padding:6px 10px;border-left:3px solid {color};cursor:pointer;'"
+                f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\">"
                 f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
                 f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
@@ -16438,7 +16440,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
         )
         tds.append(
             f'<td style="padding:4px;vertical-align:top;cursor:pointer;{border}{bg}{today_ol}'
-            f'min-width:72px;" onclick="window.location=\'/staffing/day/{iso}?plan_id={plan_id}\'">'
+            f"min-width:72px;\" onclick=\"location.href='/staffing/day?date={iso}&plan_id={plan_id}'\">"
             f'<div style="font-size:11px;font-weight:700;margin-bottom:2px;">'
             f'{day.day}{accepted_badge}</div>'
             f'{slot_lines}</td>'
@@ -16531,7 +16533,8 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
         has_warn = any(s["status"] != "ok" for s in slot_data)
         if has_warn:
             accepted_html = f"""
-            <form method="post" action="/staffing/day/{iso_date}/accept" style="display:inline;">
+            <form method="post" action="/staffing/day/accept" style="display:inline;">
+              <input type="hidden" name="date" value="{iso_date}">
               <input type="hidden" name="plan_id" value="{plan_id}">
               <input type="text" name="note" placeholder="{t('staffing.accept_note')}"
                      style="font-size:12px;padding:3px 8px;margin-right:4px;width:180px;">
@@ -16604,7 +16607,8 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
               <div style="font-size:11px;color:var(--mu);font-weight:600;margin-bottom:6px;">
                 ➕ {t('staffing.override_title')}
               </div>
-              <form method="post" action="/staffing/day/{iso_date}/override">
+              <form method="post" action="/staffing/day/override">
+                <input type="hidden" name="date" value="{iso_date}">
                 <input type="hidden" name="plan_id" value="{plan_id}">
                 <input type="hidden" name="slot_id" value="{sid}">
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
@@ -16670,12 +16674,12 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
     </style>
     <div style="max-width:700px;margin:1rem auto;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;flex-wrap:wrap;">
-        <a href="/staffing/day/{prev_d}?plan_id={plan_id}" class="btn btn-sm">◀</a>
+        <a href="/staffing/day?date={prev_d}&plan_id={plan_id}" class="btn btn-sm">◀</a>
         <div>
           <strong style="font-size:16px;">{wd_name}, {date_str}</strong>
           <span style="font-size:13px;color:var(--mu);margin-left:8px;">{_html.escape(plan['name'])}</span>
         </div>
-        <a href="/staffing/day/{next_d}?plan_id={plan_id}" class="btn btn-sm">▶</a>
+        <a href="/staffing/day?date={next_d}&plan_id={plan_id}" class="btn btn-sm">▶</a>
         <a href="/staffing?plan_id={plan_id}&view=month" class="btn btn-sm" style="margin-left:4px;">↩</a>
         <div style="margin-left:auto;">{accepted_html}</div>
       </div>
@@ -16722,19 +16726,20 @@ def _render_override_respond(pending, u) -> str:
     </div>"""
 
 
-@app.get("/staffing/day/<iso_date>")
+@app.get("/staffing/day")
 @login_required
-def staffing_day_view(iso_date: str):
+def staffing_day_view():
     bootstrap()
     if not _feature_enabled("staffing"):
         abort(404)
     u = current_user()
     if not (u.get("admin_role") in ("sysadmin", "timemanager") or u.get("is_approver")):
         abort(403)
+    iso_date = request.args.get("date", "")
     try:
         d = datetime.date.fromisoformat(iso_date)
     except ValueError:
-        abort(400)
+        return redirect("/staffing")
 
     plan_id = request.args.get("plan_id", type=int)
     if not plan_id:
@@ -16831,14 +16836,15 @@ def staffing_day_view(iso_date: str):
     ))
 
 
-@app.post("/staffing/day/<iso_date>/accept")
+@app.post("/staffing/day/accept")
 @timemanager_required
-def staffing_day_accept(iso_date: str):
+def staffing_day_accept():
     bootstrap()
     if not _feature_enabled("staffing"):
         abort(404)
-    plan_id = int(request.form.get("plan_id", 0))
-    note    = request.form.get("note", "").strip()
+    iso_date = request.form.get("date", "")
+    plan_id  = int(request.form.get("plan_id", 0))
+    note     = request.form.get("note", "").strip()
     u = current_user()
     db = connect()
     db.execute(
@@ -16849,26 +16855,27 @@ def staffing_day_accept(iso_date: str):
     db.commit()
     db.close()
     add_flash(t("staffing.day_accepted"), "success")
-    return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+    return redirect(f"/staffing/day?date={iso_date}&plan_id={plan_id}")
 
 
-@app.post("/staffing/day/<iso_date>/override")
+@app.post("/staffing/day/override")
 @timemanager_required
-def staffing_override_create(iso_date: str):
+def staffing_override_create():
     bootstrap()
     if not _feature_enabled("staffing"):
         abort(404)
-    plan_id = int(request.form.get("plan_id", 0))
-    slot_id = int(request.form.get("slot_id", 0))
-    user_id = int(request.form.get("user_id", 0))
-    dates   = request.form.getlist("dates")
+    iso_date = request.form.get("date", "")
+    plan_id  = int(request.form.get("plan_id", 0))
+    slot_id  = int(request.form.get("slot_id", 0))
+    user_id  = int(request.form.get("user_id", 0))
+    dates    = request.form.getlist("dates")
     require = 1 if request.form.get("require_confirm") else 0
     note    = request.form.get("note", "").strip()
     u = current_user()
 
     if not (plan_id and slot_id and user_id and dates):
         add_flash(t("flash.error.missing_fields"), "error")
-        return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+        return redirect(f"/staffing/day?date={iso_date}&plan_id={plan_id}")
 
     db = connect()
     for dt in dates:
@@ -16899,7 +16906,7 @@ def staffing_override_create(iso_date: str):
     db.commit()
     db.close()
     add_flash(t("staffing.override_sent") if require else t("staffing.override_assigned"), "success")
-    return redirect(f"/staffing/day/{iso_date}?plan_id={plan_id}")
+    return redirect(f"/staffing/day?date={iso_date}&plan_id={plan_id}")
 
 
 @app.route("/staffing/override/respond", methods=["GET", "POST"])
