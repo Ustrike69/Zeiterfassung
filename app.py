@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev6"
+APP_VERSION = "v3.0.0.dev7"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16118,7 +16118,7 @@ def _get_staffing_week_data(plan_id: int) -> dict:
 
     db = connect()
     slots = db.execute(
-        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY sort_order",
+        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY COALESCE(time_from,'99:99'), sort_order",
         (plan_id,)
     ).fetchall()
     assignments = db.execute("""
@@ -16181,7 +16181,7 @@ def _get_staffing_month_data(plan_id: int) -> dict:
 
     db = connect()
     slots = db.execute(
-        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY sort_order",
+        "SELECT * FROM staffing_slots WHERE plan_id=? ORDER BY COALESCE(time_from,'99:99'), sort_order",
         (plan_id,)
     ).fetchall()
     assignments = db.execute("""
@@ -16540,7 +16540,7 @@ def admin_staffing():
         SELECT ss.*, sp.name as plan_name
         FROM staffing_slots ss
         JOIN staffing_plans sp ON sp.id = ss.plan_id
-        ORDER BY ss.plan_id, ss.sort_order
+        ORDER BY ss.plan_id, COALESCE(ss.time_from,'99:99'), ss.sort_order
     """).fetchall()
     all_assignments = db.execute("SELECT * FROM staffing_assignments").fetchall()
     db.close()
