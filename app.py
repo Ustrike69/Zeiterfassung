@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev8"
+APP_VERSION = "v3.0.0.dev9"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -88,6 +88,37 @@ def _slot_applies_on_date(slot, iso_date: str) -> bool:
         week_num = (d.day - 1) // 7 + 1
         weeks = [int(x) for x in str(slot["nth_week"]).split(",")]
         return week_num in weeks
+    return False
+
+
+def _user_works_in_slot(user_id: int, iso_date: str, time_from: str, time_to: str) -> bool:
+    """True wenn der User laut Zeitschema im Slot-Zeitfenster arbeitet (Überlappung)."""
+    wd = datetime.date.fromisoformat(iso_date).weekday()
+    _db = connect()
+    blocks = _db.execute(
+        "SELECT sdb.time_from, sdb.time_to "
+        "FROM schedule_daily_blocks sdb "
+        "JOIN user_schedules us ON us.id = sdb.schedule_id "
+        "WHERE us.user_id=? AND sdb.weekday=? AND us.valid_from <= ? "
+        "ORDER BY us.valid_from DESC",
+        (user_id, wd, iso_date)
+    ).fetchall()
+    _db.close()
+    if not blocks:
+        return False
+    try:
+        s_from = int(time_from[:2]) * 60 + int(time_from[3:])
+        s_to   = int(time_to[:2])   * 60 + int(time_to[3:])
+    except (ValueError, IndexError):
+        return True
+    for b in blocks:
+        try:
+            b_from = int(b["time_from"][:2]) * 60 + int(b["time_from"][3:])
+            b_to   = int(b["time_to"][:2])   * 60 + int(b["time_to"][3:])
+            if b_from < s_to and b_to > s_from:
+                return True
+        except (ValueError, IndexError):
+            continue
     return False
 
 
@@ -16160,7 +16191,14 @@ def _get_staffing_week_data(plan_id: int) -> dict:
                 slot_days.append(None)
                 continue
             assigned_list = assign_map.get(slot["id"], [])
-            present = [a for a in assigned_list if not is_absent(a["user_id"], iso)]
+            _tf, _tt = slot["time_from"], slot["time_to"]
+            def _in_slot(a):
+                if is_absent(a["user_id"], iso):
+                    return False
+                if _tf and _tt:
+                    return _user_works_in_slot(a["user_id"], iso, _tf, _tt)
+                return True
+            present = [a for a in assigned_list if _in_slot(a)]
             absent  = [a for a in assigned_list if is_absent(a["user_id"], iso)]
             count   = len(present)
             min_s   = slot["min_staff"]
@@ -16223,7 +16261,12 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             if not _slot_applies_on_date(slot, iso):
                 continue
             assigned_list = assign_map.get(slot["id"], [])
-            present_count = sum(1 for a in assigned_list if not is_absent(a["user_id"], iso))
+            _tf, _tt = slot["time_from"], slot["time_to"]
+            present_count = sum(
+                1 for a in assigned_list
+                if not is_absent(a["user_id"], iso)
+                and (not (_tf and _tt) or _user_works_in_slot(a["user_id"], iso, _tf, _tt))
+            )
             min_s  = slot["min_staff"]
             status = "ok" if present_count >= min_s else ("warn" if present_count > 0 else "empty")
             if status != "ok":
