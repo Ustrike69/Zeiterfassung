@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev12"
+APP_VERSION = "v3.0.0.dev13"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14651,8 +14651,11 @@ def _render_admin_teams(teams, all_users, team_members) -> str:
 
 def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
     assigned = {}
+    assigned_lead = {}
     for a in all_assignments:
         assigned.setdefault(a["slot_id"], set()).add(a["user_id"])
+        if int(a["is_lead"] or 0):
+            assigned_lead.setdefault(a["slot_id"], set()).add(a["user_id"])
 
     slots_by_plan = {}
     for s in slots:
@@ -14704,19 +14707,34 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 wd_str = _wd_label(s)
                 assigned_ids = assigned.get(sid, set())
 
-                available_cards = ""
-                assigned_cards  = ""
+                available_cards   = ""
+                assigned_cards    = ""
+                assigned_lead_ids = assigned_lead.get(sid, set())
                 for tu in team_user_rows:
                     uname = _html.escape(tu["display_name"] or tu["username"])
-                    card = (
-                        f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
-                        f'ondragstart="drag(event)">'
-                        f'<span class="user-dot" style="background:{team_color}"></span>'
-                        f'{uname}</div>'
-                    )
                     if tu["id"] in assigned_ids:
+                        is_u_lead  = tu["id"] in assigned_lead_ids
+                        lead_icon  = "👑" if is_u_lead else "○"
+                        lead_style = "color:#eab308;" if is_u_lead else "color:var(--mu);"
+                        card = (
+                            f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
+                            f'data-is-lead="{1 if is_u_lead else 0}" ondragstart="drag(event)">'
+                            f'<span class="user-dot" style="background:{team_color}"></span>'
+                            f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;'
+                            f'white-space:nowrap;">{uname}</span>'
+                            f'<button type="button" onclick="toggleLead(this)" '
+                            f'style="border:none;background:none;cursor:pointer;font-size:13px;'
+                            f'padding:0 2px;{lead_style}flex-shrink:0;" '
+                            f'title="{t("staffing.is_lead")}">{lead_icon}</button></div>'
+                        )
                         assigned_cards += card
                     else:
+                        card = (
+                            f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
+                            f'ondragstart="drag(event)">'
+                            f'<span class="user-dot" style="background:{team_color}"></span>'
+                            f'{uname}</div>'
+                        )
                         available_cards += card
 
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
@@ -14736,6 +14754,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     <span class="slot-days" style="font-size:12px;color:var(--mu);">{wd_str}</span>
                     {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
                     <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
+                    {f'<span style="font-size:12px;color:#eab308;">👑≥{s["min_lead"]}</span>' if (s["min_lead"] or 0) > 0 else ""}
                     <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
                             onclick="deleteSlot({sid})">×</button>
                   </div>
@@ -14815,6 +14834,12 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                       </select>
                     </div>
                     <div>
+                      <label style="font-size:12px;">{t('staffing.min_lead')}</label>
+                      <input type="number" name="min_lead" value="0" min="0" max="99"
+                             style="display:block;margin-top:4px;width:70px;">
+                      <div style="font-size:10px;color:var(--mu);margin-top:2px;">{t('staffing.min_lead_hint')}</div>
+                    </div>
+                    <div>
                       <label style="font-size:12px;">Von – Bis</label>
                       <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
                         <input type="time" name="time_from" step="900" style="width:96px;">
@@ -14879,6 +14904,17 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                   <input type="text" name="description" maxlength="120"
                          style="display:block;margin-top:4px;width:100%;">
                 </div>
+                <div>
+                  <label style="font-size:12px;">{t('staffing.default_min_staff')}</label>
+                  <input type="number" name="default_min_staff" value="2" min="1" max="99"
+                         style="display:block;margin-top:4px;width:70px;">
+                </div>
+                <div style="display:flex;align-items:flex-end;padding-bottom:6px;">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                    <input type="checkbox" name="require_lead" value="1">
+                    {t('staffing.require_lead')}
+                  </label>
+                </div>
                 <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
               </div>
             </form>
@@ -14927,9 +14963,17 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
       el.addEventListener("dragover",function(e){{e.preventDefault();el.classList.add("dragover");}});
       el.addEventListener("dragleave",function(){{el.classList.remove("dragover");}});
     }});
+    function toggleLead(btn){{
+      var card=btn.closest('.user-card');
+      var isLead=card.dataset.isLead==='1';
+      card.dataset.isLead=isLead?'0':'1';
+      btn.textContent=isLead?'○':'👑';
+      btn.style.color=isLead?'var(--mu)':'#eab308';
+    }}
     function saveAssignments(slotId){{
       var assigned=document.querySelectorAll("#assigned-"+slotId+" .user-card");
       var userIds=[].map.call(assigned,function(c){{return c.dataset.userId;}});
+      var leadIds=[].map.call(assigned,function(c){{return c.dataset.isLead==='1'?c.dataset.userId:null;}}).filter(Boolean);
       var form=document.createElement("form");
       form.method="POST";form.action="/admin/staffing";
       [["action","save_assignments"],["slot_id",slotId]].forEach(function(p){{
@@ -14937,6 +14981,9 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
       }});
       userIds.forEach(function(uid){{
         var i=document.createElement("input");i.type="hidden";i.name="user_ids";i.value=uid;form.appendChild(i);
+      }});
+      leadIds.forEach(function(uid){{
+        var i=document.createElement("input");i.type="hidden";i.name="lead_user_ids";i.value=uid;form.appendChild(i);
       }});
       document.body.appendChild(form);form.submit();
     }}
@@ -16302,16 +16349,25 @@ def _get_staffing_week_data(plan_id: int) -> dict:
                         present.append(a)
                 else:
                     present.append(a)
-            count  = len(present)
-            min_s  = slot["min_staff"]
-            status = "ok" if count >= min_s else ("warn" if count > 0 else "empty")
+            count         = len(present)
+            min_s         = slot["min_staff"]
+            min_l         = int(slot["min_lead"] or 0)
+            lead_present  = [a for a in present if int(a["is_lead"] or 0)]
+            staff_present = [a for a in present if not int(a["is_lead"] or 0)]
+            lead_missing  = (min_l > 0 and len(lead_present) == 0)
+            lead_ok       = len(lead_present) >= min_l if min_l > 0 else True
+            status        = "ok" if (count >= min_s and lead_ok) else ("warn" if count > 0 else "empty")
             slot_days.append({
-                "present":   present,
-                "absent":    absent,
-                "count":     count,
-                "min_staff": min_s,
-                "status":    status,
-                "slot_role": slot["slot_role"] or "staff",
+                "present":       present,
+                "lead_present":  lead_present,
+                "staff_present": staff_present,
+                "absent":        absent,
+                "count":         count,
+                "min_staff":     min_s,
+                "min_lead":      min_l,
+                "lead_missing":  lead_missing,
+                "status":        status,
+                "slot_role":     slot["slot_role"] or "staff",
             })
         result["slots"].append({"slot": slot, "days": slot_days})
     return result
@@ -16382,6 +16438,7 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             tf = slot["time_from"]
             tt = slot["time_to"]
             present_count = 0
+            lead_count    = 0
             for a in assigned_list:
                 uid = a["user_id"]
                 if is_absent(uid, iso):
@@ -16389,16 +16446,24 @@ def _get_staffing_month_data(plan_id: int) -> dict:
                 if tf and tt:
                     if _user_works_in_slot(uid, iso, tf, tt):
                         present_count += 1
+                        if int(a["is_lead"] or 0):
+                            lead_count += 1
                 else:
                     present_count += 1
-            min_s  = slot["min_staff"]
-            status = "ok" if present_count >= min_s else ("warn" if present_count > 0 else "empty")
-            if status != "ok":
+                    if int(a["is_lead"] or 0):
+                        lead_count += 1
+            min_s        = slot["min_staff"]
+            min_l        = int(slot["min_lead"] or 0)
+            lead_missing = (min_l > 0 and lead_count == 0)
+            lead_ok      = lead_count >= min_l if min_l > 0 else True
+            status       = "ok" if (present_count >= min_s and lead_ok) else ("warn" if present_count > 0 else "empty")
+            if status != "ok" or lead_missing:
                 has_warning = True
             day_slots.append({"label": slot["label"], "count": present_count,
                                "min_staff": min_s, "status": status,
                                "time_from": slot["time_from"], "time_to": slot["time_to"],
-                               "slot_role": slot["slot_role"] or "staff"})
+                               "slot_role": slot["slot_role"] or "staff",
+                               "lead_missing": lead_missing})
         result["days"].append({"date": day, "iso": iso,
                                 "slots": day_slots, "has_warning": has_warning})
     return result
@@ -16439,21 +16504,17 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
 
     rows = ""
     for entry in data["slots"]:
-        slot      = entry["slot"]
-        slot_role = slot["slot_role"] or "staff"
-        is_lead   = (slot_role == "lead")
+        slot = entry["slot"]
         _slot_time = (f" {slot['time_from']}–{slot['time_to']}"
                       if slot["time_from"] and slot["time_to"] else "")
-        _lead_badge = (
-            f'<span style="font-size:10px;background:#eab308;color:#000;border-radius:3px;'
-            f'padding:1px 4px;margin-left:4px;">{t("staffing.role_lead")}</span>'
-            if is_lead else ""
+        _min_lead_hint = (
+            f'<span style="font-size:10px;color:#eab308;margin-left:4px;">👑≥{slot["min_lead"]}</span>'
+            if int(slot["min_lead"] or 0) > 0 else ""
         )
-        _lbl_extra = "border-left:3px solid #eab308;background:rgba(234,179,8,0.06);" if is_lead else ""
         cells = (
             f"<td style='padding:6px 10px;font-size:13px;white-space:nowrap;"
-            f"border-right:1px solid var(--br);{_lbl_extra}'>"
-            f"<strong>{_html.escape(slot['label'])}</strong>{_lead_badge}"
+            f"border-right:1px solid var(--br);'>"
+            f"<strong>{_html.escape(slot['label'])}</strong>{_min_lead_hint}"
             f"<span style='font-size:11px;color:var(--ac);margin-left:4px;'>{_slot_time}</span><br>"
             f"<span style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</span></td>"
         )
@@ -16462,16 +16523,20 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             if day_data is None:
                 cells += f"<td style='padding:6px 10px;background:var(--ca);cursor:pointer;' onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>"
                 continue
-            status = day_data["status"]
-            color  = _SC[status]
-            _badge_bg    = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
-            _present_bg  = "#eab308" if is_lead else "#16a34a"
-            _present_fg  = "#000"    if is_lead else "#fff"
-            present_html = " ".join(
-                f'<span style="background:{_present_bg};color:{_present_fg};border-radius:3px;'
+            status    = day_data["status"]
+            color     = "#dc2626" if day_data.get("lead_missing") else _SC[status]
+            _badge_bg = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
+            lead_html = " ".join(
+                f'<span style="background:#eab308;color:#000;border-radius:3px;'
+                f'padding:1px 5px;font-size:11px;white-space:nowrap;font-weight:600;">'
+                f'👑 {_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
+                for a in day_data.get("lead_present", [])
+            )
+            staff_html = " ".join(
+                f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
                 f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
                 f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
-                for a in day_data["present"]
+                for a in day_data.get("staff_present", [])
             )
             absent_html = " ".join(
                 f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
@@ -16481,8 +16546,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             )
             _lead_warn = (
                 f'<div style="font-size:11px;color:#dc2626;margin-top:2px;">'
-                f'<span title="{t("staffing.no_lead")}">⚠️ {t("staffing.role_lead")}</span></div>'
-                if is_lead and day_data["count"] == 0 else ""
+                f'⚠️ {t("staffing.no_lead")}</div>'
+                if day_data.get("lead_missing") else ""
             )
             cells += (
                 f"<td style='padding:6px 10px;border-left:3px solid {color};cursor:pointer;'"
@@ -16490,12 +16555,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
                 f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
-                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{present_html}{absent_html}</div>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{lead_html}{staff_html}{absent_html}</div>'
                 f'{_lead_warn}'
                 f'</td>'
             )
-        _row_bg = "background:rgba(234,179,8,0.04);" if is_lead else ""
-        rows += f"<tr style='border-bottom:1px solid var(--br);{_row_bg}'>{cells}</tr>"
+        rows += f"<tr style='border-bottom:1px solid var(--br);'>{cells}</tr>"
 
     if not rows:
         rows = f"<tr><td colspan='6' style='padding:1rem;color:var(--mu);'>{t('staffing.no_slots')}</td></tr>"
@@ -16550,7 +16614,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
         warn      = day_data["has_warning"]
         is_accepted = iso in accepted_dates
         if warn and not is_accepted:
-            any_empty = any(s["status"] == "empty" for s in day_data["slots"])
+            any_empty = any(s["status"] == "empty" or s.get("lead_missing") for s in day_data["slots"])
             border = "border:2px solid #dc2626;background:rgba(220,38,38,0.05);" if any_empty \
                      else "border:2px solid #d97706;background:rgba(217,119,6,0.05);"
         elif is_accepted and warn:
@@ -16570,7 +16634,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
                 f'{s["count"]}/{s["min_staff"]} {_SI[s["status"]]}'
                 f'</div>'
             )
-            if s["slot_role"] == "lead" and s["count"] == 0:
+            if s.get("lead_missing"):
                 slot_lines += (
                     f'<div style="font-size:9px;color:#dc2626;white-space:nowrap;">'
                     f'{t("staffing.lead_warning")}</div>'
@@ -17158,13 +17222,15 @@ def admin_staffing():
         action = request.form.get("action")
 
         if action == "create_plan":
-            name    = request.form.get("name", "").strip()
-            team_id = int(request.form.get("team_id", 0))
-            desc    = request.form.get("description", "").strip()
+            name          = request.form.get("name", "").strip()
+            team_id       = int(request.form.get("team_id", 0))
+            desc          = request.form.get("description", "").strip()
+            default_min_s = max(1, int(request.form.get("default_min_staff", 2) or 2))
+            require_lead  = 1 if request.form.get("require_lead") else 0
             if name and team_id:
                 db.execute(
-                    "INSERT INTO staffing_plans (team_id, name, description) VALUES (?,?,?)",
-                    (team_id, name, desc)
+                    "INSERT INTO staffing_plans (team_id, name, description, default_min_staff, require_lead) VALUES (?,?,?,?,?)",
+                    (team_id, name, desc, default_min_s, require_lead)
                 )
                 db.commit()
                 add_flash(t("success.plan_created"), "success")
@@ -17182,12 +17248,13 @@ def admin_staffing():
             slot_role  = request.form.get("slot_role", "staff")
             if slot_role not in ("staff", "lead"):
                 slot_role = "staff"
+            min_lead   = max(0, int(request.form.get("min_lead", 0) or 0))
             if plan_id and label:
                 db.execute(
                     "INSERT INTO staffing_slots "
-                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff, time_from, time_to, slot_role) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff, time_from, time_to, slot_role)
+                    "(plan_id, label, slot_type, weekdays, nth_week, special_weekday, min_staff, time_from, time_to, slot_role, min_lead) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (plan_id, label, stype, weekdays, nth_week, special_wd, min_staff, time_from, time_to, slot_role, min_lead)
                 )
                 db.commit()
                 add_flash(t("success.slot_created"), "success")
@@ -17200,11 +17267,14 @@ def admin_staffing():
         elif action == "save_assignments":
             slot_id  = int(request.form.get("slot_id", 0))
             user_ids = request.form.getlist("user_ids")
+            lead_ids = set(int(x) for x in request.form.getlist("lead_user_ids") if x.isdigit())
             db.execute("DELETE FROM staffing_assignments WHERE slot_id=?", (slot_id,))
-            for uid in user_ids:
+            for uid_str in user_ids:
+                uid     = int(uid_str)
+                is_lead = 1 if uid in lead_ids else 0
                 db.execute(
-                    "INSERT OR IGNORE INTO staffing_assignments (slot_id, user_id) VALUES (?,?)",
-                    (slot_id, int(uid))
+                    "INSERT OR REPLACE INTO staffing_assignments (slot_id, user_id, is_lead) VALUES (?,?,?)",
+                    (slot_id, uid, is_lead)
                 )
             db.commit()
             add_flash(t("success.assignments_saved"), "success")

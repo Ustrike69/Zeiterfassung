@@ -1066,6 +1066,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.role_lead":               "Leiter",
         "staffing.no_lead":                 "Kein Leiter anwesend",
         "staffing.lead_warning":            "⚠️ Kein Leiter",
+        "staffing.min_lead":                "Mindest-Leiter",
+        "staffing.min_lead_hint":           "Mindestanzahl Leiter die anwesend sein müssen",
+        "staffing.require_lead":            "Leiter erforderlich",
+        "staffing.default_min_staff":       "Standard Mindestbesetzung",
+        "staffing.is_lead":                 "Ist Leiter",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
@@ -2245,6 +2250,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.role_lead":               "Lead",
         "staffing.no_lead":                 "No lead present",
         "staffing.lead_warning":            "⚠️ No lead",
+        "staffing.min_lead":                "Min. leads",
+        "staffing.min_lead_hint":           "Minimum number of leads required",
+        "staffing.require_lead":            "Lead required",
+        "staffing.default_min_staff":       "Default min. staff",
+        "staffing.is_lead":                 "Is lead",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",

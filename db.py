@@ -555,12 +555,28 @@ def init_db():
         db.execute(
             "ALTER TABLE staffing_slots ADD COLUMN slot_role TEXT DEFAULT 'staff'"
         )
+    if not _col_exists(db, "staffing_slots", "min_lead"):
+        db.execute(
+            "ALTER TABLE staffing_slots ADD COLUMN min_lead INTEGER DEFAULT 0"
+        )
     db.execute("""CREATE TABLE IF NOT EXISTS staffing_assignments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slot_id INTEGER NOT NULL REFERENCES staffing_slots(id) ON DELETE CASCADE,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         UNIQUE(slot_id, user_id)
     )""")
+    if not _col_exists(db, "staffing_assignments", "is_lead"):
+        db.execute(
+            "ALTER TABLE staffing_assignments ADD COLUMN is_lead INTEGER DEFAULT 0"
+        )
+    if not _col_exists(db, "staffing_plans", "default_min_staff"):
+        db.execute(
+            "ALTER TABLE staffing_plans ADD COLUMN default_min_staff INTEGER DEFAULT 2"
+        )
+    if not _col_exists(db, "staffing_plans", "require_lead"):
+        db.execute(
+            "ALTER TABLE staffing_plans ADD COLUMN require_lead INTEGER DEFAULT 0"
+        )
     db.execute("""CREATE TABLE IF NOT EXISTS balance_adjustments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
