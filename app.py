@@ -16283,26 +16283,36 @@ def _get_staffing_week_data(plan_id: int) -> dict:
     result = {"monday": monday, "days": days, "slots": []}
     for slot in slots:
         slot_days = []
+        tf = slot["time_from"]
+        tt = slot["time_to"]
         for day in days:
             iso = day.isoformat()
             if not _slot_applies_on_date(slot, iso):
                 slot_days.append(None)
                 continue
             assigned_list = assign_map.get(slot["id"], [])
-            _tf, _tt = slot["time_from"], slot["time_to"]
-            def _in_slot(a):
-                if is_absent(a["user_id"], iso):
-                    return False
-                if _tf and _tt:
-                    return _user_works_in_slot(a["user_id"], iso, _tf, _tt)
-                return True
-            present = [a for a in assigned_list if _in_slot(a)]
-            absent  = [a for a in assigned_list if is_absent(a["user_id"], iso)]
-            count   = len(present)
-            min_s   = slot["min_staff"]
-            status  = "ok" if count >= min_s else ("warn" if count > 0 else "empty")
-            slot_days.append({"present": present, "absent": absent,
-                               "count": count, "min_staff": min_s, "status": status})
+            present = []
+            absent  = []
+            for a in assigned_list:
+                uid = a["user_id"]
+                if is_absent(uid, iso):
+                    absent.append(a)
+                elif tf and tt:
+                    if _user_works_in_slot(uid, iso, tf, tt):
+                        present.append(a)
+                else:
+                    present.append(a)
+            count  = len(present)
+            min_s  = slot["min_staff"]
+            status = "ok" if count >= min_s else ("warn" if count > 0 else "empty")
+            slot_days.append({
+                "present":   present,
+                "absent":    absent,
+                "count":     count,
+                "min_staff": min_s,
+                "status":    status,
+                "slot_role": slot.get("slot_role") or "staff",
+            })
         result["slots"].append({"slot": slot, "days": slot_days})
     return result
 
@@ -16342,15 +16352,7 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             f"WHERE user_id IN ({ph}) AND date_from <= ? AND date_to >= ?",
             (*user_ids, d_to, d_from)
         ).fetchall()
-    db.close()
-
-    def is_absent(uid, iso):
-        return any(
-            ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
-            for ab in absences
-        )
-
-    # Accepted dates
+    # Accepted dates – query before closing connection
     try:
         _acc_rows = db.execute(
             "SELECT iso_date FROM staffing_day_accepted WHERE plan_id=? "
@@ -16360,6 +16362,13 @@ def _get_staffing_month_data(plan_id: int) -> dict:
         accepted_dates = {r["iso_date"] for r in _acc_rows}
     except Exception:
         accepted_dates = set()
+    db.close()
+
+    def is_absent(uid, iso):
+        return any(
+            ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
+            for ab in absences
+        )
 
     result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates}
     for day in days:
@@ -16370,12 +16379,18 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             if not _slot_applies_on_date(slot, iso):
                 continue
             assigned_list = assign_map.get(slot["id"], [])
-            _tf, _tt = slot["time_from"], slot["time_to"]
-            present_count = sum(
-                1 for a in assigned_list
-                if not is_absent(a["user_id"], iso)
-                and (not (_tf and _tt) or _user_works_in_slot(a["user_id"], iso, _tf, _tt))
-            )
+            tf = slot["time_from"]
+            tt = slot["time_to"]
+            present_count = 0
+            for a in assigned_list:
+                uid = a["user_id"]
+                if is_absent(uid, iso):
+                    continue
+                if tf and tt:
+                    if _user_works_in_slot(uid, iso, tf, tt):
+                        present_count += 1
+                else:
+                    present_count += 1
             min_s  = slot["min_staff"]
             status = "ok" if present_count >= min_s else ("warn" if present_count > 0 else "empty")
             if status != "ok":
