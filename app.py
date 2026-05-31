@@ -268,18 +268,27 @@ def bootstrap():
     global _bootstrap_done
     if _bootstrap_done:
         return
-    _bootstrap_done = True
-    init_db()
-    seed_defaults()
-    # keep older DBs compatible
-    _ensure_user_schedules_schema()
-    _ensure_user_prefs_schema()
-    _ensure_expected_override_schema()
-    _ensure_vacation_schema()
-    _ensure_vacation_carryover_schema()
-    _ensure_business_trips_schema()
-    _ensure_contoured_days_schema()
-    seed_all_regions_if_needed()
+    import threading as _threading
+    import fcntl as _fcntl
+    _lock_path = os.path.join(os.path.dirname(db_path()), ".bootstrap.lock")
+    try:
+        with open(_lock_path, "w") as _lf:
+            _fcntl.flock(_lf, _fcntl.LOCK_EX)
+            if not _bootstrap_done:
+                _bootstrap_done = True
+                init_db()
+                seed_defaults()
+                _ensure_user_schedules_schema()
+                _ensure_user_prefs_schema()
+                _ensure_expected_override_schema()
+                _ensure_vacation_schema()
+                _ensure_vacation_carryover_schema()
+                _ensure_business_trips_schema()
+                _ensure_contoured_days_schema()
+                seed_all_regions_if_needed()
+    except Exception as _be:
+        import logging as _lg
+        _lg.getLogger(__name__).error(f"bootstrap error: {_be}")
 
 
 
@@ -16921,13 +16930,14 @@ def staffing_override_create():
 
     if require:
         target = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-        if target and target.get("email"):
+        if target and target["email"]:
             try:
                 dates_str = ", ".join(dates)
+                _target_lang = target["language"] or "de"
                 _send_mail_simple(
                     target["email"],
-                    t("mail.override_request_subject", target.get("language", "de")),
-                    t("mail.override_request_body", target.get("language", "de")).format(
+                    t("mail.override_request_subject", _target_lang),
+                    t("mail.override_request_body", _target_lang).format(
                         dates=dates_str, note=note or "–",
                         url=f"{_get_base_url()}/staffing/override/respond"
                     )
