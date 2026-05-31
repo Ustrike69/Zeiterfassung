@@ -16494,17 +16494,18 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
     _SC = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
 
-    th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid var(--br);'></th>"
+    th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid var(--br);background:var(--ca);'></th>"
     for day in days:
-        today_bg = "background:color-mix(in srgb,var(--ac) 8%,var(--bg));" if day == today else ""
+        today_bg = "background:color-mix(in srgb,var(--ac) 12%,var(--ca));" if day == today else "background:var(--ca);"
         th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
-               f"border-bottom:2px solid var(--br);cursor:pointer;{today_bg}' "
+               f"border-bottom:2px solid var(--br);border-left:1px solid var(--br);cursor:pointer;{today_bg}' "
                f"onclick=\"location.href='/staffing/day?date={day.isoformat()}&plan_id={plan_id}'\">"
                f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
 
     rows = ""
-    for entry in data["slots"]:
+    for slot_idx, entry in enumerate(data["slots"]):
         slot = entry["slot"]
+        row_bg = "background:var(--bg);" if slot_idx % 2 == 0 else "background:color-mix(in srgb,var(--ca) 50%,var(--bg));"
         _slot_time_div = (
             f"<div style='font-size:10px;color:var(--mu);margin-top:2px;'>{slot['time_from']}–{slot['time_to']}</div>"
             if slot["time_from"] and slot["time_to"] else ""
@@ -16515,15 +16516,17 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
         )
         cells = (
             f"<td style='padding:6px 10px;font-size:13px;"
-            f"border-right:1px solid var(--br);min-width:120px;'>"
+            f"border-right:2px solid var(--br);min-width:120px;background:var(--ca);'>"
             f"<div><strong>{_html.escape(slot['label'])}</strong>{_min_lead_hint}</div>"
             f"{_slot_time_div}"
             f"<div style='font-size:11px;color:var(--mu);'>{slot['slot_type'].upper()}</div></td>"
         )
         for di, day_data in enumerate(entry["days"]):
-            day_iso = days[di].isoformat()
+            day_iso   = days[di].isoformat()
+            _r_border = "" if di == 4 else "border-right:1px solid var(--br);"
             if day_data is None:
-                cells += f"<td style='padding:6px 10px;background:var(--ca);cursor:pointer;' onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>"
+                cells += (f"<td style='padding:6px 10px;{row_bg}{_r_border}cursor:pointer;'"
+                          f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>")
                 continue
             status    = day_data["status"]
             color     = "#dc2626" if day_data.get("lead_missing") else _SC[status]
@@ -16552,7 +16555,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 if day_data.get("lead_missing") else ""
             )
             cells += (
-                f"<td style='padding:6px 10px;border-left:3px solid {color};cursor:pointer;'"
+                f"<td style='padding:6px 10px;border-left:3px solid {color};{_r_border}{row_bg}cursor:pointer;'"
                 f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\">"
                 f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
@@ -16568,10 +16571,12 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
 
     return f"""{nav}
     <div style="overflow-x:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:13px;">
-        <thead><tr>{th}</tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
+      <div style="border:1px solid var(--br);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr>{th}</tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
     </div>"""
 
 
