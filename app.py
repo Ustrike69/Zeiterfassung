@@ -16515,10 +16515,38 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
                           overrides, accepted, u) -> str:
     _WD_NAMES = [t("wd.mon"), t("wd.tue"), t("wd.wed"), t("wd.thu"),
                  t("wd.fri"), t("wd.sat"), t("wd.sun")]
-    prev_d = (d - datetime.timedelta(days=1)).isoformat()
-    next_d = (d + datetime.timedelta(days=1)).isoformat()
-    wd_name = _WD_NAMES[d.weekday()]
+    prev_d   = (d - datetime.timedelta(days=1)).isoformat()
+    next_d   = (d + datetime.timedelta(days=1)).isoformat()
+    wd_name  = _WD_NAMES[d.weekday()]
     date_str = d.strftime("%d.%m.%Y")
+
+    # Pre-resolve all t() calls — avoids issues inside nested f-strings
+    _lbl_present   = t("staffing.present")
+    _lbl_absent    = t("staffing.absent")
+    _lbl_override  = t("staffing.override_title")
+    _lbl_assign    = t("staffing.override_assign")
+    _lbl_request   = t("staffing.override_request")
+    _lbl_confirm   = t("staffing.override_require_confirm")
+    _lbl_note      = t("staffing.override_note")
+    _lbl_dates     = t("staffing.override_dates")
+    _lbl_accept    = t("staffing.accept_day")
+    _lbl_acpt_note = t("staffing.accept_note")
+    _lbl_acpt_bdg  = t("staffing.accepted_badge")
+
+    def _row_name(a):
+        return a["display_name"] or a["username"] or "?"
+
+    def _row_uid(a):
+        try:
+            return a["user_id"]
+        except (IndexError, KeyError):
+            return None
+
+    def _row_has(a, key):
+        try:
+            return bool(a[key])
+        except (IndexError, KeyError):
+            return False
 
     accepted_html = ""
     if accepted:
@@ -16526,75 +16554,69 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
         accepted_html = (
             f'<span style="background:#16a34a;color:#fff;border-radius:4px;'
             f'padding:2px 10px;font-size:12px;font-weight:600;">'
-            f'{t("staffing.accepted_badge")}'
+            f'{_lbl_acpt_bdg}'
             f'{(" – " + note_txt) if note_txt else ""}</span>'
         )
     else:
         has_warn = any(s["status"] != "ok" for s in slot_data)
         if has_warn:
-            accepted_html = f"""
-            <form method="post" action="/staffing/day/accept" style="display:inline;">
-              <input type="hidden" name="date" value="{iso_date}">
-              <input type="hidden" name="plan_id" value="{plan_id}">
-              <input type="text" name="note" placeholder="{t('staffing.accept_note')}"
-                     style="font-size:12px;padding:3px 8px;margin-right:4px;width:180px;">
-              <button class="btn btn-sm" type="submit"
-                      style="background:#d97706;color:#fff;">{t('staffing.accept_day')}</button>
-            </form>"""
+            accepted_html = (
+                f'<form method="post" action="/staffing/day/accept" style="display:inline;">'
+                f'<input type="hidden" name="date" value="{iso_date}">'
+                f'<input type="hidden" name="plan_id" value="{plan_id}">'
+                f'<input type="text" name="note" placeholder="{_lbl_acpt_note}"'
+                f' style="font-size:12px;padding:3px 8px;margin-right:4px;width:180px;">'
+                f'<button class="btn btn-sm" type="submit"'
+                f' style="background:#d97706;color:#fff;">{_lbl_accept}</button>'
+                f'</form>'
+            )
 
     absence_map = {}
     for ab in absences:
         absence_map[ab["user_id"]] = _html.escape(ab["typ"])
 
+    _SI = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
+    _BC = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
+
     slots_html = ""
     for sd in slot_data:
-        slot   = sd["slot"]
-        status = sd["status"]
-        count  = sd["count"]
-        min_s  = sd["min_staff"]
-        sid    = slot["id"]
-        _SI    = {"ok": "✅", "warn": "⚠️", "empty": "❌"}
-        _BC    = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
+        slot     = sd["slot"]
+        status   = sd["status"]
+        count    = sd["count"]
+        min_s    = sd["min_staff"]
+        sid      = slot["id"]
         badge_bg = _BC[status]
         time_str = (f" {slot['time_from']}–{slot['time_to']}"
                     if slot["time_from"] and slot["time_to"] else "")
 
-        def _row_name(a):
-            return a["display_name"] or a["username"] or "?"
-
-        def _row_has(a, key):
-            try:
-                return bool(a[key])
-            except (IndexError, KeyError):
-                return False
-
         present_rows = "".join(
-            f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
-            f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
-            f'padding:1px 6px;font-size:11px;">✓</span>'
-            f'{_html.escape(_row_name(a))}'
-            f'{"<span style=\"font-size:10px;color:#a855f7;\"> ⭐ Sonder</span>" if _row_has(a, "iso_date") else ""}'
-            f'</div>'
+            '<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
+            '<span style="background:#16a34a;color:#fff;border-radius:3px;'
+            'padding:1px 6px;font-size:11px;">✓</span>'
+            + _html.escape(_row_name(a))
+            + (' <span style="font-size:10px;color:#a855f7;">⭐ Sonder</span>'
+               if _row_has(a, "iso_date") else "")
+            + '</div>'
             for a in sd["present"]
-        ) or f'<div style="color:var(--mu);font-size:12px;">–</div>'
+        ) or '<div style="color:var(--mu);font-size:12px;">–</div>'
 
         absent_rows = "".join(
-            f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
-            f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
-            f'padding:1px 6px;font-size:11px;">✗</span>'
-            f'{_html.escape(_row_name(a))}'
-            f'<span style="font-size:10px;color:var(--mu);">'
-            f'{absence_map.get(a["user_id"], "")}</span>'
-            f'</div>'
+            '<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
+            '<span style="background:#dc2626;color:#fff;border-radius:3px;'
+            'padding:1px 6px;font-size:11px;">✗</span>'
+            + _html.escape(_row_name(a))
+            + f'<span style="font-size:10px;color:var(--mu);">'
+              f'{absence_map.get(_row_uid(a) or 0, "")}</span>'
+            + '</div>'
             for a in sd["absent"]
         ) if sd["absent"] else ""
 
         override_form = ""
         if status != "ok":
+            present_uids = {_row_uid(a) for a in sd["present"]}
             avail_users = [
                 u2 for u2 in team_users
-                if u2["id"] not in absent_ids
-                and not any(a.get("user_id") == u2["id"] for a in sd["present"])
+                if u2["id"] not in absent_ids and u2["id"] not in present_uids
             ]
             user_opts = "".join(
                 '<option value="' + str(u2["id"]) + '">'
@@ -16603,74 +16625,69 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
             )
             day_checks = "".join(
                 f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;margin-right:6px;">'
-                f'<input type="checkbox" name="dates" value="{(d + datetime.timedelta(days=i)).isoformat()}"'
+                f'<input type="checkbox" name="dates"'
+                f' value="{(d + datetime.timedelta(days=i)).isoformat()}"'
                 f'{" checked" if i == 0 else ""}>'
-                f'{_WD_NAMES[(d.weekday() + i) % 7]} '
-                f'{(d + datetime.timedelta(days=i)).strftime("%d.%m")}'
+                f'{_WD_NAMES[(d.weekday() + i) % 7]}'
+                f' {(d + datetime.timedelta(days=i)).strftime("%d.%m")}'
                 f'</label>'
                 for i in range(7)
             )
-            override_form = f"""
-            <div class="staff-section" style="margin-top:10px;padding-top:10px;
-                         border-top:1px solid var(--br);">
-              <div style="font-size:11px;color:var(--mu);font-weight:600;margin-bottom:6px;">
-                ➕ {t('staffing.override_title')}
-              </div>
-              <form method="post" action="/staffing/day/override">
-                <input type="hidden" name="date" value="{iso_date}">
-                <input type="hidden" name="plan_id" value="{plan_id}">
-                <input type="hidden" name="slot_id" value="{sid}">
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
-                  <div>
-                    <label style="font-size:11px;color:var(--mu);">Mitarbeiter</label>
-                    <select name="user_id" style="display:block;margin-top:3px;font-size:13px;">
-                      {user_opts if user_opts else '<option value="">–</option>'}
-                    </select>
-                  </div>
-                  <div>
-                    <label style="font-size:11px;color:var(--mu);">{t('staffing.override_note')}</label>
-                    <input type="text" name="note" maxlength="120"
-                           style="display:block;margin-top:3px;font-size:13px;min-width:160px;">
-                  </div>
-                </div>
-                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
-                  <span style="font-size:11px;color:var(--mu);margin-right:4px;">{t('staffing.override_dates')}:</span>
-                  {day_checks}
-                </div>
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                  <label style="font-size:12px;display:flex;align-items:center;gap:4px;">
-                    <input type="checkbox" name="require_confirm" value="1">
-                    {t('staffing.override_require_confirm')}
-                  </label>
-                  <button class="btn primary btn-sm" type="submit"
-                          id="override-btn-{sid}">{t('staffing.override_assign')}</button>
-                </div>
-              </form>
-              <script>
-              document.querySelector('[name=require_confirm]') && document.querySelector('[name=require_confirm]').addEventListener('change', function(){{
-                var btn = document.getElementById('override-btn-{sid}');
-                if(btn) btn.textContent = this.checked ? '{t("staffing.override_request")}' : '{t("staffing.override_assign")}';
-              }});
-              </script>
-            </div>""" if avail_users else ""
+            if avail_users:
+                override_form = (
+                    f'<div class="staff-section" style="margin-top:10px;padding-top:10px;'
+                    f'border-top:1px solid var(--br);">'
+                    f'<div style="font-size:11px;color:var(--mu);font-weight:600;margin-bottom:6px;">'
+                    f'➕ {_lbl_override}</div>'
+                    f'<form method="post" action="/staffing/day/override">'
+                    f'<input type="hidden" name="date" value="{iso_date}">'
+                    f'<input type="hidden" name="plan_id" value="{plan_id}">'
+                    f'<input type="hidden" name="slot_id" value="{sid}">'
+                    f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">'
+                    f'<div><label style="font-size:11px;color:var(--mu);">Mitarbeiter</label>'
+                    f'<select name="user_id" style="display:block;margin-top:3px;font-size:13px;">'
+                    f'{user_opts}</select></div>'
+                    f'<div><label style="font-size:11px;color:var(--mu);">{_lbl_note}</label>'
+                    f'<input type="text" name="note" maxlength="120"'
+                    f' style="display:block;margin-top:3px;font-size:13px;min-width:160px;"></div>'
+                    f'</div>'
+                    f'<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">'
+                    f'<span style="font-size:11px;color:var(--mu);margin-right:4px;">{_lbl_dates}:</span>'
+                    f'{day_checks}</div>'
+                    f'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+                    f'<label style="font-size:12px;display:flex;align-items:center;gap:4px;">'
+                    f'<input type="checkbox" name="require_confirm" value="1"'
+                    f' id="req-{sid}" onchange="(function(c){{'
+                    f'var b=document.getElementById(\'ob-{sid}\');'
+                    f'if(b)b.textContent=c.checked?\'{_lbl_request}\':\'{_lbl_assign}\';}}'
+                    f')(this)">'
+                    f'{_lbl_confirm}</label>'
+                    f'<button class="btn primary btn-sm" type="submit"'
+                    f' id="ob-{sid}">{_lbl_assign}</button>'
+                    f'</div></form></div>'
+                )
 
-        slots_html += f"""
-        <div class="slot-day-card status-{status}">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-            <strong style="font-size:14px;">{_html.escape(slot['label'])}</strong>
-            <span style="font-size:12px;color:var(--mu);">{time_str}</span>
-            <span style="background:{badge_bg};color:#fff;border-radius:4px;
-                         padding:1px 8px;font-size:12px;font-weight:700;margin-left:auto;">
-              {count}/{min_s} {_SI[status]}
-            </span>
-          </div>
-          <div class="staff-section">
-            <div class="staff-section-hdr">✅ {t('staffing.present')} ({count})</div>
-            {present_rows}
-          </div>
-          {('<div class="staff-section"><div class="staff-section-hdr">🏖 ' + t("staffing.absent") + '</div>' + absent_rows + '</div>') if absent_rows else ""}
-          {override_form}
-        </div>"""
+        absent_section = (
+            f'<div class="staff-section">'
+            f'<div class="staff-section-hdr">🏖 {_lbl_absent}</div>'
+            f'{absent_rows}</div>'
+        ) if absent_rows else ""
+
+        slots_html += (
+            f'<div class="slot-day-card status-{status}">'
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">'
+            f'<strong style="font-size:14px;">{_html.escape(slot["label"])}</strong>'
+            f'<span style="font-size:12px;color:var(--mu);">{time_str}</span>'
+            f'<span style="background:{badge_bg};color:#fff;border-radius:4px;'
+            f'padding:1px 8px;font-size:12px;font-weight:700;margin-left:auto;">'
+            f'{count}/{min_s} {_SI[status]}</span></div>'
+            f'<div class="staff-section">'
+            f'<div class="staff-section-hdr">✅ {_lbl_present} ({count})</div>'
+            f'{present_rows}</div>'
+            f'{absent_section}'
+            f'{override_form}'
+            f'</div>'
+        )
 
     return f"""
     <style>
