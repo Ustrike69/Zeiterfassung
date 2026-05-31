@@ -16559,12 +16559,21 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
         time_str = (f" {slot['time_from']}–{slot['time_to']}"
                     if slot["time_from"] and slot["time_to"] else "")
 
+        def _row_name(a):
+            return a["display_name"] or a["username"] or "?"
+
+        def _row_has(a, key):
+            try:
+                return bool(a[key])
+            except (IndexError, KeyError):
+                return False
+
         present_rows = "".join(
             f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
             f'<span style="background:#16a34a;color:#fff;border-radius:3px;'
             f'padding:1px 6px;font-size:11px;">✓</span>'
-            f'{_html.escape(a.get("display_name") or a.get("username") or "?")}'
-            f'{"<span style=\"font-size:10px;color:#a855f7;\"> ⭐ Sonder</span>" if a.get("iso_date") else ""}'
+            f'{_html.escape(_row_name(a))}'
+            f'{"<span style=\"font-size:10px;color:#a855f7;\"> ⭐ Sonder</span>" if _row_has(a, "iso_date") else ""}'
             f'</div>'
             for a in sd["present"]
         ) or f'<div style="color:var(--mu);font-size:12px;">–</div>'
@@ -16573,7 +16582,7 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
             f'<div style="padding:3px 0;display:flex;align-items:center;gap:6px;">'
             f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
             f'padding:1px 6px;font-size:11px;">✗</span>'
-            f'{_html.escape(a.get("display_name") or a.get("username") or "?")}'
+            f'{_html.escape(_row_name(a))}'
             f'<span style="font-size:10px;color:var(--mu);">'
             f'{absence_map.get(a["user_id"], "")}</span>'
             f'</div>'
