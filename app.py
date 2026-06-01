@@ -6956,6 +6956,9 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
         <span class="day-stat">Soll&thinsp;<b>{soll_str}</b></span>
         <span class="day-stat">Ist&thinsp;<b>{ist_str}</b></span>
         {delta_html}
+        {f'<span style="background:{abs_row["type_color"] or "#6366f1"};color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;">🏖 {_html.escape(abs_row["type_name"])}</span>' if abs_row else ""}
+        <a class="btn btn-sm" href="/absences?date={day}" title="{t('dashboard.absences')}">🏖</a>
+        <a class="btn btn-sm" href="/business_trips" title="{t('dashboard.business_trips')}">✈</a>
         <a class="btn btn-sm" href="/calendar?y={day[:4]}&m={int(day[5:7])}">Kalender</a>
       </div>
     </div>
@@ -6963,46 +6966,18 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
     {_exception_banner(day, is_blocked_day, exc_row, day_locked)}
     {_lock_notice}
 
-    <!-- Main grid: Zeit | Abwesenheit -->
-    <div class="day-grid">
-
-      <!-- Left column: Zeit -->
-      <div class="day-col">
-        <div class="day-sec">
-          <div id="new-block" class="day-sec-hdr">{t('day.add_block')}</div>
-          <div class="day-sec-body">
-            {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
-          </div>
-        </div>
-        <div class="day-sec">
-          <div class="day-sec-hdr">Vorhandene Zeitblöcke</div>
-          <div class="day-sec-body" style="padding:8px 12px;">
-            {blocks_content}
-          </div>
-        </div>
+    <!-- Zeitblöcke -->
+    <div class="day-sec">
+      <div id="new-block" class="day-sec-hdr">{t('day.add_block')}</div>
+      <div class="day-sec-body">
+        {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
       </div>
-
-      <!-- Right column: Abwesenheit -->
-      <div class="day-col">
-        <div class="day-sec">
-          <div class="day-sec-hdr">Abwesenheit hinzufügen</div>
-          <div class="day-sec-body">
-            {_add_absence_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
-          </div>
-        </div>
-        <div class="day-sec">
-          <div class="day-sec-hdr">Vorhandene Abwesenheit</div>
-          <div class="day-sec-body">
-            {abs_content}
-          </div>
-        </div>
-      </div>
-
     </div>
-
-    <!-- Business trip: full width -->
-    <div class="day-sec day-trip">
-      {_business_trip_section_compact(day, trip, locked=day_locked)}
+    <div class="day-sec">
+      <div class="day-sec-hdr">Vorhandene Zeitblöcke</div>
+      <div class="day-sec-body" style="padding:8px 12px;">
+        {blocks_content}
+      </div>
     </div>
     <script>
     (function() {{
