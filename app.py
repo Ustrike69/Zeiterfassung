@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0.dev14"
+APP_VERSION = "v3.0.1.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14607,12 +14607,41 @@ def _render_admin_teams(teams, all_users, team_members) -> str:
                           style="color:#dc2626;">{t('btn.delete')}</button>
                 </form>
               </div>
+              <hr style="border:none;border-top:1px solid var(--br);margin:12px 0;">
+              <p style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.edit_team')}</p>
+              <form method="post" action="/admin/teams">
+                <input type="hidden" name="action" value="edit">
+                <input type="hidden" name="team_id" value="{tid}">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                  <div>
+                    <label style="font-size:12px;">{t('admin.team_name')}</label>
+                    <input type="text" name="name" value="{name}"
+                           required maxlength="60"
+                           style="display:block;margin-top:4px;min-width:160px;">
+                  </div>
+                  <div>
+                    <label style="font-size:12px;">{t('admin.team_color')}</label>
+                    <input type="color" name="color" value="{color}"
+                           style="display:block;margin-top:4px;width:48px;height:34px;padding:2px;">
+                  </div>
+                  <div style="flex:1;min-width:140px;">
+                    <label style="font-size:12px;">{t('admin.team_description')}</label>
+                    <input type="text" name="description" value="{desc}"
+                           maxlength="120"
+                           style="display:block;margin-top:4px;width:100%;">
+                  </div>
+                  <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                </div>
+              </form>
             </div>
           </div>
         </div>"""
 
     return f"""
     <div style="max-width:700px;margin:1.5rem auto;">
+      <div style="margin-bottom:1rem;">
+        <a href="/admin" class="btn btn-sm">← {t('nav.admin')}</a>
+      </div>
       <h2 style="margin-bottom:1.5rem;">{t('admin.teams')}</h2>
 
       <!-- Neues Team -->
@@ -14645,10 +14674,20 @@ def _render_admin_teams(teams, all_users, team_members) -> str:
       <!-- Teams Liste -->
       {team_rows if team_rows else f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>'}
 
-      <div style="margin-top:1.5rem;">
-        <a href="/admin" class="btn btn-sm">← {t('btn.back')}</a>
-      </div>
-    </div>"""
+    </div>
+    <script>
+    function accToggle(id) {{
+      var el = document.getElementById(id);
+      if (!el) return;
+      var isHidden = el.style.display === 'none' || el.style.display === '';
+      el.style.display = isHidden ? 'block' : 'none';
+      var btn = el.previousElementSibling;
+      if (btn) {{
+        var arr = btn.querySelector('.acc-arr');
+        if (arr) arr.textContent = isHidden ? '▲' : '▼';
+      }}
+    }}
+    </script>"""
 
 
 def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
@@ -16242,6 +16281,18 @@ def admin_teams():
             db.execute("DELETE FROM teams WHERE id=?", (tid,))
             db.commit()
             add_flash(t("success.team_deleted"), "success")
+        elif action == "edit":
+            tid   = int(request.form.get("team_id", 0))
+            name  = request.form.get("name", "").strip()
+            desc  = request.form.get("description", "").strip()
+            color = request.form.get("color", "#4a9eff").strip()
+            if tid and name:
+                db.execute(
+                    "UPDATE teams SET name=?, description=?, color=? WHERE id=?",
+                    (name, desc, color, tid)
+                )
+                db.commit()
+                add_flash(t("success.team_updated"), "success")
         elif action == "members":
             tid = int(request.form.get("team_id", 0))
             user_ids = request.form.getlist("user_ids")
