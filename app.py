@@ -12872,6 +12872,28 @@ def admin_home():
         "LEFT JOIN users u ON u.id=pl.locked_by WHERE pl.year=? ORDER BY pl.user_id, pl.period_type, pl.month",
         (sel_year,),
     ).fetchall()
+    teams = db.execute(
+        "SELECT t.*, COUNT(ut.user_id) as member_count "
+        "FROM teams t LEFT JOIN user_teams ut ON ut.team_id=t.id "
+        "GROUP BY t.id ORDER BY t.name"
+    ).fetchall()
+    _tm_rows = db.execute("SELECT team_id, user_id FROM user_teams").fetchall()
+    team_members: dict = {}
+    for _r in _tm_rows:
+        team_members.setdefault(_r["team_id"], []).append(_r["user_id"])
+    if _feature_enabled("staffing"):
+        plans = db.execute(
+            "SELECT sp.*, t.name as team_name FROM staffing_plans sp "
+            "JOIN teams t ON t.id=sp.team_id ORDER BY t.name, sp.name"
+        ).fetchall()
+        slots = db.execute(
+            "SELECT ss.*, sp.name as plan_name FROM staffing_slots ss "
+            "JOIN staffing_plans sp ON sp.id=ss.plan_id "
+            "ORDER BY ss.plan_id, COALESCE(ss.time_from,'99:99'), ss.sort_order"
+        ).fetchall()
+        all_assignments = db.execute("SELECT * FROM staffing_assignments").fetchall()
+    else:
+        plans = slots = all_assignments = []
     db.close()
 
     mail_cfg = _get_mail_config()
@@ -13080,6 +13102,32 @@ def admin_home():
     _new_user_btn   = f'<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">{t("admin.new_user_btn")}</button>' if _is_sysadm else ""
     _default_tab    = "system" if _is_sysadm else "users"
 
+    _all_active_users = [r for r in all_users if r["is_active"]]
+    _html_teams_accordion = f"""
+    <div class="acc" data-tab="users" id="acc-teams">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-teams-body')">
+        <span>👥 {t('admin.teams')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-teams-body">
+        <div class="acc-inner">
+          {_render_admin_teams_inline(teams, _all_active_users, team_members)}
+        </div>
+      </div>
+    </div>"""
+    _html_staffing_accordion = ""
+    if _feature_enabled("staffing"):
+        _html_staffing_accordion = f"""
+    <div class="acc" data-tab="users" id="acc-staffing">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-staffing-body')">
+        <span>📋 {t('admin.staffing')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-staffing-body">
+        <div class="acc-inner">
+          {_render_admin_staffing_inline(teams, plans, slots, all_assignments, u)}
+        </div>
+      </div>
+    </div>"""
+
     _html_tm_users = f"""
     <div class="acc" data-tab="users" id="acc-tm-users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-tm-users-body')">
@@ -13145,7 +13193,7 @@ function nuSendChange(){{
   pw.required=!send.checked;
   if(pwWrap)pwWrap.style.opacity=send.checked?'0.4':'1';
 }}
-var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl'];
+var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl','acc-teams','acc-staffing'];
 var _DEFAULT_TAB='{_default_tab}';
 function switchTab(tab){{
   document.querySelectorAll('.acc[data-tab]').forEach(function(el){{
@@ -13181,8 +13229,6 @@ window.addEventListener('DOMContentLoaded',function(){{
 <div class="tab-bar">
   {"" if not _is_sysadm else f'<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">{t("admin.tab_system")}</button>'}
   <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">{t('admin.tab_users')}</button>
-  <a href="/admin/teams" class="tab-btn" style="text-decoration:none;">👥 {t('admin.teams')}</a>
-  {"" if not _feature_enabled("staffing") else f'<a href="/admin/staffing" class="tab-btn" style="text-decoration:none;">📋 {t("admin.staffing")}</a>'}
 </div>
 
     <!-- Section 1: Benutzerverwaltung -->
@@ -13303,6 +13349,12 @@ window.addEventListener('DOMContentLoaded',function(){{
         </div>
       </div>
     </div>
+
+    <!-- Section: Teams -->
+    {_html_teams_accordion}
+
+    <!-- Section: Staffing -->
+    {_html_staffing_accordion}
 
     <!-- Section 5: Maileinstellungen -->
     <div class="acc" id="acc-mail" data-tab="system">
@@ -14690,6 +14742,117 @@ def _render_admin_teams(teams, all_users, team_members) -> str:
     </script>"""
 
 
+def _render_admin_teams_inline(teams, all_users, team_members) -> str:
+    team_rows = ""
+    for tm in teams:
+        tid = tm["id"]
+        color = _html.escape(tm["color"] or "#4a9eff")
+        name  = _html.escape(tm["name"])
+        desc  = _html.escape(tm["description"] or "")
+        cnt   = tm["member_count"]
+        member_ids = team_members.get(tid, [])
+        checkboxes = "".join(
+            f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
+            f'<input type="checkbox" name="user_ids" value="{u["id"]}"'
+            f'{" checked" if u["id"] in member_ids else ""}>'
+            f'{_html.escape(u["display_name"] or u["username"])}</label>'
+            for u in all_users
+        )
+        team_rows += f"""
+        <div class="acc" style="margin-bottom:8px;">
+          <button class="acc-hdr" type="button"
+                  onclick="accToggle('tm-body-{tid}')"
+                  style="background:none;border:1px solid var(--br);border-radius:8px;">
+            <span style="display:flex;align-items:center;gap:8px;">
+              <span style="width:14px;height:14px;border-radius:50%;
+                           background:{color};display:inline-block;flex-shrink:0;"></span>
+              <strong>{name}</strong>
+              <span style="color:var(--mu);font-size:12px;">{cnt} {t('admin.team_members')}</span>
+              {('<span style="color:var(--mu);font-size:12px;">' + desc + '</span>') if desc else ''}
+            </span>
+            <span class="acc-arr">▼</span>
+          </button>
+          <div class="acc-body" id="tm-body-{tid}">
+            <div class="acc-inner">
+              <form method="post" action="/admin/teams">
+                <input type="hidden" name="action" value="members">
+                <input type="hidden" name="team_id" value="{tid}">
+                <p style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.team_members')}</p>
+                {checkboxes}
+                <div style="margin-top:12px;">
+                  <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                </div>
+              </form>
+              <div style="margin-top:8px;">
+                <form method="post" action="/admin/teams" style="margin:0;"
+                      onsubmit="return confirm('{t('confirm.delete')}')">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="team_id" value="{tid}">
+                  <button class="btn btn-sm" type="submit"
+                          style="color:#dc2626;">{t('btn.delete')}</button>
+                </form>
+              </div>
+              <hr style="border:none;border-top:1px solid var(--br);margin:12px 0;">
+              <p style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.edit_team')}</p>
+              <form method="post" action="/admin/teams">
+                <input type="hidden" name="action" value="edit">
+                <input type="hidden" name="team_id" value="{tid}">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                  <div>
+                    <label style="font-size:12px;">{t('admin.team_name')}</label>
+                    <input type="text" name="name" value="{name}"
+                           required maxlength="60"
+                           style="display:block;margin-top:4px;min-width:160px;">
+                  </div>
+                  <div>
+                    <label style="font-size:12px;">{t('admin.team_color')}</label>
+                    <input type="color" name="color" value="{color}"
+                           style="display:block;margin-top:4px;width:48px;height:34px;padding:2px;">
+                  </div>
+                  <div style="flex:1;min-width:140px;">
+                    <label style="font-size:12px;">{t('admin.team_description')}</label>
+                    <input type="text" name="description" value="{desc}"
+                           maxlength="120"
+                           style="display:block;margin-top:4px;width:100%;">
+                  </div>
+                  <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>"""
+
+    return f"""
+      <!-- Neues Team -->
+      <div style="background:var(--ca);border:1px solid var(--br);border-radius:10px;
+                  padding:16px;margin-bottom:1.5rem;">
+        <h3 style="margin:0 0 12px;">{t('admin.add_team')}</h3>
+        <form method="post" action="/admin/teams">
+          <input type="hidden" name="action" value="create">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+            <div>
+              <label style="font-size:12px;">{t('admin.team_name')} *</label>
+              <input type="text" name="name" required maxlength="60"
+                     style="display:block;margin-top:4px;min-width:180px;">
+            </div>
+            <div>
+              <label style="font-size:12px;">{t('admin.team_color')}</label>
+              <input type="color" name="color" value="#4a9eff"
+                     style="display:block;margin-top:4px;width:48px;height:34px;padding:2px;">
+            </div>
+            <div style="flex:1;min-width:160px;">
+              <label style="font-size:12px;">{t('admin.team_description')}</label>
+              <input type="text" name="description" maxlength="120"
+                     style="display:block;margin-top:4px;width:100%;">
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+          </div>
+        </form>
+      </div>
+      <!-- Teams Liste -->
+      {team_rows if team_rows else f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>'}"""
+
+
 def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
     assigned = {}
     assigned_lead = {}
@@ -14988,6 +15151,368 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
         <a href="/staffing" class="btn btn-sm" style="margin-left:8px;">📋 {t('nav.staffing')}</a>
       </div>
     </div>
+    <script>
+    function allowDrop(e){{e.preventDefault();}}
+    function drag(e){{
+      e.dataTransfer.setData("userId",e.target.dataset.userId);
+    }}
+    function drop(e,slotId,target){{
+      e.preventDefault();
+      var uid=e.dataTransfer.getData("userId");
+      var card=document.querySelector('[data-user-id="'+uid+'"]');
+      if(card)e.currentTarget.appendChild(card);
+      e.currentTarget.classList.remove("dragover");
+    }}
+    document.querySelectorAll(".droptarget").forEach(function(el){{
+      el.addEventListener("dragover",function(e){{e.preventDefault();el.classList.add("dragover");}});
+      el.addEventListener("dragleave",function(){{el.classList.remove("dragover");}});
+    }});
+    function toggleLead(btn){{
+      var card=btn.closest('.user-card');
+      var isLead=card.dataset.isLead==='1';
+      card.dataset.isLead=isLead?'0':'1';
+      btn.textContent=isLead?'○':'👑';
+      btn.style.color=isLead?'var(--mu)':'#eab308';
+    }}
+    function saveAssignments(slotId){{
+      var assigned=document.querySelectorAll("#assigned-"+slotId+" .user-card");
+      var userIds=[].map.call(assigned,function(c){{return c.dataset.userId;}});
+      var leadIds=[].map.call(assigned,function(c){{return c.dataset.isLead==='1'?c.dataset.userId:null;}}).filter(Boolean);
+      var form=document.createElement("form");
+      form.method="POST";form.action="/admin/staffing";
+      [["action","save_assignments"],["slot_id",slotId]].forEach(function(p){{
+        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
+      }});
+      userIds.forEach(function(uid){{
+        var i=document.createElement("input");i.type="hidden";i.name="user_ids";i.value=uid;form.appendChild(i);
+      }});
+      leadIds.forEach(function(uid){{
+        var i=document.createElement("input");i.type="hidden";i.name="lead_user_ids";i.value=uid;form.appendChild(i);
+      }});
+      document.body.appendChild(form);form.submit();
+    }}
+    function deleteSlot(slotId){{
+      if(!confirm("{t('confirm.delete')}"))return;
+      var form=document.createElement("form");
+      form.method="POST";form.action="/admin/staffing";
+      [["action","delete_slot"],["slot_id",slotId]].forEach(function(p){{
+        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
+      }});
+      document.body.appendChild(form);form.submit();
+    }}
+    function toggleSlotType(sel,pid){{
+      var normal=document.getElementById('wd-normal-'+pid);
+      var special=document.getElementById('wd-special-'+pid);
+      if(!normal||!special)return;
+      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
+      else{{normal.style.display='block';special.style.display='none';}}
+    }}
+    document.addEventListener('change',function(e){{
+      if(!e.target.name||!e.target.name.startsWith('wd_'))return;
+      var f=e.target.closest('form');if(!f)return;
+      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
+      var pid=pEl.value;var checked=[];
+      f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+      var hid=document.getElementById('wd-val-'+pid);if(hid)hid.value=checked.join(',');
+    }});
+    document.addEventListener('change',function(e){{
+      if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
+      var f=e.target.closest('form');if(!f)return;
+      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
+      var pid=pEl.value;var checked=[];
+      f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+      var hid=document.getElementById('nth-val-'+pid);if(hid)hid.value=checked.join(',');
+    }});
+    </script>"""
+
+
+def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> str:
+    assigned = {}
+    assigned_lead = {}
+    for a in all_assignments:
+        assigned.setdefault(a["slot_id"], set()).add(a["user_id"])
+        if int(a["is_lead"] or 0):
+            assigned_lead.setdefault(a["slot_id"], set()).add(a["user_id"])
+
+    slots_by_plan = {}
+    for s in slots:
+        slots_by_plan.setdefault(s["plan_id"], []).append(s)
+
+    _WD_MAP = {0: t('wd.mon'), 1: t('wd.tue'), 2: t('wd.wed'),
+               3: t('wd.thu'), 4: t('wd.fri'), 5: t('wd.sat'), 6: t('wd.sun')}
+    _STYPE = {"vm": t('staffing.slot_vm'), "nm": t('staffing.slot_nm'),
+              "special": t('staffing.slot_special')}
+
+    def _wd_label(slot):
+        if slot["slot_type"] == "special":
+            wd = _WD_MAP.get(int(slot["special_weekday"] or 0), "")
+            weeks = slot["nth_week"] or ""
+            return f"{wd} ({weeks}. Wo.)"
+        days = [_WD_MAP.get(int(x), "") for x in str(slot["weekdays"]).split(",")]
+        return ", ".join(days)
+
+    plan_html = ""
+    plans_by_team = {}
+    for p in plans:
+        plans_by_team.setdefault(p["team_id"], []).append(p)
+
+    for tm in teams:
+        tid = tm["id"]
+        team_plans = plans_by_team.get(tid, [])
+        team_color = _html.escape(tm["color"] or "#4a9eff")
+
+        db_tmp = connect()
+        team_user_rows = db_tmp.execute(
+            "SELECT u.id, u.username, u.display_name FROM users u "
+            "JOIN user_teams ut ON ut.user_id=u.id "
+            "WHERE ut.team_id=? AND u.is_active=1 ORDER BY u.display_name",
+            (tid,)
+        ).fetchall()
+        db_tmp.close()
+
+        plans_html = ""
+        for p in team_plans:
+            pid = p["id"]
+            pname = _html.escape(p["name"])
+            plan_slots = slots_by_plan.get(pid, [])
+
+            slots_html = ""
+            for s in plan_slots:
+                sid = s["id"]
+                slabel = _html.escape(s["label"])
+                stype_label = _STYPE.get(s["slot_type"], s["slot_type"])
+                wd_str = _wd_label(s)
+                assigned_ids = assigned.get(sid, set())
+
+                available_cards   = ""
+                assigned_cards    = ""
+                assigned_lead_ids = assigned_lead.get(sid, set())
+                for tu in team_user_rows:
+                    uname = _html.escape(tu["display_name"] or tu["username"])
+                    if tu["id"] in assigned_ids:
+                        is_u_lead  = tu["id"] in assigned_lead_ids
+                        lead_icon  = "👑" if is_u_lead else "○"
+                        lead_style = "color:#eab308;" if is_u_lead else "color:var(--mu);"
+                        card = (
+                            f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
+                            f'data-is-lead="{1 if is_u_lead else 0}" ondragstart="drag(event)">'
+                            f'<span class="user-dot" style="background:{team_color}"></span>'
+                            f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;'
+                            f'white-space:nowrap;">{uname}</span>'
+                            f'<button type="button" onclick="toggleLead(this)" '
+                            f'style="border:none;background:none;cursor:pointer;font-size:13px;'
+                            f'padding:0 2px;{lead_style}flex-shrink:0;" '
+                            f'title="{t("staffing.is_lead")}">{lead_icon}</button></div>'
+                        )
+                        assigned_cards += card
+                    else:
+                        card = (
+                            f'<div class="user-card" draggable="true" data-user-id="{tu["id"]}" '
+                            f'ondragstart="drag(event)">'
+                            f'<span class="user-dot" style="background:{team_color}"></span>'
+                            f'{uname}</div>'
+                        )
+                        available_cards += card
+
+                no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
+
+                _srole       = s["slot_role"] or "staff"
+                _srole_label = t("staffing.role_lead") if _srole == "lead" else t("staffing.role_staff")
+                _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
+                _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
+                slots_html += f"""
+                <div class="slot-card" data-slot-id="{sid}">
+                  <div class="slot-header">
+                    <span class="slot-label"><strong>{slabel}</strong></span>
+                    <span class="slot-type-badge" style="font-size:11px;background:var(--ca);
+                          border-radius:4px;padding:2px 6px;">{stype_label}</span>
+                    <span style="font-size:11px;background:{_srole_bg};color:{_srole_color};
+                          border-radius:4px;padding:2px 6px;">{_srole_label}</span>
+                    <span class="slot-days" style="font-size:12px;color:var(--mu);">{wd_str}</span>
+                    {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
+                    <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
+                    {f'<span style="font-size:12px;color:#eab308;">👑≥{s["min_lead"]}</span>' if (s["min_lead"] or 0) > 0 else ""}
+                    <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
+                            onclick="deleteSlot({sid})">×</button>
+                  </div>
+                  {no_members}
+                  <div class="slot-body">
+                    <div class="assign-col">
+                      <h6>{t('staffing.available')}</h6>
+                      <div class="droptarget" id="available-{sid}"
+                           ondragover="allowDrop(event)"
+                           ondrop="drop(event,{sid},'available')">
+                        {available_cards}
+                      </div>
+                    </div>
+                    <div class="assign-col">
+                      <h6>{t('staffing.assigned')}</h6>
+                      <div class="droptarget" id="assigned-{sid}"
+                           ondragover="allowDrop(event)"
+                           ondrop="drop(event,{sid},'assigned')">
+                        {assigned_cards}
+                      </div>
+                    </div>
+                  </div>
+                  <button class="btn primary btn-sm" style="margin-top:8px;"
+                          onclick="saveAssignments({sid})">{t('btn.save')}</button>
+                </div>"""
+
+            wd_checkboxes = "".join(
+                f'<label style="font-size:12px;display:flex;align-items:center;gap:4px;">'
+                f'<input type="checkbox" name="wd_{i}" value="{i}" checked> {_WD_MAP[i]}</label>'
+                for i in range(5)
+            )
+            plans_html += f"""
+            <div style="background:var(--bg);border:1px solid var(--br);border-radius:10px;
+                         padding:14px;margin-bottom:12px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                <strong style="font-size:15px;">{pname}</strong>
+                <span style="font-size:12px;color:var(--mu);">{p["description"] or ""}</span>
+              </div>
+              {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
+              <details style="margin-top:8px;">
+                <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
+                  + {t('staffing.add_slot')}
+                </summary>
+                <form method="post" action="/admin/staffing"
+                      style="margin-top:10px;padding:12px;background:var(--ca);
+                             border-radius:8px;border:1px solid var(--br);">
+                  <input type="hidden" name="action" value="create_slot">
+                  <input type="hidden" name="plan_id" value="{pid}">
+                  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_label')} *</label>
+                      <input type="text" name="label" required maxlength="60"
+                             placeholder="{t('staffing.slot_vm')}"
+                             style="display:block;margin-top:4px;min-width:140px;">
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_type')}</label>
+                      <select name="slot_type" style="display:block;margin-top:4px;"
+                              onchange="toggleSlotType(this,'{pid}')">
+                        <option value="vm">{t('staffing.slot_vm')}</option>
+                        <option value="nm">{t('staffing.slot_nm')}</option>
+                        <option value="special">{t('staffing.slot_special')}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.min_staff')}</label>
+                      <input type="number" name="min_staff" value="1" min="1" max="99"
+                             style="display:block;margin-top:4px;width:70px;">
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.slot_role')}</label>
+                      <select name="slot_role" style="display:block;margin-top:4px;">
+                        <option value="staff">{t('staffing.role_staff')}</option>
+                        <option value="lead">{t('staffing.role_lead')}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">{t('staffing.min_lead')}</label>
+                      <input type="number" name="min_lead" value="0" min="0" max="99"
+                             style="display:block;margin-top:4px;width:70px;">
+                      <div style="font-size:10px;color:var(--mu);margin-top:2px;">{t('staffing.min_lead_hint')}</div>
+                    </div>
+                    <div>
+                      <label style="font-size:12px;">Von – Bis</label>
+                      <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+                        <input type="time" name="time_from" step="900" style="width:96px;">
+                        <span style="color:var(--mu);">–</span>
+                        <input type="time" name="time_to" step="900" style="width:96px;">
+                      </div>
+                    </div>
+                  </div>
+                  <div id="wd-normal-{pid}" style="margin-bottom:10px;">
+                    <label style="font-size:12px;display:block;margin-bottom:4px;">{t('staffing.weekdays')}</label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;">{wd_checkboxes}</div>
+                    <input type="hidden" name="weekdays" id="wd-val-{pid}" value="0,1,2,3,4">
+                  </div>
+                  <div id="wd-special-{pid}" style="display:none;margin-bottom:10px;">
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                      <div>
+                        <label style="font-size:12px;">{t('wd.weekday')}</label>
+                        <select name="special_weekday" style="display:block;margin-top:4px;">
+                          {"".join(f'<option value="{i}">{_WD_MAP[i]}</option>' for i in range(7))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style="font-size:12px;">{t('staffing.nth_week')}</label>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
+                          {"".join(f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;"><input type="checkbox" name="nth_w_{i}" value="{i}"> {i}.</label>' for i in range(1,6))}
+                        </div>
+                        <input type="hidden" name="nth_week" id="nth-val-{pid}" value="">
+                      </div>
+                    </div>
+                  </div>
+                  <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+                </form>
+              </details>
+            </div>"""
+
+        plan_html += f"""
+        <div style="margin-bottom:1.5rem;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <span style="width:12px;height:12px;border-radius:50%;
+                         background:{team_color};display:inline-block;"></span>
+            <strong style="font-size:16px;">{_html.escape(tm["name"])}</strong>
+          </div>
+          {plans_html if plans_html else f'<p style="font-size:13px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_plans")}</p>'}
+          <details>
+            <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);margin-bottom:4px;">
+              + {t('staffing.add_plan')}
+            </summary>
+            <form method="post" action="/admin/staffing"
+                  style="margin-top:8px;padding:12px;background:var(--ca);
+                         border-radius:8px;border:1px solid var(--br);">
+              <input type="hidden" name="action" value="create_plan">
+              <input type="hidden" name="team_id" value="{tid}">
+              <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+                <div>
+                  <label style="font-size:12px;">{t('staffing.plan_name')} *</label>
+                  <input type="text" name="name" required maxlength="80"
+                         style="display:block;margin-top:4px;min-width:160px;">
+                </div>
+                <div style="flex:1;min-width:140px;">
+                  <label style="font-size:12px;">Beschreibung</label>
+                  <input type="text" name="description" maxlength="120"
+                         style="display:block;margin-top:4px;width:100%;">
+                </div>
+                <div>
+                  <label style="font-size:12px;">{t('staffing.default_min_staff')}</label>
+                  <input type="number" name="default_min_staff" value="2" min="1" max="99"
+                         style="display:block;margin-top:4px;width:70px;">
+                </div>
+                <div style="display:flex;align-items:flex-end;padding-bottom:6px;">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                    <input type="checkbox" name="require_lead" value="1">
+                    {t('staffing.require_lead')}
+                  </label>
+                </div>
+                <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+              </div>
+            </form>
+          </details>
+        </div>"""
+
+    no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>' if not teams else ""
+
+    return f"""
+    <style>
+    .slot-card{{border:1px solid var(--br);border-radius:8px;padding:1rem;margin-bottom:1rem;}}
+    .slot-header{{display:flex;gap:8px;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;}}
+    .slot-body{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}}
+    @media(max-width:500px){{.slot-body{{grid-template-columns:1fr;}}}}
+    .assign-col h6{{font-size:12px;color:var(--mu);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;}}
+    .droptarget{{min-height:80px;background:var(--ca);border:2px dashed var(--br);border-radius:6px;padding:8px;transition:border-color .15s,background .15s;}}
+    .droptarget.dragover{{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 10%,var(--ca));}}
+    .user-card{{background:var(--bg);border:1px solid var(--br);border-radius:4px;padding:4px 8px;margin-bottom:4px;cursor:grab;display:flex;align-items:center;gap:6px;font-size:13px;user-select:none;}}
+    .user-card:hover{{opacity:.85;}}
+    .user-card:active{{cursor:grabbing;}}
+    .user-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0;}}
+    </style>
+    {no_teams_hint}
+    {plan_html}
     <script>
     function allowDrop(e){{e.preventDefault();}}
     function drag(e){{
@@ -16305,28 +16830,10 @@ def admin_teams():
             db.commit()
             add_flash(t("success.team_updated"), "success")
         db.close()
-        return redirect(url_for("admin_teams"))
+        return redirect(url_for("admin_home") + "#acc-teams")
 
-    teams = db.execute("""
-        SELECT t.*, COUNT(ut.user_id) as member_count
-        FROM teams t
-        LEFT JOIN user_teams ut ON ut.team_id = t.id
-        GROUP BY t.id ORDER BY t.name
-    """).fetchall()
-    all_users = db.execute(
-        "SELECT id, username, display_name FROM users "
-        "WHERE is_active=1 ORDER BY display_name, username"
-    ).fetchall()
-    team_members = {}
-    for tm in teams:
-        rows = db.execute(
-            "SELECT user_id FROM user_teams WHERE team_id=?", (tm["id"],)
-        ).fetchall()
-        team_members[tm["id"]] = [r["user_id"] for r in rows]
     db.close()
-
-    body = _render_admin_teams(teams, all_users, team_members)
-    return render_template_string(layout(t("admin.teams"), body, current_user(), APP_VERSION))
+    return redirect(url_for("admin_home") + "?tab=users")
 
 
 _MONTH_NAMES = ["", "Januar", "Februar", "März", "April", "Mai", "Juni",
@@ -17340,26 +17847,10 @@ def admin_staffing():
             add_flash(t("success.assignments_saved"), "success")
 
         db.close()
-        return redirect(url_for("admin_staffing"))
+        return redirect(url_for("admin_home") + "#acc-staffing")
 
-    teams   = db.execute("SELECT * FROM teams ORDER BY name").fetchall()
-    plans   = db.execute("""
-        SELECT sp.*, t.name as team_name, t.color as team_color
-        FROM staffing_plans sp
-        JOIN teams t ON t.id = sp.team_id
-        ORDER BY t.name, sp.name
-    """).fetchall()
-    slots   = db.execute("""
-        SELECT ss.*, sp.name as plan_name
-        FROM staffing_slots ss
-        JOIN staffing_plans sp ON sp.id = ss.plan_id
-        ORDER BY ss.plan_id, COALESCE(ss.time_from,'99:99'), ss.sort_order
-    """).fetchall()
-    all_assignments = db.execute("SELECT * FROM staffing_assignments").fetchall()
     db.close()
-
-    body = _render_admin_staffing(teams, plans, slots, all_assignments, u)
-    return render_template_string(layout(t("admin.staffing"), body, u, APP_VERSION))
+    return redirect(url_for("admin_home") + "?tab=users")
 
 
 @app.post("/admin/features")
