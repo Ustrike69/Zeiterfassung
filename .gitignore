@@ -18,4 +18,4 @@ venv/
 .DS_Store
 
 # Secrets
-.env
+.envbackups/
