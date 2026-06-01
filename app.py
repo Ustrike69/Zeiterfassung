@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.0"
+APP_VERSION = "v3.0.0.dev14"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14594,17 +14594,19 @@ def _render_admin_teams(teams, all_users, team_members) -> str:
                 <input type="hidden" name="team_id" value="{tid}">
                 <p style="font-size:13px;font-weight:600;margin-bottom:8px;">{t('admin.team_members')}</p>
                 {checkboxes}
-                <div style="display:flex;gap:8px;margin-top:12px;">
+                <div style="margin-top:12px;">
                   <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
-                  <form method="post" action="/admin/teams" style="margin:0;">
-                    <input type="hidden" name="action" value="delete">
-                    <input type="hidden" name="team_id" value="{tid}">
-                    <button class="btn btn-sm" type="submit"
-                            style="color:#dc2626;"
-                            onclick="return confirm('{t('confirm.delete')}')">{t('btn.delete')}</button>
-                  </form>
                 </div>
               </form>
+              <div style="margin-top:8px;">
+                <form method="post" action="/admin/teams" style="margin:0;"
+                      onsubmit="return confirm('{t('confirm.delete')}')">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="team_id" value="{tid}">
+                  <button class="btn btn-sm" type="submit"
+                          style="color:#dc2626;">{t('btn.delete')}</button>
+                </form>
+              </div>
             </div>
           </div>
         </div>"""
