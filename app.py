@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.1.dev2"
+APP_VERSION = "v3.0.2.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -3322,7 +3322,7 @@ def index():
 </style>
 
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-      <a class="btn primary btn-lg" href="/day/{today.isoformat()}#new-block"
+      <a class="btn btn-lg" href="/day/{today.isoformat()}#new-block"
          style="flex:1;text-align:center;min-width:140px;">
         {t("dashboard.time_tracking")}
       </a>
@@ -3330,11 +3330,11 @@ def index():
          style="flex:1;text-align:center;min-width:140px;">
         {t("dashboard.absences")}
       </a>
-      <a class="btn btn-lg" href="/business-trips"
+      <a class="btn btn-lg" href="/business_trips"
          style="flex:1;text-align:center;min-width:140px;">
         {t("dashboard.business_trips")}
       </a>
-      <a class="btn primary btn-lg" href="/calendar"
+      <a class="btn btn-lg" href="/calendar"
          style="flex:1;text-align:center;min-width:140px;">
         {t("dashboard.calendar")}
       </a>
@@ -6968,8 +6968,8 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
 
       <!-- Left column: Zeit -->
       <div class="day-col">
-        <div class="day-sec" id="new-block">
-          <div class="day-sec-hdr">Zeitblock hinzufügen</div>
+        <div class="day-sec">
+          <div id="new-block" class="day-sec-hdr">{t('day.add_block')}</div>
           <div class="day-sec-body">
             {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
           </div>
@@ -7005,14 +7005,15 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
       {_business_trip_section_compact(day, trip, locked=day_locked)}
     </div>
     <script>
-    if (window.location.hash === '#new-block') {{
+    (function() {{
+      if (window.location.hash !== '#new-block') return;
       var el = document.getElementById('new-block');
-      if (el) {{
-        el.scrollIntoView({{behavior: 'smooth', block: 'start'}});
-        var tin = document.getElementById('tin_add');
-        if (tin) setTimeout(function() {{ tin.focus(); }}, 300);
-      }}
-    }}
+      if (!el) return;
+      el.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+      el.style.outline = '2px solid var(--ac)';
+      el.style.borderRadius = '6px';
+      setTimeout(function() {{ el.style.outline = ''; }}, 2000);
+    }})();
     </script>
     """
     return render_template_string(layout(t("day.title"), body, u, APP_VERSION, show_back=False))
