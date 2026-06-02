@@ -6892,14 +6892,14 @@ def day_detail(day: str):
             <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.time_in')}</label>
             <input class="tin" id="tin_add" name="time_in" type="time"
                    list="time_suggestions" required
-                   style="width:auto;min-width:90px;max-width:130px;font-size:1rem;font-weight:400;padding:5px 8px;border-radius:4px;border:1px solid var(--br);background:var(--surface);color:var(--fg);">
+                   style="width:120px;font-size:1.2rem;padding:6px 8px;border-radius:6px;">
           </div>
           <div style="padding-bottom:6px;color:var(--mu);">–</div>
           <div>
             <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.time_out')}</label>
             <input id="tout_add" name="time_out" type="time"
                    list="time_suggestions" required
-                   style="width:auto;min-width:90px;max-width:130px;font-size:1rem;font-weight:400;padding:5px 8px;border-radius:4px;border:1px solid var(--br);background:var(--surface);color:var(--fg);">
+                   style="width:120px;font-size:1.2rem;padding:6px 8px;border-radius:6px;">
           </div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px;">
