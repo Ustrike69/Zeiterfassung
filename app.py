@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev1"
+APP_VERSION = "v3.0.3.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -13755,7 +13755,10 @@ def admin_home():
     def _tab(html: str, tab: str) -> str:
         return html.replace('<div class="acc"', f'<div class="acc" data-tab="{tab}"', 1)
 
-    _html_absences  = _tab(_render_admin_absences_section(), "users")
+    _is_timemgr = is_timemanager(u)
+    _is_approver = bool(u.get("is_approver"))
+
+    _html_absences  = _tab(_render_admin_absences_section(), "reporting")
     _html_per_user  = _render_per_user_settings_section()
     _html_overtime  = _tab(_render_admin_overtime_section(), "users")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
@@ -13766,11 +13769,25 @@ def admin_home():
     _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
     _html_features  = _tab(_render_features_section(), "system") if _is_sysadm else ""
     _new_user_btn   = f'<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">{t("admin.new_user_btn")}</button>' if _is_sysadm else ""
-    _default_tab    = "system" if _is_sysadm else "users"
+
+    # 4-Tab-Struktur
+    _tabs = []
+    if _is_sysadm:
+        _tabs.append(("system", t("admin.tab_system")))
+    if _is_sysadm or _is_timemgr:
+        _tabs.append(("users", t("admin.tab_users")))
+        _tabs.append(("reporting", t("admin.tab_reporting")))
+    if _is_sysadm or _is_timemgr or _is_approver:
+        _tabs.append(("planning", t("admin.tab_planning")))
+    _tab_html = "".join(
+        f'<button class="tab-btn" data-tab="{tid}" type="button" onclick="switchTab(\'{tid}\')">{tlabel}</button>'
+        for tid, tlabel in _tabs
+    )
+    _default_tab = _tabs[0][0] if _tabs else "system"
 
     _all_active_users = [r for r in all_users if r["is_active"]]
     _html_teams_accordion = f"""
-    <div class="acc" data-tab="users" id="acc-teams">
+    <div class="acc" data-tab="planning" id="acc-teams">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-teams-body')">
         <span>👥 {t('admin.teams')}</span><span class="acc-arr">▼</span>
       </button>
@@ -13783,7 +13800,7 @@ def admin_home():
     _html_staffing_accordion = ""
     if _feature_enabled("staffing"):
         _html_staffing_accordion = f"""
-    <div class="acc" data-tab="users" id="acc-staffing">
+    <div class="acc" data-tab="planning" id="acc-staffing">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-staffing-body')">
         <span>📋 {t('admin.staffing')}</span><span class="acc-arr">▼</span>
       </button>
@@ -13859,7 +13876,15 @@ function nuSendChange(){{
   pw.required=!send.checked;
   if(pwWrap)pwWrap.style.opacity=send.checked?'0.4':'1';
 }}
-var _USER_ACCS=['acc-absoverview','acc-overtime','acc-zeit','acc-urlaub','acc-abschl','acc-teams','acc-staffing'];
+var _TAB_MAP={{
+  'acc-mail':'system','acc-telegram':'system',
+  'acc-appearance':'system','acc-regional':'system',
+  'acc-backup':'system','acc-update':'system','acc-features':'system',
+  'acc-user':'users','acc-overtime':'users',
+  'acc-urlaub':'reporting','acc-abschl':'reporting','acc-zeit':'reporting',
+  'acc-absoverview':'reporting',
+  'acc-teams':'planning','acc-staffing':'planning'
+}};
 var _DEFAULT_TAB='{_default_tab}';
 function switchTab(tab){{
   document.querySelectorAll('.acc[data-tab]').forEach(function(el){{
@@ -13872,13 +13897,9 @@ function switchTab(tab){{
 }}
 window.addEventListener('DOMContentLoaded',function(){{
   var h=(window.location.hash||'').replace('#','');
-  var tab;
-  if(_DEFAULT_TAB==='users'){{
-    tab='users';
-  }}else{{
-    tab=sessionStorage.getItem('adminTab')||_DEFAULT_TAB;
-    if(h&&_USER_ACCS.indexOf(h)>=0)tab='users';
-  }}
+  var tab=sessionStorage.getItem('adminTab')||_DEFAULT_TAB;
+  if(h&&_TAB_MAP[h])tab=_TAB_MAP[h];
+  if(!tab)tab=_DEFAULT_TAB;
   switchTab(tab);
   var ss=sessionStorage.getItem('openAcc');
   if(ss)sessionStorage.removeItem('openAcc');
@@ -13892,13 +13913,10 @@ window.addEventListener('DOMContentLoaded',function(){{
 }});
 </script>
 
-<div class="tab-bar">
-  {"" if not _is_sysadm else f'<button class="tab-btn" data-tab="system" type="button" onclick="switchTab(\'system\')">{t("admin.tab_system")}</button>'}
-  <button class="tab-btn" data-tab="users" type="button" onclick="switchTab('users')">{t('admin.tab_users')}</button>
-</div>
+<div class="tab-bar">{_tab_html}</div>
 
     <!-- Section 1: Benutzerverwaltung -->
-    <div class="acc" id="acc-user" data-tab="system">
+    <div class="acc" id="acc-user" data-tab="users">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-user-body')">
         <span>{t('admin.acc_user_mgmt')}</span><span class="acc-arr">▼</span>
       </button>
@@ -13958,7 +13976,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     {_html_tm_users}
 
     <!-- Section 2: Zeitschemas -->
-    <div class="acc" id="acc-zeit" data-tab="users">
+    <div class="acc" id="acc-zeit" data-tab="reporting">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit-body')">
         <span>{t('admin.acc_schedules')}</span><span class="acc-arr">▼</span>
       </button>
@@ -13976,7 +13994,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 3: Urlaubsverwaltung -->
-    <div class="acc" id="acc-urlaub" data-tab="users">
+    <div class="acc" id="acc-urlaub" data-tab="reporting">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
         <span>{t('admin.acc_vacation')}</span><span class="acc-arr">▼</span>
       </button>
@@ -13994,7 +14012,7 @@ window.addEventListener('DOMContentLoaded',function(){{
     </div>
 
     <!-- Section 4: Abschlüsse -->
-    <div class="acc" id="acc-abschl" data-tab="users">
+    <div class="acc" id="acc-abschl" data-tab="reporting">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-abschl-body')">
         <span>{t('periods.title')}</span><span class="acc-arr">▼</span>
       </button>

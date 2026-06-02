@@ -803,8 +803,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.pw_reset_title":      "Zufallspasswort setzen und per Mail senden",
 
         # ── Admin tab bar ─────────────────────────────────────────────
-        "admin.tab_system":   "⚙ Systemeinstellungen",
-        "admin.tab_users":    "👥 Benutzerübersichten",
+        "admin.tab_system":    "⚙ Systemeinstellungen",
+        "admin.tab_users":     "👤 Benutzereinstellungen",
+        "admin.tab_reporting": "📊 Reporting",
+        "admin.tab_planning":  "📋 Planung",
 
         # ── Admin accordion headers ───────────────────────────────────
         "admin.acc_user_mgmt":   "👥 Benutzerverwaltung",
@@ -2013,8 +2015,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "admin.pw_reset_title":      "Set random password and send by e-mail",
 
         # ── Admin tab bar ─────────────────────────────────────────────
-        "admin.tab_system":   "⚙ System Settings",
-        "admin.tab_users":    "👥 User Overviews",
+        "admin.tab_system":    "⚙ System settings",
+        "admin.tab_users":     "👤 User settings",
+        "admin.tab_reporting": "📊 Reporting",
+        "admin.tab_planning":  "📋 Planning",
 
         # ── Admin accordion headers ───────────────────────────────────
         "admin.acc_user_mgmt":   "👥 User Management",
