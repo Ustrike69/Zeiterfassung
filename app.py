@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.5.dev1"
+APP_VERSION = "v3.0.5.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -12780,23 +12780,24 @@ def admin_users_edit(user_id: int):
     <!-- Zeitschema (inline bearbeitbar) -->
     <div class="card" id="schedule">
       <h3 style="margin-top:0;">🕐 {t('admin.acc_schedules')}</h3>
-      <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
-          <input type="checkbox" form="sched-form-{user_id}"
-                 name="allow_self_edit" value="1"
-                 {"checked" if _act_allow_self else ""}>
+      <form method="post" action="/admin/users/{user_id}/edit" style="margin-bottom:10px;">
+        <input type="hidden" name="_section" value="allow_self_edit">
+        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" name="allow_self_edit" value="1"
+                 {"checked" if _act_allow_self else ""}
+                 onchange="this.form.submit()">
           {t('admin.schedule_allow_self_edit')}
         </label>
-      </div>
-      <form id="sched-form-{user_id}" method="post"
-            action="/admin/schedule/{user_id}/edit/{_act_sched_id or 'new'}">
-        <input type="hidden" name="valid_from" value="{_act_sched_vf}">
-        {_sched_daily_blocks_html(_act_sched_id, "daily")}
-        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
-          <a class="btn btn-sm" href="/admin/schedule/{user_id}/edit/new">+ {t('settings.sched_add_new')}</a>
-        </div>
       </form>
+      {_sched_form_html(
+          dict(_act_sched) if _act_sched else _normalize_schedule({}),
+          f"/admin/schedule/{user_id}/edit/{_act_sched_id or 'new'}",
+          f"/admin/users/{user_id}/edit#schedule"
+      )}
+      <a class="btn btn-sm" href="/admin/schedule/{user_id}/edit/new"
+         style="margin-top:6px;display:inline-block;">
+        + {t('settings.sched_add_new')}
+      </a>
       <hr style="margin:12px 0;">
       <h4 style="margin:0 0 8px;font-size:13px;">{t('settings.badge_history')}</h4>
       <table style="width:100%;">
@@ -12965,6 +12966,21 @@ def admin_users_edit_post(user_id: int):
     )
     db.commit()
     db.close()
+
+    # allow_self_edit toggle for active schedule
+    if request.form.get("_section") == "allow_self_edit":
+        allow = 1 if request.form.get("allow_self_edit") else 0
+        db = connect()
+        db.execute(
+            "UPDATE user_schedules SET allow_self_edit=? "
+            "WHERE user_id=? AND id=("
+            "SELECT id FROM user_schedules WHERE user_id=? "
+            "AND valid_from<=? ORDER BY valid_from DESC LIMIT 1)",
+            (allow, user_id, user_id, datetime.date.today().isoformat())
+        )
+        db.commit()
+        db.close()
+        return redirect(f"/admin/users/{user_id}/edit#schedule")
 
     # Vacation carryover exception (via _section=carryover)
     if request.form.get("_section") == "carryover":
