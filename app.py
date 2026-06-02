@@ -13278,12 +13278,37 @@ def admin_schedule_edit(user_id: int, schedule_id: str):
     action = f"/admin/schedule/{user_id}/edit/{schedule_id}"
     back = f"/admin/users/{user_id}/edit"
 
+    sid_val = None if is_new else (int(schedule_id) if schedule_id != "new" else None)
+    allow_edit = int(sched.get("allow_self_edit") or 1)
+    vf = sched.get("valid_from") or datetime.date.today().isoformat()
+
     body = f"""
     {flash_html()}
     {FORM_ASSETS_JS}
+    <div style="margin-bottom:12px;">
+      <a href="{back}" class="btn btn-sm">← {t('btn.back')}</a>
+    </div>
     <div class="card">
       <h3 style="margin-top:0;">{title}</h3>
-      {_sched_form_html(sched, action, back)}
+      <form method="post" action="{action}">
+        <div style="margin-bottom:12px;">
+          <label style="font-size:12px;color:var(--mu);">{t('settings.schedule_valid')}</label>
+          <input type="date" name="valid_from" value="{vf}"
+                 style="margin-left:8px;font-size:13px;padding:4px 8px;border-radius:4px;">
+        </div>
+        {_sched_daily_blocks_html(sid_val, "daily")}
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--br);">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" name="allow_self_edit" value="1"
+                   {"checked" if allow_edit else ""}>
+            {t('admin.schedule_allow_self_edit')}
+          </label>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:8px;">
+          <button class="btn primary" type="submit">{t('btn.save')}</button>
+          <a class="btn" href="{back}">{t('btn.cancel')}</a>
+        </div>
+      </form>
     </div>
     """
     return render_template_string(layout(title, body, u, APP_VERSION))
@@ -13299,28 +13324,39 @@ def admin_schedule_edit_post(user_id: int, schedule_id: str):
     if not target:
         abort(404)
 
-    sched = _parse_sched_form(request.form)
-    if not sched["valid_from"]:
-        add_flash(t("flash.error.invalid_date"), "error")
-        return redirect(f"/admin/schedule/{user_id}/edit/{schedule_id}")
+    valid_from = (request.form.get("valid_from") or "").strip() or datetime.date.today().isoformat()
+    allow_self = 1 if request.form.get("allow_self_edit") else 0
+    blocks = _parse_sched_blocks_from_form(request.form)
+    mask = sum(1 << wd for wd in blocks.keys()) if blocks else 0
 
-    # When editing an existing entry, delete the old row first (handles valid_from changes)
+    db = connect()
     if schedule_id != "new":
         try:
             sid = int(schedule_id)
-            db = connect()
-            db.execute("DELETE FROM user_schedules WHERE id=? AND user_id=?", (sid, user_id))
+            db.execute(
+                "UPDATE user_schedules SET valid_from=?, workdays_mask=?, allow_self_edit=? WHERE id=? AND user_id=?",
+                (valid_from, mask, allow_self, sid, user_id)
+            )
             db.commit()
-            db.close()
         except (ValueError, Exception):
-            pass
-
-    sid = _sched_save_to_db(user_id, sched)
-    if request.form.get("use_daily_blocks"):
-        _sched_save_blocks(sid, _parse_sched_blocks_from_form(request.form))
+            db.close()
+            add_flash(t("flash.error.invalid_date"), "error")
+            return redirect(f"/admin/schedule/{user_id}/edit/{schedule_id}")
     else:
-        _sched_save_blocks(sid, {})
-    add_flash(t("flash.success.schedule_saved").format(date=_fmt_date_de(sched["valid_from"])), "success")
+        db.execute(
+            "INSERT INTO user_schedules (user_id, valid_from, mode, workdays_mask, weekly_minutes, allow_self_edit) "
+            "VALUES (?, ?, 'daily', ?, 0, ?)",
+            (user_id, valid_from, mask, allow_self)
+        )
+        db.commit()
+        sid = db.execute(
+            "SELECT id FROM user_schedules WHERE user_id=? AND mode='daily' ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()["id"]
+
+    _sched_save_blocks(sid, blocks)
+    db.close()
+    add_flash(t("success.schedule_saved"), "success")
     return redirect(f"/admin/users/{user_id}/edit")
 
 
