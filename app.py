@@ -13992,24 +13992,6 @@ def admin_home():
       </div>
     </div>"""
 
-    _html_tm_users = f"""
-    <div class="acc" data-tab="users" id="acc-tm-users">
-      <button class="acc-hdr" type="button" onclick="accToggle('acc-tm-users-body')">
-        <span>{t('admin.acc_tm_users')}</span><span class="acc-arr">▼</span>
-      </button>
-      <div class="acc-body" id="acc-tm-users-body">
-        <div class="acc-inner">
-          <p class="small" style="margin-bottom:10px;">{t('admin.pw_reset_hint')}</p>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.email')}</th><th></th></tr></thead>
-              <tbody>{tm_user_trs}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>"""
-
     body = f"""
     {flash_html()}
 <style>
@@ -14062,7 +14044,8 @@ var _TAB_MAP={{
   'acc-appearance':'system','acc-regional':'system',
   'acc-backup':'system','acc-update':'system','acc-features':'system',
   'acc-user':'users','acc-tm-users':'users',
-  'acc-per-user-settings':'users','acc-overtime':'users',
+  'acc-per-user-settings':'users',
+  'acc-overtime':'reporting',
   'acc-urlaub':'reporting','acc-abschl':'reporting','acc-zeit':'reporting',
   'acc-absoverview':'reporting',
   'acc-teams':'planning','acc-staffing':'planning'
@@ -14187,9 +14170,6 @@ window.addEventListener('DOMContentLoaded',function(){{
       </div>
     </div>
 
-    <!-- Section 1b: Benutzer & Passwort-Reset (Benutzerübersichten tab) -->
-    {_html_tm_users}
-
     <!-- Section 3: Urlaubsverwaltung -->
     <div class="acc" id="acc-urlaub" data-tab="reporting">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
@@ -14287,9 +14267,6 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 6: Urlaubsübersicht -->
     {_html_absences}
-
-    <!-- Section 6b: Abwesenheitstypen & Regionen pro User -->
-    {_html_per_user}
 
     <!-- Section 7: Gleitzeitkonto Übersicht -->
     {_html_overtime}
@@ -16667,7 +16644,7 @@ def _render_admin_overtime_section() -> str:
 
     _no_users_ot = f"<tr><td colspan='5' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
     return f"""
-    <div class="acc" data-tab="users" id="acc-overtime">
+    <div class="acc" data-tab="reporting" id="acc-overtime">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-body')">
         <span>{t('admin.acc_balance')}</span><span class="acc-arr">▼</span>
       </button>
