@@ -8053,6 +8053,7 @@ def settings_view():
 
     # Build schedule list with validity dates
     sched_rows = ""
+    _edit_forms = ""
     for s in all_scheds:
         sid = s.get("id")
         valid_from = s.get("valid_from") or ""
@@ -8110,8 +8111,34 @@ def settings_view():
         else:
             soll_txt = f"{weekly_hours_txt} {t('schedule.hours_week')}" if weekly_hours_txt else "–"
 
+        edit_btn = ""
         del_btn = ""
         if sid and allow_self:
+            if mode == "daily":
+                edit_btn = (
+                    f"<button class='btn btn-sm' type='button' "
+                    f"onclick=\"var el=document.getElementById('edit-sched-{sid}');"
+                    f"el.style.display=el.style.display==='none'?'block':'none';\">"
+                    f"{t('btn.edit')}</button> "
+                )
+                _edit_forms += f"""
+                <div id="edit-sched-{sid}" style="display:none;margin-top:8px;padding:12px;
+                     border:1px solid var(--br);border-radius:8px;background:var(--ca);">
+                  <b style="font-size:13px;">{t('settings.sched_add_new')} – {_fmt_date_de(valid_from) if valid_from else valid_from}</b>
+                  <form method="post" action="/settings/schedule/{sid}/edit" style="margin-top:10px;">
+                    <div style="margin-bottom:8px;">
+                      <label style="font-size:12px;color:var(--mu);">{t('settings.schedule_valid')}</label>
+                      <input type="date" name="valid_from" value="{valid_from}"
+                             style="margin-left:8px;font-size:13px;padding:4px 8px;border-radius:4px;">
+                    </div>
+                    {_sched_daily_blocks_html(sid, "daily")}
+                    <div style="margin-top:12px;display:flex;gap:8px;">
+                      <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                      <button class="btn btn-sm" type="button"
+                              onclick="document.getElementById('edit-sched-{sid}').style.display='none';">{t('btn.cancel')}</button>
+                    </div>
+                  </form>
+                </div>"""
             del_btn = (f"<form method='post' action='/settings/schedule/{sid}/delete' style='display:contents;'"
                        f" onsubmit=\"return confirm('Zeitschema ab {_fmt_date_de(valid_from) if valid_from else valid_from} löschen?');\">"
                        f"<button class='btn danger btn-sm'>Löschen</button></form>")
@@ -8122,7 +8149,7 @@ def settings_view():
             <td>{mode_txt}</td>
             <td class='small'>{soll_txt}</td>
             <td>{workdays_txt}</td>
-            <td>{del_btn}</td>
+            <td style='white-space:nowrap;'>{edit_btn}{del_btn}</td>
         </tr>"""
 
 
@@ -8483,11 +8510,18 @@ function wizValidate(e){{
               <tbody>{sched_rows if sched_rows else f"<tr><td colspan='6' style='color:var(--mu);'>{t('settings.sched_none')}</td></tr>"}</tbody>
             </table>
           </div>
+          {_edit_forms}
           {"" if not _can_self_edit else f'''<div class="acc-sub">
             <b style="font-size:14px;">{t('settings.sched_add_new')}</b>
-            <div style="margin-top:10px;">
-              {_sched_form_html(sched, "/settings/save", "/settings", show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
-            </div>
+            <form method="post" action="/settings/schedule/add" style="margin-top:10px;">
+              <div style="margin-bottom:8px;">
+                <label style="font-size:12px;color:var(--mu);">{t('settings.schedule_valid')}</label>
+                <input type="date" name="valid_from" value="{datetime.date.today().isoformat()}"
+                       style="margin-left:8px;font-size:13px;padding:4px 8px;border-radius:4px;">
+              </div>
+              {_sched_daily_blocks_html(None, "daily")}
+              <button class="btn primary" type="submit" style="margin-top:12px;">{t("btn.save")}</button>
+            </form>
           </div>'''}
         </div>
       </div>
@@ -8786,6 +8820,34 @@ def settings_reminder_save():
         db.close()
     add_flash(t("flash.success.reminder_saved"), "success")
     return redirect("/settings")
+
+
+@app.post("/settings/schedule/<int:sid>/edit")
+@login_required
+def settings_schedule_edit(sid: int):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    row = db.execute(
+        "SELECT id, allow_self_edit FROM user_schedules WHERE id=? AND user_id=?",
+        (sid, u["id"])
+    ).fetchone()
+    if not row or int(row["allow_self_edit"] or 1) == 0:
+        db.close()
+        add_flash(t("settings.schedule_readonly"), "warning")
+        return redirect(url_for("settings_view") + "#acc-zeit")
+    valid_from = (request.form.get("valid_from") or "").strip() or datetime.date.today().isoformat()
+    blocks = _parse_sched_blocks_from_form(request.form)
+    mask = sum(1 << wd for wd in blocks.keys()) if blocks else 0
+    db.execute(
+        "UPDATE user_schedules SET valid_from=?, workdays_mask=? WHERE id=? AND user_id=?",
+        (valid_from, mask, sid, u["id"])
+    )
+    db.commit()
+    _sched_save_blocks(sid, blocks)
+    db.close()
+    add_flash(t("success.schedule_saved"), "success")
+    return redirect(url_for("settings_view") + "#acc-zeit")
 
 
 @app.post("/settings/schedule/add")
