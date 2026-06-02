@@ -6887,19 +6887,19 @@ def day_detail(day: str):
     # Compact add-block form
     _add_block_form_html = "" if day_locked else f"""
       <form method="post" action="/day/{day}/block/add" id="block-add-form" novalidate onsubmit="return validateBlockForm(this)">
-        <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
-          <div style="flex:1;min-width:130px;">
-            <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_in')}</label>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:nowrap;margin-bottom:12px;">
+          <div>
+            <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.time_in')}</label>
             <input class="tin" id="tin_add" name="time_in" type="time"
                    list="time_suggestions" required
-                   style="width:100%;font-size:1.4rem;font-weight:600;padding:8px 12px;border-radius:6px;border:2px solid var(--br);background:var(--input-bg,var(--surface2));color:var(--fg);text-align:center;box-shadow:inset 0 1px 3px rgba(0,0,0,0.2);">
+                   style="width:auto;min-width:90px;max-width:130px;font-size:1rem;font-weight:400;padding:5px 8px;border-radius:4px;border:1px solid var(--br);background:var(--surface);color:var(--fg);">
           </div>
-          <div style="font-size:1.4rem;font-weight:300;color:var(--mu);padding-bottom:10px;align-self:flex-end;">–</div>
-          <div style="flex:1;min-width:130px;">
-            <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_out')}</label>
+          <div style="padding-bottom:6px;color:var(--mu);">–</div>
+          <div>
+            <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.time_out')}</label>
             <input id="tout_add" name="time_out" type="time"
                    list="time_suggestions" required
-                   style="width:100%;font-size:1.4rem;font-weight:600;padding:8px 12px;border-radius:6px;border:2px solid var(--br);background:var(--input-bg,var(--surface2));color:var(--fg);text-align:center;box-shadow:inset 0 1px 3px rgba(0,0,0,0.2);">
+                   style="width:auto;min-width:90px;max-width:130px;font-size:1rem;font-weight:400;padding:5px 8px;border-radius:4px;border:1px solid var(--br);background:var(--surface);color:var(--fg);">
           </div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px;">
@@ -7045,16 +7045,22 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
     {_lock_notice}
 
     <!-- Zeitblöcke -->
-    <div class="day-sec">
-      <div id="new-block" class="day-sec-hdr">{t('day.add_block')}</div>
-      <div class="day-sec-body">
-        {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
+    <style>
+    @media (max-width:600px){{.day-two-col{{grid-template-columns:1fr !important;}}}}
+    @media (orientation:landscape) and (max-width:900px){{.day-two-col{{grid-template-columns:1fr 1fr !important;}}}}
+    </style>
+    <div class="day-two-col" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;">
+      <div class="day-sec">
+        <div id="new-block" class="day-sec-hdr">{t('day.add_block')}</div>
+        <div class="day-sec-body">
+          {_add_block_form_html if not day_locked else "<div class='day-empty'>Gesperrt.</div>"}
+        </div>
       </div>
-    </div>
-    <div class="day-sec">
-      <div class="day-sec-hdr">Vorhandene Zeitblöcke</div>
-      <div class="day-sec-body" style="padding:8px 12px;">
-        {blocks_content}
+      <div class="day-sec">
+        <div class="day-sec-hdr">{t('day.existing_blocks')}</div>
+        <div class="day-sec-body" style="padding:8px 12px;">
+          {blocks_content}
+        </div>
       </div>
     </div>
     <script>
