@@ -7113,6 +7113,7 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
         <span class="day-stat">Ist&thinsp;<b>{ist_str}</b></span>
         {delta_html}
         {f'<span style="background:{abs_row["type_color"] or "#6366f1"};color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;">🏖 {_html.escape(abs_row["type_name"])}</span>' if abs_row else ""}
+        <a class="btn btn-sm" href="/">← {t('nav.home')}</a>
         <a class="btn btn-sm" href="/absences?date={day}" title="{t('dashboard.absences')}">🏖</a>
         <a class="btn btn-sm" href="/business_trips" title="{t('dashboard.business_trips')}">✈</a>
         <a class="btn btn-sm" href="/calendar?y={day[:4]}&m={int(day[5:7])}">Kalender</a>
