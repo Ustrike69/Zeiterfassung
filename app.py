@@ -6887,28 +6887,41 @@ def day_detail(day: str):
     # Compact add-block form
     _add_block_form_html = "" if day_locked else f"""
       <form method="post" action="/day/{day}/block/add" id="block-add-form" novalidate onsubmit="return validateBlockForm(this)">
-        <div class="tb-row">
-          <div class="tb-field">
-            <label>Kommen</label>
-            <input class="tin" id="tin_add" name="time_in" type="time" list="time_suggestions" required>
+        <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px;">
+          <div style="flex:1;min-width:130px;">
+            <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_in')}</label>
+            <input class="tin" id="tin_add" name="time_in" type="time"
+                   list="time_suggestions" required
+                   style="width:100%;font-size:2rem;font-weight:700;padding:10px 12px;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--fg);text-align:center;">
           </div>
-          <div class="tb-field">
-            <label>Gehen</label>
-            <input id="tout_add" name="time_out" type="time" list="time_suggestions" required>
+          <div style="font-size:2rem;font-weight:300;color:var(--mu);padding-bottom:10px;align-self:flex-end;">–</div>
+          <div style="flex:1;min-width:130px;">
+            <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_out')}</label>
+            <input id="tout_add" name="time_out" type="time"
+                   list="time_suggestions" required
+                   style="width:100%;font-size:2rem;font-weight:700;padding:10px 12px;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--fg);text-align:center;">
           </div>
-          <div class="tb-field">
-            <label>Pause&thinsp;(min)</label>
-            <input id="brk_day_add" name="break_minutes" type="number" min="0" value="0" style="width:60px;" required>
-            <div class="brk-btns">
+        </div>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px;">
+          <div style="min-width:100px;">
+            <label style="font-size:12px;color:var(--mu);display:block;margin-bottom:4px;">{t('day.break_min')}</label>
+            <input id="brk_day_add" name="break_minutes" type="number" min="0" value="0" required
+                   style="width:70px;font-size:1.2rem;padding:6px 8px;border-radius:6px;">
+            <div class="brk-btns" style="margin-top:4px;">
               <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='30'">30</button>
               <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='45'">45</button>
               <button class="btn btn-sm" type="button" onclick="document.getElementById('brk_day_add').value='60'">60</button>
             </div>
           </div>
-          <button class="btn primary btn-sm" type="submit" style="align-self:flex-end;white-space:nowrap;">+ Speichern</button>
-        </div>
-        <div style="margin-top:6px;">
-          <input name="comment" placeholder="Kommentar (optional)" style="width:100%;font-size:13px;padding:5px 8px;">
+          <div style="flex:1;min-width:140px;">
+            <label style="font-size:12px;color:var(--mu);display:block;margin-bottom:4px;">{t('day.comment_optional')}</label>
+            <input name="comment" placeholder="{t('day.comment_optional')}"
+                   style="width:100%;font-size:13px;padding:8px;">
+          </div>
+          <button class="btn primary" type="submit"
+                  style="align-self:flex-end;padding:10px 24px;font-size:1rem;font-weight:700;white-space:nowrap;">
+            ✓ {t('btn.save')}
+          </button>
         </div>
         <div id="block-add-err" style="display:none;margin-top:6px;padding:5px 9px;background:rgba(220,38,38,.1);border-radius:6px;color:var(--danger);font-size:12px;"></div>
       </form>
@@ -17214,11 +17227,11 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 )
             lead_absent_html = " ".join(
                 _absent_badge(a) for a in day_data["absent"]
-                if int(a.get("is_lead") or 0)
+                if int(a["is_lead"] or 0)
             )
             staff_absent_html = " ".join(
                 _absent_badge(a) for a in day_data["absent"]
-                if not int(a.get("is_lead") or 0)
+                if not int(a["is_lead"] or 0)
             )
             _lead_warn = (
                 f'<div style="font-size:11px;color:#dc2626;margin-top:2px;">'
