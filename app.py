@@ -6894,11 +6894,50 @@ def day_detail(day: str):
         ).fetchall()
         _db_p.close()
 
+    # Sollzeiten aus Zeitschema für diesen Wochentag
+    _schedule_blocks = []
+    if not day_locked:
+        _db_sb = connect()
+        _wd = datetime.date.fromisoformat(day).weekday()
+        _sched = _db_sb.execute("""
+            SELECT us.id FROM user_schedules us
+            WHERE us.user_id=? AND us.mode='daily'
+            AND us.valid_from <= ?
+            ORDER BY us.valid_from DESC LIMIT 1
+        """, (u["id"], day)).fetchone()
+        if _sched:
+            _schedule_blocks = _db_sb.execute("""
+                SELECT time_from, time_to, break_minutes
+                FROM schedule_daily_blocks
+                WHERE schedule_id=? AND weekday=?
+                ORDER BY sort_order
+            """, (_sched["id"], _wd)).fetchall()
+        _db_sb.close()
+
     _preset_opts = "".join(
         f'<option value="{p["time_in"]},{p["time_out"]},{p["break_minutes"]}">'
         f'{_html.escape(p["label"])} ({p["time_in"]}–{p["time_out"]})'
         f'</option>'
         for p in _presets
+    )
+    _sched_opts = ""
+    for i, b in enumerate(_schedule_blocks):
+        brk = b["break_minutes"] or 0
+        if len(_schedule_blocks) > 1:
+            _slabel = f'{t("day.preset_schedule")} {i+1}: {b["time_from"]}–{b["time_to"]}'
+        else:
+            _slabel = f'{t("day.preset_schedule")} ({b["time_from"]}–{b["time_to"]})'
+        _sched_opts += (
+            f'<option value="{b["time_from"]},{b["time_to"]},{brk}">'
+            f'{_html.escape(_slabel)}</option>'
+        )
+    _sched_optgroup = (
+        f'<optgroup label="{t("day.preset_schedule_group")}">{_sched_opts}</optgroup>'
+        if _sched_opts else ""
+    )
+    _saved_optgroup = (
+        f'<optgroup label="{t("day.preset_saved_group")}">{_preset_opts}</optgroup>'
+        if _preset_opts else ""
     )
     _preset_select = f"""
     <div style="margin-bottom:10px;">
@@ -6906,7 +6945,8 @@ def day_detail(day: str):
       <select id="preset-select" onchange="applyPreset(this)"
               style="font-size:13px;padding:6px 8px;border-radius:6px;min-width:200px;">
         <option value="">{t('day.preset_choose')}</option>
-        {_preset_opts}
+        {_sched_optgroup}
+        {_saved_optgroup}
       </select>
     </div>
     <script>
@@ -6919,7 +6959,7 @@ def day_detail(day: str):
       sel.value = '';
     }}
     </script>
-    """ if _presets else ""
+    """ if (_presets or _schedule_blocks) else ""
 
     # Compact add-block form
     _add_block_form_html = "" if day_locked else f"""
