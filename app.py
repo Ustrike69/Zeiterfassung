@@ -84,8 +84,28 @@ def _slot_applies_on_date(slot, iso_date: str,
         return False
 
     if plan_id:
-        if _is_holiday_for_plan(iso_date, plan_id):
-            return False
+        try:
+            _db_hol = connect()
+            _region = _db_hol.execute(
+                "SELECT t.holiday_region FROM staffing_plans sp "
+                "JOIN teams t ON t.id=sp.team_id WHERE sp.id=?",
+                (plan_id,)
+            ).fetchone()
+            if _region and _region["holiday_region"]:
+                _reg = _region["holiday_region"]
+            else:
+                _reg = (_get_app_config().get("default_holiday_region")
+                        or "DE-NW")
+            _hol = _db_hol.execute(
+                "SELECT is_holiday FROM calendar_days "
+                "WHERE day=? AND region=?",
+                (iso_date, _reg)
+            ).fetchone()
+            _db_hol.close()
+            if _hol and int(_hol["is_holiday"]) == 1:
+                return False
+        except Exception:
+            pass
 
     stype = slot["slot_type"]
     if stype in ("vm", "nm"):
