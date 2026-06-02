@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.3.dev3"
+APP_VERSION = "v3.0.3.dev4"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -12633,6 +12633,25 @@ def admin_users_edit(user_id: int):
     cur_sched = _get_user_schedule_for_day(user_id, today_iso)
     cur_id = (cur_sched or {}).get("id")
 
+    # Extra user data: overtime limits + carryover
+    _ex_db = connect()
+    _ex_row = _ex_db.execute(
+        "SELECT overtime_limit_plus, overtime_limit_minus, "
+        "vacation_carryover_exception FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    # Active schedule for inline edit
+    _act_sched = _ex_db.execute(
+        "SELECT * FROM user_schedules WHERE user_id=? AND valid_from<=? "
+        "ORDER BY valid_from DESC LIMIT 1", (user_id, today_iso)
+    ).fetchone()
+    _ex_db.close()
+    _ot_plus  = str(_ex_row["overtime_limit_plus"]  or "") if _ex_row else ""
+    _ot_minus = str(_ex_row["overtime_limit_minus"] or "") if _ex_row else ""
+    _co_exc   = str(_ex_row["vacation_carryover_exception"] or "") if _ex_row else ""
+    _act_sched_id  = _act_sched["id"]  if _act_sched else None
+    _act_sched_vf  = _act_sched["valid_from"] if _act_sched else today_iso
+    _act_allow_self = int((_act_sched or {}).get("allow_self_edit") or 1)
+
     # Vacation summary
     _vc = _vacation_calc(user_id, cur_year)
     _vac_html = (
@@ -12641,7 +12660,6 @@ def admin_users_edit(user_id: int):
         f"<span><b>{t('settings.vac_used')}:</b> {_vc['used_total']} Tage</span>"
         f"<span><b>{t('settings.vac_remaining')}:</b> {_vc['remaining_total']} Tage</span>"
         f"</div>"
-        f"<a class='btn btn-sm' href='/admin/users/{user_id}/vacation-carryover'>{t('admin.carryover_manage_btn')}</a>"
     )
 
     # Balance adjustments (last 5)
@@ -12702,6 +12720,8 @@ def admin_users_edit(user_id: int):
     <div style="margin-bottom:12px;">
       <a href="/admin" class="btn btn-sm">← {t('nav.admin')}</a>
     </div>
+
+    <!-- Basis + Passwort + Überstundenlimits -->
     <div class="card" id="base">
       <h3 style="margin-top:0;">👤 {_html.escape(r["username"])}</h3>
       <form method="post" action="/admin/users/{user_id}/edit">
@@ -12714,10 +12734,6 @@ def admin_users_edit(user_id: int):
           <div class="small" style="color:#777;margin-top:3px;">Kein Eintrag vor diesem Datum möglich.</div>
         </div><br>
 
-        <div><label>Neues Passwort <span class="small" style="color:var(--mu);">(optional – leer = unverändert)</span></label><br>
-          <input type="password" name="new_password" placeholder="leer lassen = unverändert">
-        </div><br>
-
         <div><label>Region <span class="small" style="color:var(--mu);">(leer = Standard verwenden)</span></label><br>
           <div style="margin-top:4px;">{_region_picker("holiday_region", cur_holiday_region, include_default=True)}</div>
         </div><br>
@@ -12725,46 +12741,103 @@ def admin_users_edit(user_id: int):
         {_absence_types_html}
         {_approver_section}
 
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+        <!-- Überstundenlimits -->
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--br);">
+          <h4 style="margin:0 0 8px;">{t('admin.overtime_limits')}</h4>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.overtime_limit_plus')}</label>
+              <input type="number" name="overtime_limit_plus" value="{_ot_plus}"
+                     placeholder="{t('admin.no_limit')}"
+                     style="display:block;margin-top:4px;width:100px;">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.overtime_limit_minus')}</label>
+              <input type="number" name="overtime_limit_minus" value="{_ot_minus}"
+                     placeholder="{t('admin.no_limit')}"
+                     style="display:block;margin-top:4px;width:100px;">
+            </div>
+          </div>
+        </div>
+
+        <!-- Passwort -->
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--br);">
+          <h4 style="margin:0 0 8px;">{t('admin.password_section')}</h4>
+          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.new_password_optional')}</label>
+              <input type="password" name="new_password"
+                     placeholder="{t('admin.pw_empty_hint')}"
+                     style="display:block;margin-top:4px;">
+            </div>
+            <form method="post" action="/admin/users/{user_id}/reset-password"
+                  style="display:inline;padding-bottom:4px;">
+              <button class="btn btn-sm" type="submit">🔑 {t('admin.pw_reset_btn')}</button>
+            </form>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;">
           <button class="btn primary" type="submit">{t('btn.save')}</button>
           <a class="btn" href="/admin">{t('btn.back')}</a>
         </div>
       </form>
-      <hr style="margin:16px 0;">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <span class="small" style="color:var(--mu);">{t('admin.pw_reset_hint')}</span>
-        <form method="post" action="/admin/users/{user_id}/reset-password" style="display:inline;">
-          <button class="btn btn-sm" type="submit">🔑 {t('admin.pw_reset_btn')}</button>
-        </form>
-      </div>
     </div>
 
+    <!-- Zeitschema (inline bearbeitbar) -->
     <div class="card" id="schedule">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-        <h3 style="margin:0;">🕐 {t('admin.acc_schedules')}</h3>
-        <div style="display:flex;gap:6px;">
-          <a class="btn btn-sm" href="/admin/user/{user_id}/schedule">{t('btn.edit')}</a>
+      <h3 style="margin-top:0;">🕐 {t('admin.acc_schedules')}</h3>
+      <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" form="sched-form-{user_id}"
+                 name="allow_self_edit" value="1"
+                 {"checked" if _act_allow_self else ""}>
+          {t('admin.schedule_allow_self_edit')}
+        </label>
+      </div>
+      <form id="sched-form-{user_id}" method="post"
+            action="/admin/schedule/{user_id}/edit/{_act_sched_id or 'new'}">
+        <input type="hidden" name="valid_from" value="{_act_sched_vf}">
+        {_sched_daily_blocks_html(_act_sched_id, "daily")}
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
           <a class="btn btn-sm" href="/admin/schedule/{user_id}/edit/new">+ {t('settings.sched_add_new')}</a>
         </div>
-      </div>
+      </form>
+      <hr style="margin:12px 0;">
+      <h4 style="margin:0 0 8px;font-size:13px;">{t('settings.badge_history')}</h4>
       <table style="width:100%;">
         <thead><tr><th>{t('settings.schedule_valid')}</th><th>{t('common.status')}</th><th>Soll</th><th></th></tr></thead>
         <tbody>{sched_rows}</tbody>
       </table>
     </div>
 
+    <!-- Urlaub + Übertrag -->
     <div class="card" id="vacation">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
-        <h3 style="margin:0;">🏖 {t('admin.acc_vacation')} {cur_year}</h3>
-      </div>
+      <h3 style="margin-top:0;">🏖 {t('admin.acc_vacation')} {cur_year}</h3>
       {_vac_html}
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--br);">
+        <h4 style="margin:0 0 8px;">{t('admin.vacation_carryover')}</h4>
+        <form method="post" action="/admin/users/{user_id}/edit">
+          <input type="hidden" name="_section" value="carryover">
+          <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.carryover_days')}</label>
+              <input type="number" name="vacation_carryover_exception"
+                     value="{_co_exc}"
+                     placeholder="{t('admin.system_default')}"
+                     style="display:block;margin-top:4px;width:100px;" step="0.5" min="0">
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+            <a class="btn btn-sm" href="/admin/users/{user_id}/vacation-carryover">{t('admin.carryover_manage_btn')}</a>
+          </div>
+        </form>
+      </div>
     </div>
 
+    <!-- Gleitzeitkonto Korrekturen -->
     <div class="card" id="balance">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
-        <h3 style="margin:0;">⚖ {t('balance.add_adjustment')}</h3>
-        <a class="btn btn-sm" href="/admin/users/{user_id}/edit#balance">{t('balance.title')}</a>
-      </div>
+      <h3 style="margin-top:0;">⚖ {t('balance.title')}</h3>
       <table style="width:100%;">
         <thead><tr>
           <th style="font-size:12px;">{t('balance.date')}</th>
@@ -12775,6 +12848,7 @@ def admin_users_edit(user_id: int):
       </table>
     </div>
 
+    <!-- Standardzeiten -->
     <div class="card" id="presets">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
         <h3 style="margin:0;">⏱ {t('settings.presets')}</h3>
@@ -12887,8 +12961,37 @@ def admin_users_edit_post(user_id: int):
         db.commit()
         db.close()
 
+    # Overtime limits
+    lim_plus  = request.form.get("overtime_limit_plus", "").strip() or None
+    lim_minus = request.form.get("overtime_limit_minus", "").strip() or None
+    db = connect()
+    db.execute(
+        "UPDATE users SET overtime_limit_plus=?, overtime_limit_minus=?, "
+        "updated_at=datetime('now') WHERE id=?",
+        (lim_plus, lim_minus, user_id)
+    )
+    db.commit()
+    db.close()
+
+    # Vacation carryover exception (via _section=carryover)
+    if request.form.get("_section") == "carryover":
+        co_val = request.form.get("vacation_carryover_exception", "").strip()
+        try:
+            co_num = float(co_val) if co_val else None
+        except ValueError:
+            co_num = None
+        db = connect()
+        db.execute(
+            "UPDATE users SET vacation_carryover_exception=?, updated_at=datetime('now') WHERE id=?",
+            (co_num, user_id)
+        )
+        db.commit()
+        db.close()
+        add_flash(t("admin.user_saved"), "success")
+        return redirect(f"/admin/users/{user_id}/edit#vacation")
+
     add_flash(t("admin.user_saved"), "success")
-    return redirect("/admin#acc-user")
+    return redirect(f"/admin/users/{user_id}/edit")
 
 
 @app.post("/admin/users/<int:user_id>/delete")
@@ -14086,24 +14189,6 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 1b: Benutzer & Passwort-Reset (Benutzerübersichten tab) -->
     {_html_tm_users}
-
-    <!-- Section 2: Zeitschemas -->
-    <div class="acc" id="acc-zeit" data-tab="reporting">
-      <button class="acc-hdr" type="button" onclick="accToggle('acc-zeit-body')">
-        <span>{t('admin.acc_schedules')}</span><span class="acc-arr">▼</span>
-      </button>
-      <div class="acc-body" id="acc-zeit-body">
-        <div class="acc-inner">
-          <p class="small" style="margin-bottom:8px;">{t('admin.schedules_hint')}</p>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.col_target')}</th><th></th></tr></thead>
-              <tbody>{sched_trs}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- Section 3: Urlaubsverwaltung -->
     <div class="acc" id="acc-urlaub" data-tab="reporting">
