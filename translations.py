@@ -13,6 +13,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     # ─────────────────────────────────────────────────────────────────
     "de": {
         # ── Navigation ───────────────────────────────────────────────
+        "nav.home":        "Home",
         "nav.dashboard":   "Übersicht",
         "nav.calendar":    "Kalender",
         "nav.balance":     "Gleitzeitkonto",
@@ -1222,6 +1223,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     # ─────────────────────────────────────────────────────────────────
     "en": {
         # ── Navigation ───────────────────────────────────────────────
+        "nav.home":        "Home",
         "nav.dashboard":   "Overview",
         "nav.calendar":    "Calendar",
         "nav.balance":     "Flex Time",
