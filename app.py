@@ -12650,7 +12650,7 @@ def admin_users_edit(user_id: int):
     _co_exc   = str(_ex_row["vacation_carryover_exception"] or "") if _ex_row else ""
     _act_sched_id  = _act_sched["id"]  if _act_sched else None
     _act_sched_vf  = _act_sched["valid_from"] if _act_sched else today_iso
-    _act_allow_self = int((_act_sched or {}).get("allow_self_edit") or 1)
+    _act_allow_self = int(_act_sched["allow_self_edit"] or 1) if _act_sched else 1
 
     # Vacation summary
     _vc = _vacation_calc(user_id, cur_year)
