@@ -688,6 +688,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.sched_target_col":    "Soll",
         "settings.sched_none":          "Noch kein Zeitschema gespeichert.",
         "settings.sched_add_new":       "Neues Zeitschema anlegen",
+        "settings.schedule_no_blocks":  "Keine Zeiten eingegeben",
+        "settings.schedule_readonly":   "Zeitschema wird vom Zeitmanager verwaltet",
+        "settings.schedule_add":        "Neues Zeitschema anlegen",
+        "settings.schedule_locked":     "(gesperrt)",
+        "admin.schedule_allow_self_edit": "User darf selbst bearbeiten",
         "settings.badge_current":       "Aktuell",
         "settings.badge_upcoming":      "Zukünftig",
         "settings.badge_history":       "Historie",
@@ -1059,6 +1064,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.assignments_saved":    "Zuweisung gespeichert",
         "success.adjustment_created":   "Korrektur gespeichert",
         "success.adjustment_deleted":   "Korrektur gelöscht",
+        "success.schedule_saved":       "Zeitschema gespeichert",
 
         # ── Staffing Tagesdetail + Sondereinsatz ─────────────────
         "staffing.day_detail":              "Tagesdetail",
@@ -1891,6 +1897,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.sched_target_col":    "Target",
         "settings.sched_none":          "No schedule saved yet.",
         "settings.sched_add_new":       "Add new schedule",
+        "settings.schedule_no_blocks":  "No times entered",
+        "settings.schedule_readonly":   "Schedule is managed by time manager",
+        "settings.schedule_add":        "Add new schedule",
+        "settings.schedule_locked":     "(locked)",
+        "admin.schedule_allow_self_edit": "User can edit themselves",
         "settings.badge_current":       "Current",
         "settings.badge_upcoming":      "Upcoming",
         "settings.badge_history":       "History",
@@ -2262,6 +2273,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "success.assignments_saved":    "Assignments saved",
         "success.adjustment_created":   "Adjustment saved",
         "success.adjustment_deleted":   "Adjustment deleted",
+        "success.schedule_saved":       "Schedule saved",
 
         # ── Staffing Day Detail + Special Assignment ─────────────
         "staffing.day_detail":              "Day detail",

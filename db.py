@@ -627,6 +627,12 @@ def init_db():
         sort_order INTEGER DEFAULT 0
     )""")
 
+    # v3.0.2.dev6 – allow_self_edit in user_schedules
+    if not _col_exists(db, "user_schedules", "allow_self_edit"):
+        db.execute(
+            "ALTER TABLE user_schedules ADD COLUMN allow_self_edit INTEGER DEFAULT 1"
+        )
+
     # v3.0.0 – Feature-Flags
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")

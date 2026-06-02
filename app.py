@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev5"
+APP_VERSION = "v3.0.2.dev6"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -8080,28 +8080,45 @@ def settings_view():
 
         mode_txt = t('schedule.mode_weekly') if mode == "weekly" else (t('schedule.mode_daily') if mode == "daily" else mode)
 
-        if mode == "daily":
-            day_parts = []
-            for day_key, label in [("mon_minutes",t('schedule.mo')),("tue_minutes",t('schedule.tu')),
-                                    ("wed_minutes",t('schedule.we')),("thu_minutes",t('schedule.th')),
-                                    ("fri_minutes",t('schedule.fr')),("sat_minutes",t('schedule.sa')),
-                                    ("sun_minutes",t('schedule.su'))]:
-                v = int(s.get(day_key) or 0)
-                if v:
-                    day_parts.append(f"{label}:{_fmt_minutes(v)}")
-            soll_txt = " ".join(day_parts) if day_parts else "–"
+        allow_self = int(s.get("allow_self_edit") if s.get("allow_self_edit") is not None else 1)
+        locked_badge = (
+            f"<span class='badge' style='background:#dc2626;color:#fff;margin-left:4px;'>{t('settings.schedule_locked')}</span>"
+            if not allow_self else ""
+        )
+
+        if mode == "daily" and sid:
+            try:
+                _sb_db = connect()
+                _sb_rows = _sb_db.execute(
+                    "SELECT weekday, time_from, time_to FROM schedule_daily_blocks "
+                    "WHERE schedule_id=? ORDER BY weekday, sort_order",
+                    (sid,)
+                ).fetchall()
+                _sb_db.close()
+                _WD_S = ["Mo","Di","Mi","Do","Fr","Sa","So"]
+                _day_map: dict = {}
+                for r in _sb_rows:
+                    _day_map.setdefault(r["weekday"], []).append(f"{r['time_from']}–{r['time_to']}")
+                soll_txt = " ".join(
+                    f"<b>{_WD_S[wd]}:</b>{','.join(ts)}"
+                    for wd, ts in sorted(_day_map.items())
+                ) or "–"
+            except Exception:
+                soll_txt = "–"
+        elif mode == "daily":
+            soll_txt = "–"
         else:
             soll_txt = f"{weekly_hours_txt} {t('schedule.hours_week')}" if weekly_hours_txt else "–"
 
         del_btn = ""
-        if sid:
+        if sid and allow_self:
             del_btn = (f"<form method='post' action='/settings/schedule/{sid}/delete' style='display:contents;'"
                        f" onsubmit=\"return confirm('Zeitschema ab {_fmt_date_de(valid_from) if valid_from else valid_from} löschen?');\">"
                        f"<button class='btn danger btn-sm'>Löschen</button></form>")
 
         sched_rows += f"""<tr>
             <td style='white-space:nowrap;'><b>{_fmt_date_de(valid_from) if valid_from else "-"}</b></td>
-            <td>{badge}</td>
+            <td>{badge}{locked_badge}</td>
             <td>{mode_txt}</td>
             <td class='small'>{soll_txt}</td>
             <td>{workdays_txt}</td>
@@ -8180,6 +8197,20 @@ def settings_view():
     ic_has_pw    = bool((_ic_row["icloud_app_password"] or "")) if _ic_row else False
     ic_cal_name  = (_ic_row["icloud_calendar_name"] or "")      if _ic_row else ""
     ic_last_sync = (_ic_row["icloud_last_sync"] or "")          if _ic_row else ""
+
+    # allow_self_edit des aktuellen Schemas prüfen
+    _can_self_edit = True
+    try:
+        _ase_db = connect()
+        _ase_row = _ase_db.execute(
+            "SELECT allow_self_edit FROM user_schedules WHERE user_id=? ORDER BY valid_from DESC LIMIT 1",
+            (u["id"],)
+        ).fetchone()
+        _ase_db.close()
+        if _ase_row and int(_ase_row["allow_self_edit"] or 1) == 0:
+            _can_self_edit = False
+    except Exception:
+        pass
 
     # Presets für Settings-Seite laden
     _set_presets_db = connect()
@@ -8452,12 +8483,12 @@ function wizValidate(e){{
               <tbody>{sched_rows if sched_rows else f"<tr><td colspan='6' style='color:var(--mu);'>{t('settings.sched_none')}</td></tr>"}</tbody>
             </table>
           </div>
-          <div class="acc-sub">
+          {"" if not _can_self_edit else f'''<div class="acc-sub">
             <b style="font-size:14px;">{t('settings.sched_add_new')}</b>
             <div style="margin-top:10px;">
               {_sched_form_html(sched, "/settings/save", "/settings", show_auto_breaks=True, auto_breaks_enabled=auto_breaks_enabled)}
             </div>
-          </div>
+          </div>'''}
         </div>
       </div>
     </div>
@@ -8755,6 +8786,43 @@ def settings_reminder_save():
         db.close()
     add_flash(t("flash.success.reminder_saved"), "success")
     return redirect("/settings")
+
+
+@app.post("/settings/schedule/add")
+@login_required
+def settings_schedule_add():
+    bootstrap()
+    u = current_user()
+    db = connect()
+    existing = db.execute(
+        "SELECT allow_self_edit FROM user_schedules WHERE user_id=? ORDER BY valid_from DESC LIMIT 1",
+        (u["id"],)
+    ).fetchone()
+    if existing and int(existing["allow_self_edit"] or 1) == 0:
+        add_flash(t("settings.schedule_readonly"), "warning")
+        db.close()
+        return redirect(url_for("settings_view") + "#acc-zeit")
+    valid_from = (request.form.get("valid_from") or "").strip() or datetime.date.today().isoformat()
+    blocks = _parse_sched_blocks_from_form(request.form)
+    if not blocks:
+        add_flash(t("settings.schedule_no_blocks"), "warning")
+        db.close()
+        return redirect(url_for("settings_view") + "#acc-zeit")
+    mask = sum(1 << wd for wd in blocks.keys())
+    db.execute(
+        "INSERT INTO user_schedules (user_id, valid_from, mode, workdays_mask, weekly_minutes, allow_self_edit) "
+        "VALUES (?, ?, 'daily', ?, 0, 1)",
+        (u["id"], valid_from, mask)
+    )
+    db.commit()
+    sched_id = db.execute(
+        "SELECT id FROM user_schedules WHERE user_id=? AND valid_from=? AND mode='daily' ORDER BY id DESC LIMIT 1",
+        (u["id"], valid_from)
+    ).fetchone()["id"]
+    _sched_save_blocks(sched_id, blocks)
+    db.close()
+    add_flash(t("success.schedule_saved"), "success")
+    return redirect(url_for("settings_view") + "#acc-zeit")
 
 
 @app.post("/settings/presets/add")
@@ -9947,6 +10015,20 @@ def settings_save():
     u = current_user()
 
     _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "") == "1" else 0)
+
+    # allow_self_edit check
+    try:
+        _chk_db = connect()
+        _chk_row = _chk_db.execute(
+            "SELECT allow_self_edit FROM user_schedules WHERE user_id=? ORDER BY valid_from DESC LIMIT 1",
+            (u["id"],)
+        ).fetchone()
+        _chk_db.close()
+        if _chk_row and int(_chk_row["allow_self_edit"] or 1) == 0:
+            add_flash(t("settings.schedule_readonly"), "warning")
+            return redirect(url_for("settings_view") + "#acc-zeit")
+    except Exception:
+        pass
 
     sched = _parse_sched_form(request.form)
     if not sched["valid_from"]:
@@ -12749,6 +12831,91 @@ def admin_users_unlock(user_id: int):
     return redirect("/admin")
 
 
+@app.route("/admin/user/<int:uid>/schedule", methods=["GET", "POST"])
+@timemanager_required
+def admin_user_schedule(uid: int):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    target = db.execute("SELECT id, username, display_name FROM users WHERE id=?", (uid,)).fetchone()
+    if not target:
+        db.close()
+        abort(404)
+    display = target["display_name"] or target["username"]
+
+    if request.method == "POST":
+        allow_self = 1 if request.form.get("allow_self_edit") else 0
+        valid_from = (request.form.get("valid_from") or "").strip() or datetime.date.today().isoformat()
+        blocks = _parse_sched_blocks_from_form(request.form)
+        mask = sum(1 << wd for wd in blocks.keys()) if blocks else 0
+        existing = db.execute(
+            "SELECT id FROM user_schedules WHERE user_id=? AND mode='daily' ORDER BY valid_from DESC LIMIT 1",
+            (uid,)
+        ).fetchone()
+        if existing:
+            sched_id = existing["id"]
+            db.execute(
+                "UPDATE user_schedules SET valid_from=?, workdays_mask=?, allow_self_edit=? WHERE id=?",
+                (valid_from, mask, allow_self, sched_id)
+            )
+            db.commit()
+        else:
+            db.execute(
+                "INSERT INTO user_schedules (user_id, valid_from, mode, workdays_mask, weekly_minutes, allow_self_edit) "
+                "VALUES (?, ?, 'daily', ?, 0, ?)",
+                (uid, valid_from, mask, allow_self)
+            )
+            db.commit()
+            sched_id = db.execute(
+                "SELECT id FROM user_schedules WHERE user_id=? AND mode='daily' ORDER BY id DESC LIMIT 1",
+                (uid,)
+            ).fetchone()["id"]
+        if blocks:
+            _sched_save_blocks(sched_id, blocks)
+        db.close()
+        add_flash(t("success.schedule_saved"), "success")
+        return redirect(f"/admin/user/{uid}/schedule")
+
+    # GET: lade bestehendes daily-Schema
+    existing = db.execute(
+        "SELECT * FROM user_schedules WHERE user_id=? AND mode='daily' ORDER BY valid_from DESC LIMIT 1",
+        (uid,)
+    ).fetchone()
+    sched_id = existing["id"] if existing else None
+    sched = _normalize_schedule(dict(existing)) if existing else _normalize_schedule({})
+    allow_self = int(existing["allow_self_edit"] or 1) if existing else 1
+    db.close()
+
+    blocks_html = _sched_daily_blocks_html(sched_id, "daily")
+    vf = sched.get("valid_from") or datetime.date.today().isoformat()
+    body = f"""
+    {flash_html()}
+    <div style="max-width:700px;margin:1.5rem auto;">
+      <div style="margin-bottom:1rem;">
+        <a href="/admin/users/{uid}/edit" class="btn btn-sm">← {_html.escape(display)}</a>
+      </div>
+      <h2 style="margin-bottom:1rem;">{t('settings.sched_section')} – {_html.escape(display)}</h2>
+      <form method="post" action="/admin/user/{uid}/schedule">
+        <div style="margin-bottom:12px;">
+          <label style="font-size:12px;color:var(--mu);">{t('settings.schedule_valid')}</label><br>
+          <input type="date" name="valid_from" value="{vf}" required style="margin-top:4px;">
+        </div>
+        {blocks_html}
+        <div style="margin-top:12px;display:flex;gap:12px;align-items:center;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+            <input type="checkbox" name="allow_self_edit" value="1"{"checked" if allow_self else ""}>
+            {t('admin.schedule_allow_self_edit')}
+          </label>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:8px;">
+          <button class="btn primary" type="submit">{t('btn.save')}</button>
+          <a class="btn" href="/admin/users/{uid}/edit">{t('btn.cancel')}</a>
+        </div>
+      </form>
+    </div>"""
+    return render_template_string(layout(t("settings.sched_section"), body, u, APP_VERSION))
+
+
 @app.route("/admin/users/<int:user_id>/presets", methods=["GET", "POST"])
 @timemanager_required
 def admin_user_presets(user_id: int):
@@ -13402,7 +13569,8 @@ def admin_home():
         sched_trs += (
             f'<tr><td>{display}{sub_html}</td>'
             f'<td class="small">{soll_str}</td>'
-            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("admin.acc_schedules")}</a></td></tr>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("admin.acc_schedules")}</a>'
+            f' <a class="btn btn-sm" href="/admin/user/{uid}/schedule">{t("btn.edit")}</a></td></tr>'
         )
 
         # Vacation row
