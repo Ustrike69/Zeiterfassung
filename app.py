@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev3"
+APP_VERSION = "v3.0.2.dev4"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -17206,11 +17206,19 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
                 for a in day_data.get("staff_present", [])
             )
-            absent_html = " ".join(
-                f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
-                f'padding:1px 5px;font-size:11px;text-decoration:line-through;white-space:nowrap;">'
-                f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
-                for a in day_data["absent"]
+            def _absent_badge(a):
+                return (
+                    f'<span style="background:#dc2626;color:#fff;border-radius:3px;'
+                    f'padding:1px 5px;font-size:11px;text-decoration:line-through;white-space:nowrap;">'
+                    f'{_html.escape((a["display_name"] or a["username"] or "?")[:10])}</span>'
+                )
+            lead_absent_html = " ".join(
+                _absent_badge(a) for a in day_data["absent"]
+                if int(a.get("is_lead") or 0)
+            )
+            staff_absent_html = " ".join(
+                _absent_badge(a) for a in day_data["absent"]
+                if not int(a.get("is_lead") or 0)
             )
             _lead_warn = (
                 f'<div style="font-size:11px;color:#dc2626;margin-top:2px;">'
@@ -17218,12 +17226,14 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 if day_data.get("lead_missing") else ""
             )
             _lead_row = (
-                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{lead_html}</div>'
-                if lead_html else ""
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">'
+                f'{lead_html}{lead_absent_html}</div>'
+                if (lead_html or lead_absent_html) else ""
             )
             _staff_row = (
-                f'<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;">{staff_html}{absent_html}</div>'
-                if (staff_html or absent_html) else ""
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;">'
+                f'{staff_html}{staff_absent_html}</div>'
+                if (staff_html or staff_absent_html) else ""
             )
             cells += (
                 f"<td style='padding:6px 10px;border-left:3px solid {color};{_r_border}{_hol_bg}cursor:pointer;'"
