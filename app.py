@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.3.dev5"
+APP_VERSION = "v3.0.3.dev6"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -13927,7 +13927,6 @@ def admin_home():
     _is_timemgr = is_timemanager(u)
     _is_approver = bool(u.get("is_approver"))
 
-    _html_absences  = _tab(_render_admin_absences_section(), "reporting")
     _html_per_user  = _render_per_user_settings_section()
     _html_overtime  = _tab(_render_admin_overtime_section(), "reporting")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
@@ -14046,7 +14045,6 @@ var _TAB_MAP={{
   'acc-user':'users','acc-tm-users':'users',
   'acc-per-user-settings':'users',
   'acc-overtime':'reporting',
-  'acc-urlaub':'reporting','acc-abschl':'reporting','acc-zeit':'reporting',
   'acc-absoverview':'reporting',
   'acc-teams':'planning','acc-staffing':'planning'
 }};
@@ -14170,47 +14168,6 @@ window.addEventListener('DOMContentLoaded',function(){{
       </div>
     </div>
 
-    <!-- Section 3: Urlaubsverwaltung -->
-    <div class="acc" id="acc-urlaub" data-tab="reporting">
-      <button class="acc-hdr" type="button" onclick="accToggle('acc-urlaub-body')">
-        <span>{t('admin.acc_vacation')}</span><span class="acc-arr">▼</span>
-      </button>
-      <div class="acc-body" id="acc-urlaub-body">
-        <div class="acc-inner">
-          <p class="small" style="margin-bottom:8px;">{t('admin.vacation_hint')}</p>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>{t('admin.users_title')}</th><th></th></tr></thead>
-              <tbody>{vac_trs}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Section 4: Abschlüsse -->
-    <div class="acc" id="acc-abschl" data-tab="reporting">
-      <button class="acc-hdr" type="button" onclick="accToggle('acc-abschl-body')">
-        <span>{t('periods.title')}</span><span class="acc-arr">▼</span>
-      </button>
-      <div class="acc-body" id="acc-abschl-body">
-        <div class="acc-inner">
-          <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
-            <form method="get" action="/admin" style="display:flex;gap:8px;align-items:flex-end;">
-              <div><label style="font-size:12px;">{t('periods.year_label')}</label><br><select name="y" style="font-size:13px;padding:4px 8px;">{year_opts}</select></div>
-              <button class="btn btn-sm" type="submit">{t('periods.show_btn')}</button>
-            </form>
-          </div>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>{t('admin.users_title')}</th><th>{t('admin.update_current_state')} {sel_year}</th><th></th></tr></thead>
-              <tbody>{periods_trs}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- Section: Teams -->
     {_html_teams_accordion}
 
@@ -14264,9 +14221,6 @@ window.addEventListener('DOMContentLoaded',function(){{
         </div>
       </div>
     </div>
-
-    <!-- Section 6: Urlaubsübersicht -->
-    {_html_absences}
 
     <!-- Section 7: Gleitzeitkonto Übersicht -->
     {_html_overtime}
