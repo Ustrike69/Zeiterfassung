@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev1"
+APP_VERSION = "v3.0.2.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -71,13 +71,25 @@ def _feature_enabled(key: str) -> bool:
     return _get_app_config().get(f"feature_{key}", "0") == "1"
 
 
-def _slot_applies_on_date(slot, iso_date: str) -> bool:
+def _slot_applies_on_date(slot, iso_date: str,
+                          plan_id: int = None) -> bool:
     d = datetime.date.fromisoformat(iso_date)
     wd = d.weekday()
+
+    slot_days = []
+    if slot.get("weekdays"):
+        slot_days = [int(x) for x in str(slot["weekdays"]).split(",")]
+
+    if wd >= 5 and wd not in slot_days:
+        return False
+
+    if plan_id:
+        if _is_holiday_for_plan(iso_date, plan_id):
+            return False
+
     stype = slot["slot_type"]
     if stype in ("vm", "nm"):
-        days = [int(x) for x in str(slot["weekdays"]).split(",")]
-        return wd in days
+        return wd in slot_days
     elif stype == "special":
         if slot["special_weekday"] is None:
             return False
@@ -1887,6 +1899,39 @@ def _is_holiday(iso_day: str, user_id=None) -> bool:
         r = db.execute(
             "SELECT is_holiday FROM calendar_days WHERE day=? AND region=?",
             (iso_day, region),
+        ).fetchone()
+        db.close()
+        return bool(r and int(r["is_holiday"]) == 1)
+    except Exception:
+        return False
+
+
+def _get_team_holiday_region(plan_id: int) -> str:
+    try:
+        db = connect()
+        row = db.execute("""
+            SELECT t.holiday_region
+            FROM staffing_plans sp
+            JOIN teams t ON t.id = sp.team_id
+            WHERE sp.id = ?
+        """, (plan_id,)).fetchone()
+        db.close()
+        if row and row["holiday_region"]:
+            return row["holiday_region"]
+    except Exception:
+        pass
+    cfg = _get_app_config()
+    return cfg.get("default_holiday_region") or "DE-NW"
+
+
+def _is_holiday_for_plan(iso_day: str, plan_id: int) -> bool:
+    try:
+        region = _get_team_holiday_region(plan_id)
+        db = connect()
+        r = db.execute(
+            "SELECT is_holiday FROM calendar_days "
+            "WHERE day=? AND region=?",
+            (iso_day, region)
         ).fetchone()
         db.close()
         return bool(r and int(r["is_holiday"]) == 1)
@@ -14750,6 +14795,7 @@ def _render_admin_teams_inline(teams, all_users, team_members) -> str:
         name  = _html.escape(tm["name"])
         desc  = _html.escape(tm["description"] or "")
         cnt   = tm["member_count"]
+        cur_region = tm["holiday_region"] or "" if "holiday_region" in tm.keys() else ""
         member_ids = team_members.get(tid, [])
         checkboxes = "".join(
             f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
@@ -14815,7 +14861,13 @@ def _render_admin_teams_inline(teams, all_users, team_members) -> str:
                            maxlength="120"
                            style="display:block;margin-top:4px;width:100%;">
                   </div>
-                  <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                  <div>
+                    <label style="font-size:12px;">{t('admin.team_region')}</label>
+                    <div style="margin-top:4px;">{_region_picker(f'team_hr_{tid}', cur_region, include_default=True)}</div>
+                    <input type="hidden" name="holiday_region" id="team_hr_{tid}_val">
+                  </div>
+                  <button class="btn primary btn-sm" type="submit"
+                          onclick="document.getElementById('team_hr_{tid}_val').value=document.getElementById('team_hr_{tid}_r').value">{t('btn.save')}</button>
                 </div>
               </form>
             </div>
@@ -16807,14 +16859,15 @@ def admin_teams():
             db.commit()
             add_flash(t("success.team_deleted"), "success")
         elif action == "edit":
-            tid   = int(request.form.get("team_id", 0))
-            name  = request.form.get("name", "").strip()
-            desc  = request.form.get("description", "").strip()
-            color = request.form.get("color", "#4a9eff").strip()
+            tid           = int(request.form.get("team_id", 0))
+            name          = request.form.get("name", "").strip()
+            desc          = request.form.get("description", "").strip()
+            color         = request.form.get("color", "#4a9eff").strip()
+            holiday_region = request.form.get("holiday_region", "").strip() or None
             if tid and name:
                 db.execute(
-                    "UPDATE teams SET name=?, description=?, color=? WHERE id=?",
-                    (name, desc, color, tid)
+                    "UPDATE teams SET name=?, description=?, color=?, holiday_region=? WHERE id=?",
+                    (name, desc, color, holiday_region, tid)
                 )
                 db.commit()
                 add_flash(t("success.team_updated"), "success")
@@ -16894,7 +16947,7 @@ def _get_staffing_week_data(plan_id: int) -> dict:
         tt = slot["time_to"]
         for day in days:
             iso = day.isoformat()
-            if not _slot_applies_on_date(slot, iso):
+            if not _slot_applies_on_date(slot, iso, plan_id=plan_id):
                 slot_days.append(None)
                 continue
             assigned_list = assign_map.get(slot["id"], [])
@@ -16992,7 +17045,7 @@ def _get_staffing_month_data(plan_id: int) -> dict:
         day_slots = []
         has_warning = False
         for slot in slots:
-            if not _slot_applies_on_date(slot, iso):
+            if not _slot_applies_on_date(slot, iso, plan_id=plan_id):
                 continue
             assigned_list = assign_map.get(slot["id"], [])
             tf = slot["time_from"]
@@ -17055,12 +17108,41 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     _SC = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}
 
     th = "<th style='padding:6px 10px;text-align:left;border-bottom:2px solid rgba(128,128,128,0.5);background:var(--ca);'></th>"
+    _hol_cache = {day.isoformat(): _is_holiday_for_plan(day.isoformat(), plan_id) for day in days}
+    _hol_names = {}
+    try:
+        _hdb = connect()
+        _hregion = _get_team_holiday_region(plan_id)
+        for _d in days:
+            _iso = _d.isoformat()
+            _hr = _hdb.execute(
+                "SELECT name FROM calendar_days WHERE day=? AND region=? AND is_holiday=1",
+                (_iso, _hregion)
+            ).fetchone()
+            if _hr:
+                _hol_names[_iso] = _hr["name"]
+        _hdb.close()
+    except Exception:
+        pass
     for day in days:
-        today_bg = "background:color-mix(in srgb,var(--ac) 12%,var(--ca));" if day == today else "background:var(--ca);"
+        _day_iso = day.isoformat()
+        _is_hol = _hol_cache.get(_day_iso, False)
+        if _is_hol:
+            today_bg = "background:color-mix(in srgb,#dc2626 8%,var(--ca));"
+            _date_style = "color:#dc2626;font-weight:700;"
+            _hol_hint = f"<div style='font-size:10px;color:#dc2626;'>{_html.escape(_hol_names.get(_day_iso,'Feiertag'))}</div>"
+        elif day == today:
+            today_bg = "background:color-mix(in srgb,var(--ac) 12%,var(--ca));"
+            _date_style = ""
+            _hol_hint = ""
+        else:
+            today_bg = "background:var(--ca);"
+            _date_style = ""
+            _hol_hint = ""
         th += (f"<th style='padding:6px 10px;text-align:center;white-space:nowrap;"
                f"border-bottom:2px solid rgba(128,128,128,0.5);border-left:2px solid rgba(128,128,128,0.35);cursor:pointer;{today_bg}' "
-               f"onclick=\"location.href='/staffing/day?date={day.isoformat()}&plan_id={plan_id}'\">"
-               f"{_WD[day.weekday()]} {day.strftime('%d.%m')}</th>")
+               f"onclick=\"location.href='/staffing/day?date={_day_iso}&plan_id={plan_id}'\">"
+               f"<span style='{_date_style}'>{_WD[day.weekday()]} {day.strftime('%d.%m')}</span>{_hol_hint}</th>")
 
     rows = ""
     for slot_idx, entry in enumerate(data["slots"]):
@@ -17084,8 +17166,9 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
         for di, day_data in enumerate(entry["days"]):
             day_iso   = days[di].isoformat()
             _r_border = "" if di == 4 else "border-right:2px solid rgba(128,128,128,0.35);"
+            _hol_bg   = "background:color-mix(in srgb,#6b7280 15%,var(--bg));" if _hol_cache.get(day_iso) else row_bg
             if day_data is None:
-                cells += (f"<td style='padding:6px 10px;{row_bg}{_r_border}cursor:pointer;'"
+                cells += (f"<td style='padding:6px 10px;{_hol_bg}{_r_border}cursor:pointer;'"
                           f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\"></td>")
                 continue
             status    = day_data["status"]
@@ -17115,7 +17198,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 if day_data.get("lead_missing") else ""
             )
             cells += (
-                f"<td style='padding:6px 10px;border-left:3px solid {color};{_r_border}{row_bg}cursor:pointer;'"
+                f"<td style='padding:6px 10px;border-left:3px solid {color};{_r_border}{_hol_bg}cursor:pointer;'"
                 f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\">"
                 f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
@@ -17599,7 +17682,7 @@ def staffing_day_view():
 
     slot_data = []
     for slot in slots:
-        if not _slot_applies_on_date(slot, iso_date):
+        if not _slot_applies_on_date(slot, iso_date, plan_id=plan_id):
             continue
         assigned = assign_map.get(slot["id"], [])
         override_users = [o for o in overrides

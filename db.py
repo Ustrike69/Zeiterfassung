@@ -577,6 +577,11 @@ def init_db():
         db.execute(
             "ALTER TABLE staffing_plans ADD COLUMN require_lead INTEGER DEFAULT 0"
         )
+    # v3.0.2.dev2 – Team-Standort für Feiertage
+    if not _col_exists(db, "teams", "holiday_region"):
+        db.execute(
+            "ALTER TABLE teams ADD COLUMN holiday_region TEXT DEFAULT NULL"
+        )
     db.execute("""CREATE TABLE IF NOT EXISTS balance_adjustments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
