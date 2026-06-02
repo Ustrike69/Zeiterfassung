@@ -6907,7 +6907,7 @@ def day_detail(day: str):
         """, (u["id"], day)).fetchone()
         if _sched:
             _schedule_blocks = _db_sb.execute("""
-                SELECT time_from, time_to, break_minutes
+                SELECT time_from, time_to, 0 as break_minutes
                 FROM schedule_daily_blocks
                 WHERE schedule_id=? AND weekday=?
                 ORDER BY sort_order
