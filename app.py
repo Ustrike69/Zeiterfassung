@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.3.dev6"
+APP_VERSION = "v3.0.3.dev7"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -13929,6 +13929,7 @@ def admin_home():
 
     _html_per_user  = _render_per_user_settings_section()
     _html_overtime  = _tab(_render_admin_overtime_section(), "reporting")
+    _html_absences  = _tab(_render_admin_absences_section(), "reporting")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
     _html_regional  = _tab(_render_regional_section(), "system") if _is_sysadm else ""
     _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
@@ -14224,6 +14225,9 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 7: Gleitzeitkonto Übersicht -->
     {_html_overtime}
+
+    <!-- Section 6: Urlaubsübersicht -->
+    {_html_absences}
 
     <!-- Section 8: Erscheinungsbild -->
     {_html_appearance}
