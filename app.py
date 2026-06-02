@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.3.dev1"
+APP_VERSION = "v3.0.3.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -13943,10 +13943,11 @@ function nuSendChange(){{
   if(pwWrap)pwWrap.style.opacity=send.checked?'0.4':'1';
 }}
 var _TAB_MAP={{
-  'acc-mail':'system','acc-telegram':'system',
+  'acc-mail':'system','acc-bot':'system',
   'acc-appearance':'system','acc-regional':'system',
   'acc-backup':'system','acc-update':'system','acc-features':'system',
-  'acc-user':'users','acc-overtime':'users',
+  'acc-user':'users','acc-tm-users':'users',
+  'acc-per-user-settings':'users','acc-overtime':'users',
   'acc-urlaub':'reporting','acc-abschl':'reporting','acc-zeit':'reporting',
   'acc-absoverview':'reporting',
   'acc-teams':'planning','acc-staffing':'planning'
@@ -14034,6 +14035,39 @@ window.addEventListener('DOMContentLoaded',function(){{
             </table>
           </div>
           <div class="small" style="color:var(--mu);margin-top:6px;">{t('admin.cant_delete_own')}</div>
+
+          <hr style="margin:16px 0;">
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_user_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_user_hint')}</p>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_export_title')}</div>
+          <form method="get" action="/admin/backup/user/export" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px;">
+            <div>
+              <label style="font-size:12px;">{t('admin.users_title')}</label><br>
+              <select name="uid" style="font-size:13px;padding:4px 8px;">{user_export_opts}</select>
+            </div>
+            <button class="btn btn-sm" type="submit">&#11015; {t('btn.export')} (.json)</button>
+          </form>
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_import_title')}</div>
+          <p class="small" style="color:var(--mu);margin-bottom:8px;">{t('admin.backup_user_import_hint')}</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+            <div>
+              <label style="font-size:12px;">{t('admin.backup_user_file_label')}</label><br>
+              <input type="file" id="user-import-file" accept=".json" style="font-size:13px;">
+            </div>
+            <div>
+              <label style="font-size:12px;">{t('admin.backup_user_target')}</label><br>
+              <select id="user-import-target" style="font-size:13px;padding:4px 8px;">{user_import_opts}</select>
+            </div>
+            <div style="padding-top:18px;">
+              <button class="btn btn-sm" type="button" onclick="userImportPreview()">{t('admin.backup_preview_btn')}</button>
+            </div>
+          </div>
+          <div id="user-import-preview" style="display:none;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;margin-bottom:10px;font-size:13px;"></div>
+          <form method="post" action="/admin/backup/user/import" enctype="multipart/form-data" id="user-import-form">
+            <input type="hidden" name="target_uid" id="user-import-target-hidden">
+            <input type="file" name="user_file" id="user-import-file-hidden" style="display:none;" accept=".json">
+            <button class="btn primary btn-sm" type="submit" id="user-import-confirm" style="display:none;" onclick="return prepareUserImport()">&#11014; {t('btn.import')}</button>
+          </form>
         </div>
       </div>
     </div>
@@ -14240,7 +14274,7 @@ def _render_backup_section() -> str:
     _auto_enc_pw_hint = f" <span style='color:var(--mu);font-size:11px;'>({t('settings.saved')})</span>" if auto_enc_pw_set else ""
     _restore_confirm = t('admin.backup_restore_confirm')
     return f"""
-    <div class="acc" id="acc-backup">
+    <div class="acc" data-tab="system" id="acc-backup">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-backup-body')">
         <span>{t('admin.acc_backup')}</span><span class="acc-arr">▼</span>
       </button>
@@ -14369,43 +14403,6 @@ def _render_backup_section() -> str:
             </div>
           </form>
           <p class="small" style="color:var(--mu);">{t('admin.backup_settings_import_hint')}</p>
-
-          <hr style="margin:20px 0;">
-
-          <!-- ── 3. User-Export / Import ── -->
-          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.backup_user_title')}</div>
-          <p class="small" style="color:var(--mu);margin-bottom:10px;">{t('admin.backup_user_hint')}</p>
-
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_export_title')}</div>
-          <form method="get" action="/admin/backup/user/export" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px;">
-            <div>
-              <label style="font-size:12px;">{t('admin.users_title')}</label><br>
-              <select name="uid" style="font-size:13px;padding:4px 8px;">{user_export_opts}</select>
-            </div>
-            <button class="btn btn-sm" type="submit">&#11015; {t('btn.export')} (.json)</button>
-          </form>
-
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">{t('admin.backup_user_import_title')}</div>
-          <p class="small" style="color:var(--mu);margin-bottom:8px;">{t('admin.backup_user_import_hint')}</p>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
-            <div>
-              <label style="font-size:12px;">{t('admin.backup_user_file_label')}</label><br>
-              <input type="file" id="user-import-file" accept=".json" style="font-size:13px;">
-            </div>
-            <div>
-              <label style="font-size:12px;">{t('admin.backup_user_target')}</label><br>
-              <select id="user-import-target" style="font-size:13px;padding:4px 8px;">{user_import_opts}</select>
-            </div>
-            <div style="padding-top:18px;">
-              <button class="btn btn-sm" type="button" onclick="userImportPreview()">{t('admin.backup_preview_btn')}</button>
-            </div>
-          </div>
-          <div id="user-import-preview" style="display:none;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);padding:10px;margin-bottom:10px;font-size:13px;"></div>
-          <form method="post" action="/admin/backup/user/import" enctype="multipart/form-data" id="user-import-form">
-            <input type="hidden" name="target_uid" id="user-import-target-hidden">
-            <input type="file" name="user_file" id="user-import-file-hidden" style="display:none;" accept=".json">
-            <button class="btn primary btn-sm" type="submit" id="user-import-confirm" style="display:none;" onclick="return prepareUserImport()">&#11014; {t('btn.import')}</button>
-          </form>
 
         </div>
       </div>
@@ -14743,7 +14740,7 @@ def _render_bot_section() -> str:
     api_hint = f"<span style='color:var(--ok);font-size:11px;'>{t('admin.set_hint')}</span>" if api_set else f"<span style='color:var(--mu);font-size:11px;'>{t('admin.empty_hint')}</span>"
 
     return f"""
-    <div class="acc" id="acc-bot">
+    <div class="acc" data-tab="system" id="acc-bot">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-bot-body')">
         <span>{t('admin.acc_bot')}</span><span class="acc-arr">▼</span>
       </button>
@@ -14830,7 +14827,7 @@ def _render_update_section() -> str:
     _avail_lbl = t('admin.update_available_js')
     _update_confirm = t('admin.update_confirm')
     return f"""
-    <div class="acc" id="acc-update">
+    <div class="acc" data-tab="system" id="acc-update">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-update-body')">
         <span>{t('admin.acc_update')}</span><span class="acc-arr">▼</span>
       </button>
@@ -15273,7 +15270,7 @@ def _render_admin_absences_section() -> str:
     _no_users_row = f"<tr><td colspan='7' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
     _no_data_row = f"<tr><td colspan='6' style='color:var(--mu);'>{t('admin.no_data')}</td></tr>"
     return f"""
-    <div class="acc" id="acc-absoverview">
+    <div class="acc" data-tab="reporting" id="acc-absoverview">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-absoverview-body')">
         <span>{t('admin.acc_absences')}</span><span class="acc-arr">▼</span>
       </button>
@@ -16348,7 +16345,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
 def _render_features_section() -> str:
     checked = 'checked' if _feature_enabled('staffing') else ''
     return f"""
-    <div class="acc" id="acc-features">
+    <div class="acc" data-tab="system" id="acc-features">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-features-body')">
         <span>{t('admin.features')}</span><span class="acc-arr">▼</span>
       </button>
@@ -16573,7 +16570,7 @@ def _render_admin_overtime_section() -> str:
 
     _no_users_ot = f"<tr><td colspan='5' style='color:var(--mu);'>{t('admin.no_users')}</td></tr>"
     return f"""
-    <div class="acc" id="acc-overtime">
+    <div class="acc" data-tab="users" id="acc-overtime">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-overtime-body')">
         <span>{t('admin.acc_balance')}</span><span class="acc-arr">▼</span>
       </button>
@@ -17021,7 +17018,7 @@ def _render_regional_section() -> str:
     base_url_val   = _html.escape(cfg.get("base_url") or "")
     current_tz     = cfg.get("timezone") or "Europe/Berlin"
     return f"""
-    <div class="acc" id="acc-regional">
+    <div class="acc" data-tab="system" id="acc-regional">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-regional-body')">
         <span>{t('admin.acc_regional')}</span><span class="acc-arr">▼</span>
       </button>
@@ -17234,7 +17231,7 @@ def _render_appearance_section() -> str:
     )
 
     return f"""
-    <div class="acc" id="acc-appearance">
+    <div class="acc" data-tab="system" id="acc-appearance">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-appearance-body')">
         <span>{t('admin.acc_appearance')}</span><span class="acc-arr">▼</span>
       </button>
