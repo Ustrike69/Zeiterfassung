@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2"
+APP_VERSION = "v3.0.2.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -9715,20 +9715,43 @@ def _run_update() -> "tuple[bool, list[str]]":
     import subprocess
     project = os.path.dirname(os.path.abspath(__file__))
     out = []
+
+    # Remote URL setzen
     subprocess.run(
         ["git", "-C", project, "remote", "set-url", "origin", _GIT_REMOTE_URL],
         capture_output=True, timeout=5,
     )
+
+    # Lokale Änderungen stashen (verhindert Pull-Fehler)
+    r_stash = subprocess.run(
+        ["git", "-C", project, "stash", "--include-untracked"],
+        capture_output=True, text=True, timeout=10,
+    )
+    stashed = "No local changes" not in r_stash.stdout
+    if stashed:
+        out.append(f"git stash: {r_stash.stdout.strip()}")
+
+    # Pull
     r1 = subprocess.run(
         ["git", "-C", project, "pull", "origin", "main"],
         capture_output=True, text=True, timeout=60,
     )
     out.append("git pull:")
     out.append(r1.stdout.strip() or r1.stderr.strip() or "(keine Ausgabe)")
+
     if r1.returncode != 0:
+        # Stash wiederherstellen wenn Pull fehlschlug
+        if stashed:
+            subprocess.run(
+                ["git", "-C", project, "stash", "pop"],
+                capture_output=True, timeout=10,
+            )
         return False, out
+
+    # Pip install
     r2 = subprocess.run(
-        [f"{project}/.venv/bin/pip", "install", "-r", f"{project}/requirements.txt", "-q"],
+        [f"{project}/.venv/bin/pip", "install", "-r",
+         f"{project}/requirements.txt", "-q"],
         capture_output=True, text=True, timeout=120,
     )
     out.append("pip install:")
