@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.3.dev4"
+APP_VERSION = "v3.0.3.dev5"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -13929,7 +13929,7 @@ def admin_home():
 
     _html_absences  = _tab(_render_admin_absences_section(), "reporting")
     _html_per_user  = _render_per_user_settings_section()
-    _html_overtime  = _tab(_render_admin_overtime_section(), "users")
+    _html_overtime  = _tab(_render_admin_overtime_section(), "reporting")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
     _html_regional  = _tab(_render_regional_section(), "system") if _is_sysadm else ""
     _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
