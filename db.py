@@ -616,6 +616,17 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     )""")
 
+    # v3.0.2.dev5 – Zeitvorlagen
+    db.execute("""CREATE TABLE IF NOT EXISTS user_time_presets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        time_in TEXT NOT NULL,
+        time_out TEXT NOT NULL,
+        break_minutes INTEGER DEFAULT 0,
+        sort_order INTEGER DEFAULT 0
+    )""")
+
     # v3.0.0 – Feature-Flags
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")

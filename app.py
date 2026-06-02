@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev4"
+APP_VERSION = "v3.0.2.dev5"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -6884,9 +6884,47 @@ def day_detail(day: str):
         "<a href='/periods'>Abschlüsse verwalten</a></div>"
     ) if day_locked else ""
 
+    # Presets laden
+    _presets = []
+    if not day_locked:
+        _db_p = connect()
+        _presets = _db_p.execute(
+            "SELECT * FROM user_time_presets WHERE user_id=? ORDER BY sort_order",
+            (u["id"],)
+        ).fetchall()
+        _db_p.close()
+
+    _preset_opts = "".join(
+        f'<option value="{p["time_in"]},{p["time_out"]},{p["break_minutes"]}">'
+        f'{_html.escape(p["label"])} ({p["time_in"]}–{p["time_out"]})'
+        f'</option>'
+        for p in _presets
+    )
+    _preset_select = f"""
+    <div style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.preset')}</label>
+      <select id="preset-select" onchange="applyPreset(this)"
+              style="font-size:13px;padding:6px 8px;border-radius:6px;min-width:200px;">
+        <option value="">{t('day.preset_choose')}</option>
+        {_preset_opts}
+      </select>
+    </div>
+    <script>
+    function applyPreset(sel) {{
+      if (!sel.value) return;
+      var parts = sel.value.split(',');
+      document.getElementById('tin_add').value  = parts[0];
+      document.getElementById('tout_add').value = parts[1];
+      document.getElementById('brk_day_add').value = parts[2] || '0';
+      sel.value = '';
+    }}
+    </script>
+    """ if _presets else ""
+
     # Compact add-block form
     _add_block_form_html = "" if day_locked else f"""
       <form method="post" action="/day/{day}/block/add" id="block-add-form" novalidate onsubmit="return validateBlockForm(this)">
+        {_preset_select}
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:nowrap;margin-bottom:12px;">
           <div>
             <label style="font-size:11px;color:var(--mu);text-transform:uppercase;font-weight:600;display:block;margin-bottom:4px;">{t('day.time_in')}</label>
@@ -8103,6 +8141,60 @@ def settings_view():
     ic_cal_name  = (_ic_row["icloud_calendar_name"] or "")      if _ic_row else ""
     ic_last_sync = (_ic_row["icloud_last_sync"] or "")          if _ic_row else ""
 
+    # Presets für Settings-Seite laden
+    _set_presets_db = connect()
+    _set_presets = _set_presets_db.execute(
+        "SELECT * FROM user_time_presets WHERE user_id=? ORDER BY sort_order",
+        (u["id"],)
+    ).fetchall()
+    _set_presets_db.close()
+
+    _presets_table_rows = "".join(
+        f"<tr>"
+        f"<td style='padding:6px 10px;'>{_html.escape(p['label'])}</td>"
+        f"<td style='padding:6px 10px;'>{p['time_in']}</td>"
+        f"<td style='padding:6px 10px;'>{p['time_out']}</td>"
+        f"<td style='padding:6px 10px;'>{p['break_minutes']}</td>"
+        f"<td style='padding:6px 10px;'>"
+        f"<form method='post' action='/settings/presets/delete' style='display:inline;'>"
+        f"<input type='hidden' name='preset_id' value='{p['id']}'>"
+        f"<button class='btn btn-sm' type='submit' style='color:#dc2626;'>{t('btn.delete')}</button>"
+        f"</form></td>"
+        f"</tr>"
+        for p in _set_presets
+    )
+    _presets_table = (
+        f"<table style='width:100%;border-collapse:collapse;font-size:13px;margin-bottom:12px;'>"
+        f"<thead><tr style='border-bottom:1px solid var(--br);'>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('settings.preset_label')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.time_in')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.time_out')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.break_min')}</th>"
+        f"<th></th></tr></thead>"
+        f"<tbody>{_presets_table_rows}</tbody></table>"
+    ) if _set_presets else f"<p style='color:var(--mu);font-size:13px;margin-bottom:12px;'>{t('settings.preset_hint')}</p>"
+
+    _presets_add_form = (
+        f"<div style='color:var(--mu);font-size:13px;'>{t('settings.preset_max')}</div>"
+        if len(_set_presets) >= 3 else
+        f"<form method='post' action='/settings/presets/add'>"
+        f"<div style='display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;'>"
+        f"<div><label style='font-size:12px;color:var(--mu);display:block;margin-bottom:3px;'>{t('settings.preset_label')}</label>"
+        f"<input name='label' maxlength='30' required placeholder='Früh'>"
+        f"</div>"
+        f"<div><label style='font-size:12px;color:var(--mu);display:block;margin-bottom:3px;'>{t('day.time_in')}</label>"
+        f"<input type='time' name='time_in' required style='width:110px;font-size:1rem;padding:5px 8px;border-radius:6px;'>"
+        f"</div>"
+        f"<div><label style='font-size:12px;color:var(--mu);display:block;margin-bottom:3px;'>{t('day.time_out')}</label>"
+        f"<input type='time' name='time_out' required style='width:110px;font-size:1rem;padding:5px 8px;border-radius:6px;'>"
+        f"</div>"
+        f"<div><label style='font-size:12px;color:var(--mu);display:block;margin-bottom:3px;'>{t('day.break_min')}</label>"
+        f"<input type='number' name='break_minutes' value='0' min='0' style='width:70px;font-size:1rem;padding:5px 8px;border-radius:6px;'>"
+        f"</div>"
+        f"<button class='btn primary btn-sm' type='submit' style='align-self:flex-end;'>{t('btn.add')}</button>"
+        f"</div></form>"
+    )
+
     if contouring_enabled:
         _kont_html = (
             f"<div style='margin-bottom:10px;'><span style='color:var(--ok);font-weight:600;'>{t('settings.kont_active')}</span>"
@@ -8342,7 +8434,20 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 5. Kalender-Integration -->
+    <!-- 5. Standardzeiten / Vorlagen -->
+    <div class="acc" id="acc-presets">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-presets-body')">
+        <span>{t('settings.presets')}</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-presets-body">
+        <div class="acc-inner">
+          {_presets_table}
+          {_presets_add_form}
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. Kalender-Integration -->
     {_render_calendar_integration_section(
         cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url,
         cal_auth_mode, _basic_webcal_url, _basic_ical_url,
@@ -8610,6 +8715,53 @@ def settings_reminder_save():
         db.close()
     add_flash(t("flash.success.reminder_saved"), "success")
     return redirect("/settings")
+
+
+@app.post("/settings/presets/add")
+@login_required
+def settings_preset_add():
+    bootstrap()
+    u = current_user()
+    db = connect()
+    count = db.execute(
+        "SELECT COUNT(*) as c FROM user_time_presets WHERE user_id=?",
+        (u["id"],)
+    ).fetchone()["c"]
+    if count >= 3:
+        add_flash(t("settings.preset_max"), "warning")
+        db.close()
+        return redirect(url_for("settings_view") + "#acc-presets")
+    label    = (request.form.get("label") or "").strip()[:30]
+    time_in  = (request.form.get("time_in") or "").strip()
+    time_out = (request.form.get("time_out") or "").strip()
+    brk      = int(request.form.get("break_minutes") or 0)
+    if label and time_in and time_out:
+        db.execute(
+            "INSERT INTO user_time_presets (user_id, label, time_in, time_out, break_minutes, sort_order) "
+            "VALUES (?,?,?,?,?,?)",
+            (u["id"], label, time_in, time_out, brk, count)
+        )
+        db.commit()
+        add_flash(t("settings.preset_saved"), "success")
+    db.close()
+    return redirect(url_for("settings_view") + "#acc-presets")
+
+
+@app.post("/settings/presets/delete")
+@login_required
+def settings_preset_delete():
+    bootstrap()
+    u = current_user()
+    pid = int(request.form.get("preset_id") or 0)
+    db = connect()
+    db.execute(
+        "DELETE FROM user_time_presets WHERE id=? AND user_id=?",
+        (pid, u["id"])
+    )
+    db.commit()
+    db.close()
+    add_flash(t("settings.preset_deleted"), "success")
+    return redirect(url_for("settings_view") + "#acc-presets")
 
 
 @app.post("/settings/password")
@@ -12013,6 +12165,7 @@ def admin_users():
             f'<td style="white-space:nowrap;">'
             f'<a href="/admin/users/{r["id"]}/edit">Bearbeiten</a>'
             f'<a href="/admin/users/{r["id"]}/vacation-carryover" style="margin-left:8px;">Urlaubsübertrag</a>'
+            f'<a href="/admin/users/{r["id"]}/presets" style="margin-left:8px;">{t("settings.presets")}</a>'
             f'{impersonate_btn}{delete_btn}</td>'
             f'</tr>'
         )
@@ -12554,6 +12707,105 @@ def admin_users_unlock(user_id: int):
     unlock_account(user_id)
     add_flash(t("auth.unlocked"), "success")
     return redirect("/admin")
+
+
+@app.route("/admin/users/<int:user_id>/presets", methods=["GET", "POST"])
+@timemanager_required
+def admin_user_presets(user_id: int):
+    bootstrap()
+    u = current_user()
+    db = connect()
+    target = db.execute(
+        "SELECT id, username, display_name FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    if not target:
+        db.close()
+        abort(404)
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "add":
+            count = db.execute(
+                "SELECT COUNT(*) as c FROM user_time_presets WHERE user_id=?", (user_id,)
+            ).fetchone()["c"]
+            if count < 3:
+                label    = (request.form.get("label") or "").strip()[:30]
+                time_in  = (request.form.get("time_in") or "").strip()
+                time_out = (request.form.get("time_out") or "").strip()
+                brk      = int(request.form.get("break_minutes") or 0)
+                if label and time_in and time_out:
+                    db.execute(
+                        "INSERT INTO user_time_presets (user_id, label, time_in, time_out, break_minutes, sort_order) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (user_id, label, time_in, time_out, brk, count)
+                    )
+                    db.commit()
+                    add_flash(t("settings.preset_saved"), "success")
+                else:
+                    add_flash(t("settings.preset_max"), "warning")
+        elif action == "delete":
+            pid = int(request.form.get("preset_id") or 0)
+            db.execute("DELETE FROM user_time_presets WHERE id=? AND user_id=?", (pid, user_id))
+            db.commit()
+            add_flash(t("settings.preset_deleted"), "success")
+        db.close()
+        return redirect(f"/admin/users/{user_id}/presets")
+
+    presets = db.execute(
+        "SELECT * FROM user_time_presets WHERE user_id=? ORDER BY sort_order", (user_id,)
+    ).fetchall()
+    db.close()
+    display = target["display_name"] or target["username"]
+
+    presets_rows = "".join(
+        f"<tr><td style='padding:6px 10px;'>{_html.escape(p['label'])}</td>"
+        f"<td style='padding:6px 10px;'>{p['time_in']}</td>"
+        f"<td style='padding:6px 10px;'>{p['time_out']}</td>"
+        f"<td style='padding:6px 10px;'>{p['break_minutes']}</td>"
+        f"<td style='padding:6px 10px;'>"
+        f"<form method='post' style='display:inline;'>"
+        f"<input type='hidden' name='action' value='delete'>"
+        f"<input type='hidden' name='preset_id' value='{p['id']}'>"
+        f"<button class='btn btn-sm' type='submit' style='color:#dc2626;'>{t('btn.delete')}</button>"
+        f"</form></td></tr>"
+        for p in presets
+    )
+    add_form = (
+        f"<p style='color:var(--mu);'>{t('settings.preset_max')}</p>"
+        if len(presets) >= 3 else
+        f"<form method='post' style='display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;'>"
+        f"<input type='hidden' name='action' value='add'>"
+        f"<div><label style='font-size:12px;'>{t('settings.preset_label')}</label><br>"
+        f"<input name='label' maxlength='30' required placeholder='Früh'></div>"
+        f"<div><label style='font-size:12px;'>{t('day.time_in')}</label><br>"
+        f"<input type='time' name='time_in' required style='width:110px;font-size:1rem;padding:5px 8px;border-radius:6px;'></div>"
+        f"<div><label style='font-size:12px;'>{t('day.time_out')}</label><br>"
+        f"<input type='time' name='time_out' required style='width:110px;font-size:1rem;padding:5px 8px;border-radius:6px;'></div>"
+        f"<div><label style='font-size:12px;'>{t('day.break_min')}</label><br>"
+        f"<input type='number' name='break_minutes' value='0' min='0' style='width:70px;font-size:1rem;padding:5px 8px;border-radius:6px;'></div>"
+        f"<button class='btn primary btn-sm' type='submit' style='align-self:flex-end;'>{t('btn.add')}</button>"
+        f"</form>"
+    )
+    table = (
+        f"<table style='width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;'>"
+        f"<thead><tr style='border-bottom:1px solid var(--br);'>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('settings.preset_label')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.time_in')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.time_out')}</th>"
+        f"<th style='padding:4px 10px;text-align:left;'>{t('day.break_min')}</th>"
+        f"<th></th></tr></thead><tbody>{presets_rows}</tbody></table>"
+        if presets else f"<p style='color:var(--mu);font-size:13px;margin-bottom:12px;'>{t('settings.preset_hint')}</p>"
+    )
+    body = f"""
+    {flash_html()}
+    <div style='max-width:700px;margin:1.5rem auto;'>
+      <div style='margin-bottom:1rem;'>
+        <a href='/admin/users/{user_id}/edit' class='btn btn-sm'>← {_html.escape(display)}</a>
+      </div>
+      <h2 style='margin-bottom:1rem;'>{t('settings.presets')} – {_html.escape(display)}</h2>
+      {table}
+      {add_form}
+    </div>"""
+    return render_template_string(layout(t("settings.presets"), body, u, APP_VERSION))
 
 
 @app.get("/admin/users/<int:user_id>/vacation-carryover")
