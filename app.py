@@ -7154,7 +7154,7 @@ syncDayBemerkung(document.getElementById("day_type_sel"));
     }})();
     </script>
     """
-    return render_template_string(layout(t("day.title"), body, u, APP_VERSION, show_back=False))
+    return render_template_string(layout(t("day.title"), body, u, APP_VERSION, show_back=True))
 
 
 def _business_trip_section_compact(day: str, trip, locked: bool = False) -> str:
