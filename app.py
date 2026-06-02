@@ -13830,6 +13830,18 @@ def admin_home():
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
     _html_regional  = _tab(_render_regional_section(), "system") if _is_sysadm else ""
     _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
+
+    # User-Export/Import Dropdowns (für acc-user benötigt)
+    _ue_db = connect()
+    _ue_users = _ue_db.execute(
+        "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY username"
+    ).fetchall()
+    _ue_db.close()
+    user_export_opts = "".join(
+        f'<option value="{_uu["id"]}">{_html.escape(_uu["display_name"] or _uu["username"])}</option>'
+        for _uu in _ue_users
+    )
+    user_import_opts = user_export_opts
     _html_bot       = _tab(_render_bot_section(), "system") if _is_sysadm else ""
     _html_update    = _tab(_render_update_section(), "system") if _is_sysadm else ""
     _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
