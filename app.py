@@ -12629,8 +12629,36 @@ def admin_users_edit(user_id: int):
     # Schedule list for this user
     all_scheds = _get_user_schedules_all(user_id)
     today_iso = datetime.date.today().isoformat()
+    cur_year = datetime.date.today().year
     cur_sched = _get_user_schedule_for_day(user_id, today_iso)
     cur_id = (cur_sched or {}).get("id")
+
+    # Vacation summary
+    _vc = _vacation_calc(user_id, cur_year)
+    _vac_html = (
+        f"<div style='display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin-bottom:10px;'>"
+        f"<span><b>{t('settings.vac_entitlement')}:</b> {_vc['entitlement']} Tage</span>"
+        f"<span><b>{t('settings.vac_used')}:</b> {_vc['used_total']} Tage</span>"
+        f"<span><b>{t('settings.vac_remaining')}:</b> {_vc['remaining_total']} Tage</span>"
+        f"</div>"
+        f"<a class='btn btn-sm' href='/admin/users/{user_id}/vacation-carryover'>{t('admin.carryover_manage_btn')}</a>"
+    )
+
+    # Balance adjustments (last 5)
+    _ba_db = connect()
+    _ba_rows = _ba_db.execute(
+        "SELECT ba.*, u2.username as by_name FROM balance_adjustments ba "
+        "LEFT JOIN users u2 ON u2.id=ba.created_by "
+        "WHERE ba.user_id=? ORDER BY ba.adjustment_date DESC LIMIT 5",
+        (user_id,)
+    ).fetchall()
+    _ba_db.close()
+    _ba_trs = "".join(
+        f"<tr><td style='font-size:12px;white-space:nowrap;'>{_fmt_date_de(b['adjustment_date'])}</td>"
+        f"<td style='font-size:13px;'>{_fmt_minutes(b['minutes'])}</td>"
+        f"<td style='font-size:12px;color:var(--mu);'>{_html.escape(b['reason'] or '')}</td></tr>"
+        for b in _ba_rows
+    ) or f"<tr><td colspan='3' style='color:var(--mu);font-size:13px;'>–</td></tr>"
     sched_rows = ""
     for s in all_scheds:
         sid = s.get("id")
@@ -12671,14 +12699,17 @@ def admin_users_edit(user_id: int):
     body = f'''
     {flash_html()}
     {FORM_ASSETS_JS}
-    <div class="card">
-      <h3>Benutzer bearbeiten: {r["username"]}</h3>
+    <div style="margin-bottom:12px;">
+      <a href="/admin" class="btn btn-sm">← {t('nav.admin')}</a>
+    </div>
+    <div class="card" id="base">
+      <h3 style="margin-top:0;">👤 {_html.escape(r["username"])}</h3>
       <form method="post" action="/admin/users/{user_id}/edit">
         {role_dropdown}
         {admin_only_field}
-        <label><input type="checkbox" name="is_active" value="1" {active_checked}> aktiv</label><br><br>
+        <label><input type="checkbox" name="is_active" value="1" {active_checked}> {t('admin.active')}</label><br><br>
 
-        <div><label>Arbeitsbeginn (start_date)</label><br>
+        <div><label>{t('admin.tracking_start_col')}</label><br>
           {_date_input("tracking_start_date", tsd_val)}
           <div class="small" style="color:#777;margin-top:3px;">Kein Eintrag vor diesem Datum möglich.</div>
         </div><br>
@@ -12694,27 +12725,61 @@ def admin_users_edit(user_id: int):
         {_absence_types_html}
         {_approver_section}
 
-        <button class="btn" type="submit">Speichern</button>
-        <a class="btn" href="/admin/users">Zurück</a>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+          <button class="btn primary" type="submit">{t('btn.save')}</button>
+          <a class="btn" href="/admin">{t('btn.back')}</a>
+        </div>
       </form>
       <hr style="margin:16px 0;">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <span class="small" style="color:var(--mu);">Zufallspasswort generieren, "Passwort ändern" setzen und per Mail versenden:</span>
+        <span class="small" style="color:var(--mu);">{t('admin.pw_reset_hint')}</span>
         <form method="post" action="/admin/users/{user_id}/reset-password" style="display:inline;">
-          <button class="btn btn-sm" type="submit">🔑 Passwort zurücksetzen</button>
+          <button class="btn btn-sm" type="submit">🔑 {t('admin.pw_reset_btn')}</button>
         </form>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="schedule">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-        <h3 style="margin:0;">Zeitschemata</h3>
-        <a class="btn" href="/admin/schedule/{user_id}/edit/new">+ Neues Schema</a>
+        <h3 style="margin:0;">🕐 {t('admin.acc_schedules')}</h3>
+        <div style="display:flex;gap:6px;">
+          <a class="btn btn-sm" href="/admin/user/{user_id}/schedule">{t('btn.edit')}</a>
+          <a class="btn btn-sm" href="/admin/schedule/{user_id}/edit/new">+ {t('settings.sched_add_new')}</a>
+        </div>
       </div>
-      <table>
-        <thead><tr><th>Gültig ab</th><th>Status</th><th>Soll</th><th></th></tr></thead>
+      <table style="width:100%;">
+        <thead><tr><th>{t('settings.schedule_valid')}</th><th>{t('common.status')}</th><th>Soll</th><th></th></tr></thead>
         <tbody>{sched_rows}</tbody>
       </table>
+    </div>
+
+    <div class="card" id="vacation">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+        <h3 style="margin:0;">🏖 {t('admin.acc_vacation')} {cur_year}</h3>
+      </div>
+      {_vac_html}
+    </div>
+
+    <div class="card" id="balance">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+        <h3 style="margin:0;">⚖ {t('balance.add_adjustment')}</h3>
+        <a class="btn btn-sm" href="/admin/users/{user_id}/edit#balance">{t('balance.title')}</a>
+      </div>
+      <table style="width:100%;">
+        <thead><tr>
+          <th style="font-size:12px;">{t('balance.date')}</th>
+          <th style="font-size:12px;">Minuten</th>
+          <th style="font-size:12px;">{t('balance.adjustment_reason')}</th>
+        </tr></thead>
+        <tbody>{_ba_trs}</tbody>
+      </table>
+    </div>
+
+    <div class="card" id="presets">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+        <h3 style="margin:0;">⏱ {t('settings.presets')}</h3>
+        <a class="btn btn-sm" href="/admin/users/{user_id}/presets">{t('btn.edit')}</a>
+      </div>
     </div>
     '''
     return render_template_string(layout(f"{t('admin.title')}: {t('admin.edit_user')}", body, u, APP_VERSION))
@@ -13691,8 +13756,7 @@ def admin_home():
         sched_trs += (
             f'<tr><td>{display}{sub_html}</td>'
             f'<td class="small">{soll_str}</td>'
-            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit">{t("admin.acc_schedules")}</a>'
-            f' <a class="btn btn-sm" href="/admin/user/{uid}/schedule">{t("btn.edit")}</a></td></tr>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit#schedule">{t("btn.edit")}</a></td></tr>'
         )
 
         # Vacation row
@@ -13700,7 +13764,7 @@ def admin_home():
         exc_badge = f" <span class='small' style='color:#d97706;'>{t('admin.carryover_exception_badge')}</span>" if exc_on else ""
         vac_trs += (
             f'<tr><td>{display}{sub_html}{exc_badge}</td>'
-            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/vacation-carryover">{t("admin.carryover_manage_btn")}</a></td></tr>'
+            f'<td><a class="btn btn-sm" href="/admin/users/{uid}/edit#vacation">{t("btn.edit")}</a></td></tr>'
         )
 
     # ── Section 4: Periods ────────────────────────────────────────────────────
@@ -13732,7 +13796,9 @@ def admin_home():
         ) if ulocks else ""
         periods_trs += (
             f"<tr><td><b>{display}</b></td><td>{status}</td>"
-            f"<td><div style='display:flex;gap:4px;'>{unlock_form}</div></td></tr>"
+            f"<td><div style='display:flex;gap:4px;'>{unlock_form}"
+            f"<a class='btn btn-sm' href='/admin/users/{uid}/edit#balance'>{t('btn.edit')}</a>"
+            f"</div></td></tr>"
         )
 
     # ── Section 5: Mail ───────────────────────────────────────────────────────
