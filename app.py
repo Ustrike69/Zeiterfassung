@@ -6892,14 +6892,14 @@ def day_detail(day: str):
             <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_in')}</label>
             <input class="tin" id="tin_add" name="time_in" type="time"
                    list="time_suggestions" required
-                   style="width:100%;font-size:2rem;font-weight:700;padding:10px 12px;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--fg);text-align:center;">
+                   style="width:100%;font-size:1.4rem;font-weight:600;padding:8px 12px;border-radius:6px;border:2px solid var(--br);background:var(--input-bg,var(--surface2));color:var(--fg);text-align:center;box-shadow:inset 0 1px 3px rgba(0,0,0,0.2);">
           </div>
-          <div style="font-size:2rem;font-weight:300;color:var(--mu);padding-bottom:10px;align-self:flex-end;">–</div>
+          <div style="font-size:1.4rem;font-weight:300;color:var(--mu);padding-bottom:10px;align-self:flex-end;">–</div>
           <div style="flex:1;min-width:130px;">
             <label style="font-size:11px;font-weight:700;letter-spacing:.05em;color:var(--mu);text-transform:uppercase;display:block;margin-bottom:6px;">{t('day.time_out')}</label>
             <input id="tout_add" name="time_out" type="time"
                    list="time_suggestions" required
-                   style="width:100%;font-size:2rem;font-weight:700;padding:10px 12px;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--fg);text-align:center;">
+                   style="width:100%;font-size:1.4rem;font-weight:600;padding:8px 12px;border-radius:6px;border:2px solid var(--br);background:var(--input-bg,var(--surface2));color:var(--fg);text-align:center;box-shadow:inset 0 1px 3px rgba(0,0,0,0.2);">
           </div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px;">
