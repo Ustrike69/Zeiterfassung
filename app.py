@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.4"
+APP_VERSION = "v3.0.5.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -8514,15 +8514,15 @@ function wizValidate(e){{
           {_edit_forms}
           {"" if not _can_self_edit else f'''<div class="acc-sub">
             <b style="font-size:14px;">{t('settings.sched_add_new')}</b>
-            <form method="post" action="/settings/schedule/add" style="margin-top:10px;">
-              <div style="margin-bottom:8px;">
-                <label style="font-size:12px;color:var(--mu);">{t('settings.schedule_valid')}</label>
-                <input type="date" name="valid_from" value="{datetime.date.today().isoformat()}"
-                       style="margin-left:8px;font-size:13px;padding:4px 8px;border-radius:4px;">
-              </div>
-              {_sched_daily_blocks_html(None, "daily")}
-              <button class="btn primary" type="submit" style="margin-top:12px;">{t("btn.save")}</button>
-            </form>
+            <div style="margin-top:10px;">
+              {_sched_form_html(
+                  _normalize_schedule({}),
+                  "/settings/schedule/add",
+                  url_for("settings_view") + "#acc-zeit",
+                  show_auto_breaks=True,
+                  auto_breaks_enabled=auto_breaks_enabled
+              )}
+            </div>
           </div>'''}
         </div>
       </div>
@@ -8865,24 +8865,17 @@ def settings_schedule_add():
         add_flash(t("settings.schedule_readonly"), "warning")
         db.close()
         return redirect(url_for("settings_view") + "#acc-zeit")
-    valid_from = (request.form.get("valid_from") or "").strip() or datetime.date.today().isoformat()
-    blocks = _parse_sched_blocks_from_form(request.form)
-    if not blocks:
-        add_flash(t("settings.schedule_no_blocks"), "warning")
+    sched = _parse_sched_form(request.form)
+    if not sched["valid_from"]:
+        add_flash(t("flash.error.date_format"), "error")
         db.close()
         return redirect(url_for("settings_view") + "#acc-zeit")
-    mask = sum(1 << wd for wd in blocks.keys())
-    db.execute(
-        "INSERT INTO user_schedules (user_id, valid_from, mode, workdays_mask, weekly_minutes, allow_self_edit) "
-        "VALUES (?, ?, 'daily', ?, 0, 1)",
-        (u["id"], valid_from, mask)
-    )
-    db.commit()
-    sched_id = db.execute(
-        "SELECT id FROM user_schedules WHERE user_id=? AND valid_from=? AND mode='daily' ORDER BY id DESC LIMIT 1",
-        (u["id"], valid_from)
-    ).fetchone()["id"]
-    _sched_save_blocks(sched_id, blocks)
+    db.close()
+    _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "") == "1" else 0)
+    sched_id = _sched_save_to_db(u["id"], sched)
+    if request.form.get("use_daily_blocks"):
+        blocks = _parse_sched_blocks_from_form(request.form)
+        _sched_save_blocks(sched_id, blocks)
     db.close()
     add_flash(t("success.schedule_saved"), "success")
     return redirect(url_for("settings_view") + "#acc-zeit")
