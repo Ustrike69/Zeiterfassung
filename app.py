@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.2.dev2"
+APP_VERSION = "v3.0.2.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -77,7 +77,7 @@ def _slot_applies_on_date(slot, iso_date: str,
     wd = d.weekday()
 
     slot_days = []
-    if slot.get("weekdays"):
+    if slot["weekdays"]:
         slot_days = [int(x) for x in str(slot["weekdays"]).split(",")]
 
     if wd >= 5 and wd not in slot_days:
@@ -17217,13 +17217,21 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
                 f'⚠️ {t("staffing.no_lead")}</div>'
                 if day_data.get("lead_missing") else ""
             )
+            _lead_row = (
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{lead_html}</div>'
+                if lead_html else ""
+            )
+            _staff_row = (
+                f'<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;">{staff_html}{absent_html}</div>'
+                if (staff_html or absent_html) else ""
+            )
             cells += (
                 f"<td style='padding:6px 10px;border-left:3px solid {color};{_r_border}{_hol_bg}cursor:pointer;'"
                 f" onclick=\"location.href='/staffing/day?date={day_iso}&plan_id={plan_id}'\">"
                 f'<div style="display:inline-block;background:{_badge_bg};color:#fff;'
                 f'border-radius:4px;padding:1px 7px;font-size:12px;font-weight:700;margin-bottom:4px;">'
                 f'{day_data["count"]}/{day_data["min_staff"]} {_SI[status]}</div>'
-                f'<div style="display:flex;flex-wrap:wrap;gap:3px;">{lead_html}{staff_html}{absent_html}</div>'
+                f'{_lead_row}{_staff_row}'
                 f'{_lead_warn}'
                 f'</td>'
             )
