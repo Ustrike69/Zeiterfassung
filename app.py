@@ -15955,7 +15955,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
                 _srole       = s["slot_role"] or "staff"
-                _plan_lead_label = (p.get("lead_label") or "") or "Leiter"
+                _plan_lead_label = (p["lead_label"] if p["lead_label"] else "Leiter") if "lead_label" in p.keys() else "Leiter"
                 _srole_label = _html.escape(_plan_lead_label) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
@@ -16336,7 +16336,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
                 _srole       = s["slot_role"] or "staff"
-                _plan_lead_label2 = (p.get("lead_label") or "") or "Leiter"
+                _plan_lead_label2 = (p["lead_label"] if p["lead_label"] else "Leiter") if "lead_label" in p.keys() else "Leiter"
                 _srole_label = _html.escape(_plan_lead_label2) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
@@ -18380,7 +18380,7 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
     wd_name  = _WD_NAMES[d.weekday()]
     date_str = d.strftime("%d.%m.%Y")
 
-    lead_label = (plan.get("lead_label") if plan else None) or "Leiter"
+    lead_label = (plan["lead_label"] if plan and "lead_label" in plan.keys() and plan["lead_label"] else "Leiter")
 
     # Pre-resolve all t() calls — avoids issues inside nested f-strings
     _lbl_present   = t("staffing.present")
