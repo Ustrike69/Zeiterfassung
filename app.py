@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.6.dev1"
+APP_VERSION = "v3.0.6.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -1801,7 +1801,9 @@ def _sched_save_exceptions_from_form(sched_id: int, form) -> None:
     db.close()
 
 
-def _sched_daily_blocks_html(sched_id, mode: str) -> str:
+def _sched_daily_blocks_html(sched_id, mode: str,
+                              show_checkbox: bool = True,
+                              always_visible: bool = False) -> str:
     """Render the Tagesblöcke section for the schedule form."""
     _WD_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     existing: dict[int, list] = {}
@@ -1835,8 +1837,12 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
         except Exception:
             pass
 
-    checked = "checked" if has_blocks else ""
-    display = "block" if has_blocks else "none"
+    if always_visible or not show_checkbox:
+        checked = "checked"
+        display = "block"
+    else:
+        checked = "checked" if has_blocks else ""
+        display = "block" if has_blocks else "none"
     _exc_label = t("settings.schedule_exceptions")
     _add_exc_label = t("settings.schedule_add_exception")
 
@@ -1886,8 +1892,8 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
             f'</div>'
         )
 
-    return f"""
-        <div class="card" style="background:#fafafa;margin-top:12px;">
+    if show_checkbox:
+        _header_html = f"""
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
             <label style="font-weight:600;">
               <input type="checkbox" name="use_daily_blocks" value="1" {checked}
@@ -1896,7 +1902,14 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
               {t('settings.schedule_blocks')}
             </label>
             <span class="small" style="color:#777;">{t('settings.schedule_blocks_hint')}</span>
-          </div>
+          </div>"""
+    else:
+        _header_html = f"""
+          <input type="hidden" name="use_daily_blocks" value="1">"""
+
+    return f"""
+        <div class="card" style="background:#fafafa;margin-top:12px;">
+          {_header_html}
           <div id="sdb-section" style="display:{display};">
             {wd_rows}
           </div>
@@ -2676,7 +2689,8 @@ def onboarding():
             </div>
             <div id="sec-daily-blocks" style="display:none;">
               <p class="small" style="margin-bottom:8px;">{t('settings.schedule_blocks_hint')}</p>
-              {_sched_daily_blocks_html(sched_id3, "daily")}
+              {_sched_daily_blocks_html(sched_id3, "daily",
+                                       show_checkbox=False, always_visible=True)}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn primary" type="submit">Weiter →</button>
