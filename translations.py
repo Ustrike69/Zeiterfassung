@@ -1112,6 +1112,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.min_lead":                "Mindest-Leiter",
         "staffing.min_lead_hint":           "Mindestanzahl Leiter die anwesend sein müssen",
         "staffing.require_lead":            "Leiter erforderlich",
+        "staffing.lead_label":              "Bezeichnung Leiter",
+        "staffing.lead_label_hint":         "Wie wird der Leiter in diesem Plan genannt?",
         "staffing.default_min_staff":       "Standard Mindestbesetzung",
         "staffing.is_lead":                 "Ist Leiter",
 
@@ -2339,6 +2341,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.min_lead":                "Min. leads",
         "staffing.min_lead_hint":           "Minimum number of leads required",
         "staffing.require_lead":            "Lead required",
+        "staffing.lead_label":              "Lead title",
+        "staffing.lead_label_hint":         "How is the lead called in this plan?",
         "staffing.default_min_staff":       "Default min. staff",
         "staffing.is_lead":                 "Is lead",
 

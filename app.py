@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.6.dev2"
+APP_VERSION = "v3.0.6.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -15955,7 +15955,8 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
                 _srole       = s["slot_role"] or "staff"
-                _srole_label = t("staffing.role_lead") if _srole == "lead" else t("staffing.role_staff")
+                _plan_lead_label = (p.get("lead_label") or "") or "Leiter"
+                _srole_label = _html.escape(_plan_lead_label) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
                 slots_html += f"""
@@ -16129,6 +16130,13 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     <input type="checkbox" name="require_lead" value="1">
                     {t('staffing.require_lead')}
                   </label>
+                </div>
+                <div>
+                  <label style="font-size:12px;">{t('staffing.lead_label')}</label>
+                  <input type="text" name="lead_label" value="Leiter" maxlength="30"
+                         placeholder="z.B. Arzt, Leiter, Supervisor"
+                         style="display:block;margin-top:4px;width:180px;">
+                  <small style="color:var(--mu);">{t('staffing.lead_label_hint')}</small>
                 </div>
                 <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
               </div>
@@ -16328,7 +16336,8 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 no_members = f'<p style="font-size:12px;color:var(--mu);">{t("admin.no_team_members")}</p>' if not team_user_rows else ""
 
                 _srole       = s["slot_role"] or "staff"
-                _srole_label = t("staffing.role_lead") if _srole == "lead" else t("staffing.role_staff")
+                _plan_lead_label2 = (p.get("lead_label") or "") or "Leiter"
+                _srole_label = _html.escape(_plan_lead_label2) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
                 slots_html += f"""
@@ -16499,6 +16508,13 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                     <input type="checkbox" name="require_lead" value="1">
                     {t('staffing.require_lead')}
                   </label>
+                </div>
+                <div>
+                  <label style="font-size:12px;">{t('staffing.lead_label')}</label>
+                  <input type="text" name="lead_label" value="Leiter" maxlength="30"
+                         placeholder="z.B. Arzt, Leiter, Supervisor"
+                         style="display:block;margin-top:4px;width:180px;">
+                  <small style="color:var(--mu);">{t('staffing.lead_label_hint')}</small>
                 </div>
                 <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
               </div>
@@ -17899,7 +17915,13 @@ def _get_staffing_week_data(plan_id: int) -> dict:
             for ab in absences
         )
 
-    result = {"monday": monday, "days": days, "slots": []}
+    try:
+        _plan_row = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
+        lead_label = (_plan_row["lead_label"] if _plan_row and _plan_row["lead_label"] else None) or "Leiter"
+    except Exception:
+        lead_label = "Leiter"
+
+    result = {"monday": monday, "days": days, "slots": [], "lead_label": lead_label}
     for slot in slots:
         slot_days = []
         tf = slot["time_from"]
@@ -17998,7 +18020,14 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             for ab in absences
         )
 
-    result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates}
+    try:
+        _plan_row_m = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
+        lead_label_m = (_plan_row_m["lead_label"] if _plan_row_m and _plan_row_m["lead_label"] else None) or "Leiter"
+    except Exception:
+        lead_label_m = "Leiter"
+
+    result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates,
+              "lead_label": lead_label_m}
     for day in days:
         iso = day.isoformat()
         day_slots = []
@@ -18045,6 +18074,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
     monday = data["monday"]
     days   = data["days"]
     today  = datetime.date.today()
+    lead_label = data.get("lead_label", "Leiter")
 
     prev_mon = (monday - datetime.timedelta(days=7)).isoformat()
     next_mon = (monday + datetime.timedelta(days=7)).isoformat()
@@ -18135,7 +18165,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             _badge_bg = {"ok": "#16a34a", "warn": "#d97706", "empty": "#dc2626"}[status]
             lead_html = " ".join(
                 f'<span style="background:#eab308;color:#000;border-radius:3px;'
-                f'padding:1px 5px;font-size:11px;white-space:nowrap;">'
+                f'padding:1px 5px;font-size:11px;white-space:nowrap;"'
+                f' title="{_html.escape(lead_label)}: {_html.escape((a["display_name"] or a["username"] or "?"))}">'
                 f'♦ {_html.escape((a["display_name"] or a["username"] or "?")[:8])}</span>'
                 for a in day_data.get("lead_present", [])
             )
@@ -18161,7 +18192,7 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             )
             _lead_warn = (
                 f'<div style="font-size:11px;color:#dc2626;margin-top:2px;">'
-                f'⚠️ {t("staffing.no_lead")}</div>'
+                f'⚠️ Kein {_html.escape(lead_label)} anwesend</div>'
                 if day_data.get("lead_missing") else ""
             )
             _lead_row = (
@@ -18204,6 +18235,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
     year  = data["year"]
     month = data["month"]
     today = datetime.date.today()
+    lead_label = data.get("lead_label", "Leiter")
 
     prev_y, prev_m = (year, month - 1) if month > 1 else (year - 1, 12)
     next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
@@ -18264,7 +18296,7 @@ def _render_staffing_month(data: dict, plan_id: int) -> str:
             if s.get("lead_missing"):
                 slot_lines += (
                     f'<div style="font-size:9px;color:#dc2626;white-space:nowrap;">'
-                    f'{t("staffing.lead_warning")}</div>'
+                    f'⚠️ Kein {_html.escape(lead_label)}</div>'
                 )
         tds.append(
             f'<td style="padding:4px;vertical-align:top;cursor:pointer;{border}{bg}{today_ol}'
@@ -18347,6 +18379,8 @@ def _render_staffing_day(iso_date, d, plan, plan_id, slot_data,
     next_d   = (d + datetime.timedelta(days=1)).isoformat()
     wd_name  = _WD_NAMES[d.weekday()]
     date_str = d.strftime("%d.%m.%Y")
+
+    lead_label = (plan.get("lead_label") if plan else None) or "Leiter"
 
     # Pre-resolve all t() calls — avoids issues inside nested f-strings
     _lbl_present   = t("staffing.present")
@@ -18854,10 +18888,12 @@ def admin_staffing():
             desc          = request.form.get("description", "").strip()
             default_min_s = max(1, int(request.form.get("default_min_staff", 2) or 2))
             require_lead  = 1 if request.form.get("require_lead") else 0
+            lead_label    = request.form.get("lead_label", "").strip() or "Leiter"
             if name and team_id:
                 db.execute(
-                    "INSERT INTO staffing_plans (team_id, name, description, default_min_staff, require_lead) VALUES (?,?,?,?,?)",
-                    (team_id, name, desc, default_min_s, require_lead)
+                    "INSERT INTO staffing_plans (team_id, name, description, "
+                    "default_min_staff, require_lead, lead_label) VALUES (?,?,?,?,?,?)",
+                    (team_id, name, desc, default_min_s, require_lead, lead_label)
                 )
                 db.commit()
                 add_flash(t("success.plan_created"), "success")

@@ -577,6 +577,11 @@ def init_db():
         db.execute(
             "ALTER TABLE staffing_plans ADD COLUMN require_lead INTEGER DEFAULT 0"
         )
+    # v3.0.6.dev3 – konfigurierbare Leiter-Bezeichnung pro Plan
+    if not _col_exists(db, "staffing_plans", "lead_label"):
+        db.execute(
+            "ALTER TABLE staffing_plans ADD COLUMN lead_label TEXT DEFAULT 'Leiter'"
+        )
     # v3.0.2.dev2 – Team-Standort für Feiertage
     if not _col_exists(db, "teams", "holiday_region"):
         db.execute(
