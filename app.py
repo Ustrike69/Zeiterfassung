@@ -1849,12 +1849,13 @@ def _sched_daily_blocks_html(sched_id, mode: str,
     wd_rows = ""
     for wd in range(7):
         blk_html = ""
+        _inp = 'background:var(--surface);color:var(--fg);border:1px solid var(--br);border-radius:4px;padding:4px 6px;'
         for tf, tt in existing.get(wd, []):
             blk_html += (
                 f'<div class="sdb-row" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
-                f'<input type="time" name="block_{wd}_from[]" value="{tf}" step="900" style="width:100px;">'
+                f'<input type="time" name="block_{wd}_from[]" value="{tf}" step="900" style="width:100px;{_inp}">'
                 f'<span>–</span>'
-                f'<input type="time" name="block_{wd}_to[]" value="{tt}" step="900" style="width:100px;">'
+                f'<input type="time" name="block_{wd}_to[]" value="{tt}" step="900" style="width:100px;{_inp}">'
                 f'<button type="button" onclick="this.parentElement.remove()" '
                 f'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>'
                 f'</div>'
@@ -1871,16 +1872,17 @@ def _sched_daily_blocks_html(sched_id, mode: str,
                 f'<div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">'
                 f'<span style="font-size:12px;color:var(--mu);">{_exc_label}:</span> '
                 f'{week_checks}'
-                f'<input type="time" name="exc_{wd}_from[]" value="{etf}" step="900" style="font-size:13px;padding:4px;">'
+                f'<input type="time" name="exc_{wd}_from[]" value="{etf}" step="900" style="font-size:13px;{_inp}">'
                 f'<span>–</span>'
-                f'<input type="time" name="exc_{wd}_to[]" value="{ett}" step="900" style="font-size:13px;padding:4px;">'
+                f'<input type="time" name="exc_{wd}_to[]" value="{ett}" step="900" style="font-size:13px;{_inp}">'
                 f'<button type="button" onclick="this.parentElement.remove()" '
                 f'style="color:#dc2626;background:none;border:none;cursor:pointer;">×</button>'
                 f'</div>'
             )
         wd_rows += (
-            f'<div style="margin-bottom:10px;">'
-            f'<div style="font-size:12px;font-weight:600;margin-bottom:4px;">{_WD_LABELS[wd]}</div>'
+            f'<div style="margin-bottom:10px;padding:8px;border-radius:6px;background:var(--surface);">'
+            f'<div style="font-size:13px;font-weight:700;color:var(--fg);'
+            f'margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--br);">{_WD_LABELS[wd]}</div>'
             f'<div id="sdb-{wd}">{blk_html}</div>'
             f'<button type="button" onclick="sdbAdd({wd})" '
             f'style="font-size:12px;color:var(--ac);background:none;border:none;cursor:pointer;padding:0;">'
@@ -1908,7 +1910,7 @@ def _sched_daily_blocks_html(sched_id, mode: str,
           <input type="hidden" name="use_daily_blocks" value="1">"""
 
     return f"""
-        <div class="card" style="background:#fafafa;margin-top:12px;">
+        <div class="card" style="margin-top:12px;">
           {_header_html}
           <div id="sdb-section" style="display:{display};">
             {wd_rows}
@@ -1920,9 +1922,10 @@ def _sched_daily_blocks_html(sched_id, mode: str,
           var d=document.createElement('div');
           d.className='sdb-row';
           d.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:4px;';
-          d.innerHTML='<input type="time" name="block_'+wd+'_from[]" step="900" style="width:100px;">'
+          var si='width:100px;background:var(--surface);color:var(--fg);border:1px solid var(--br);border-radius:4px;padding:4px 6px;';
+          d.innerHTML='<input type="time" name="block_'+wd+'_from[]" step="900" style="'+si+'">'
             +'<span>–</span>'
-            +'<input type="time" name="block_'+wd+'_to[]" step="900" style="width:100px;">'
+            +'<input type="time" name="block_'+wd+'_to[]" step="900" style="'+si+'">'
             +'<button type="button" onclick="this.parentElement.remove()" '
             +'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>';
           c.appendChild(d);
@@ -1937,9 +1940,9 @@ def _sched_daily_blocks_html(sched_id, mode: str,
             +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="3"> 3.</label> '
             +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="4"> 4.</label> '
             +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="5"> 5.</label> '
-            +'<input type="time" name="exc_'+wd+'_from[]" step="900" style="font-size:13px;padding:4px;"> '
+            +'<input type="time" name="exc_'+wd+'_from[]" step="900" style="font-size:13px;background:var(--surface);color:var(--fg);border:1px solid var(--br);border-radius:4px;padding:4px 6px;"> '
             +'<span>–</span> '
-            +'<input type="time" name="exc_'+wd+'_to[]" step="900" style="font-size:13px;padding:4px;"> '
+            +'<input type="time" name="exc_'+wd+'_to[]" step="900" style="font-size:13px;background:var(--surface);color:var(--fg);border:1px solid var(--br);border-radius:4px;padding:4px 6px;"> '
             +'<button type="button" onclick="this.parentElement.remove()" '
             +'style="color:#dc2626;background:none;border:none;cursor:pointer;">×</button>';
           container.appendChild(div);
