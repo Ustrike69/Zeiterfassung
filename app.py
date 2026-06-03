@@ -16563,7 +16563,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
       var s=details.querySelector('select[name=slot_type]');
       if(!s)return;
       var oc=s.getAttribute('onchange')||'';
-      var start=oc.lastIndexOf("'")+1;
+      var start=oc.indexOf("'")+1;
       var end=oc.lastIndexOf("'");
       if(start>0&&end>start){{
         var pid=oc.substring(start,end);
@@ -17094,7 +17094,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
       var s=details.querySelector('select[name=slot_type]');
       if(!s)return;
       var oc=s.getAttribute('onchange')||'';
-      var start=oc.lastIndexOf("'")+1;
+      var start=oc.indexOf("'")+1;
       var end=oc.lastIndexOf("'");
       if(start>0&&end>start){{
         var pid=oc.substring(start,end);
