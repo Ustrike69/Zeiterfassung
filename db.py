@@ -638,6 +638,33 @@ def init_db():
             "ALTER TABLE user_schedules ADD COLUMN allow_self_edit INTEGER DEFAULT 1"
         )
 
+    # v3.0.9.dev1 – Berufsschule
+    db.execute("""CREATE TABLE IF NOT EXISTS vocational_school (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        schedule_type TEXT NOT NULL DEFAULT 'weekly',
+        weekday INTEGER DEFAULT NULL,
+        school_time_from TEXT DEFAULT NULL,
+        school_time_to   TEXT DEFAULT NULL,
+        work_time_from   TEXT DEFAULT NULL,
+        work_time_to     TEXT DEFAULT NULL,
+        date_from TEXT DEFAULT NULL,
+        date_to   TEXT DEFAULT NULL,
+        valid_from TEXT DEFAULT NULL,
+        valid_to   TEXT DEFAULT NULL,
+        note TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS school_holidays (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        region TEXT NOT NULL,
+        name TEXT NOT NULL,
+        date_from TEXT NOT NULL,
+        date_to TEXT NOT NULL
+    )""")
+    if not _col_exists(db, "users", "is_apprentice"):
+        db.execute("ALTER TABLE users ADD COLUMN is_apprentice INTEGER DEFAULT 0")
+
     # v3.0.7.dev2 – Urlaubsanspruch-Tabelle
     db.execute("""CREATE TABLE IF NOT EXISTS user_vacation_entitlement (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

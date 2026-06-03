@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.8"
+APP_VERSION = "v3.0.9.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -1332,6 +1332,47 @@ def _absence_on_day(user_id: int, iso_day: str) -> bool:
         db.close()
 
 
+def _get_vocational_school_entry(user_id: int, iso_day: str):
+    """Return first matching vocational_school row for user+day, or None."""
+    try:
+        d = datetime.date.fromisoformat(iso_day)
+        wd = d.weekday()
+        db = connect()
+        entries = db.execute("""
+            SELECT * FROM vocational_school
+            WHERE user_id=?
+            AND (valid_from IS NULL OR valid_from <= ?)
+            AND (valid_to IS NULL OR valid_to >= ?)
+        """, (user_id, iso_day, iso_day)).fetchall()
+        db.close()
+        for e in entries:
+            if e["schedule_type"] == "weekly":
+                if e["weekday"] is not None and int(e["weekday"]) == wd:
+                    return dict(e)
+            elif e["schedule_type"] == "block":
+                if e["date_from"] and e["date_to"]:
+                    if e["date_from"] <= iso_day <= e["date_to"]:
+                        return dict(e)
+    except Exception:
+        pass
+    return None
+
+
+def _is_school_holiday(iso_day: str, user_id=None) -> bool:
+    """True if there is a school holiday for user's region on this day."""
+    try:
+        region = _get_user_holiday_region(user_id)
+        db = connect()
+        row = db.execute("""
+            SELECT id FROM school_holidays
+            WHERE region=? AND date_from <= ? AND date_to >= ? LIMIT 1
+        """, (region, iso_day, iso_day)).fetchone()
+        db.close()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
     # manual override has priority (if set)
     ov = _get_expected_override_minutes(user_id, iso_day)
@@ -1350,6 +1391,18 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
         return 0
 
     if _absence_on_day(user_id, iso_day):
+        return 0
+
+    # Berufsschule: Soll=0 (Ganztag) oder reduziert (Halbtag)
+    voc = _get_vocational_school_entry(user_id, iso_day)
+    if voc and not _is_holiday(iso_day, user_id) and not _is_school_holiday(iso_day, user_id):
+        if voc.get("work_time_from") and voc.get("work_time_to"):
+            try:
+                h_from = int(voc["work_time_from"][:2]) * 60 + int(voc["work_time_from"][3:])
+                h_to   = int(voc["work_time_to"][:2]) * 60 + int(voc["work_time_to"][3:])
+                return max(0, h_to - h_from)
+            except Exception:
+                pass
         return 0
 
     mode = (sched.get("mode") or "weekly").strip().lower()
@@ -6394,6 +6447,24 @@ def calendar_year_list():
     missing_all    = _get_missing_entry_days(uid, year)
 
     day_badges: dict = {}
+    # Berufsschule-Badges
+    try:
+        _voc_db = connect()
+        _voc_entries = _voc_db.execute(
+            "SELECT * FROM vocational_school WHERE user_id=?", (uid,)
+        ).fetchall()
+        _voc_db.close()
+        _cur = datetime.date.fromisoformat(y_start)
+        _end = datetime.date.fromisoformat(y_end)
+        while _cur <= _end:
+            _iso = _cur.isoformat()
+            _voc = _get_vocational_school_entry(uid, _iso)
+            if _voc and not _is_holiday(_iso, uid) and not _is_school_holiday(_iso, uid):
+                _lbl = "🎓 BS Halbtag" if (_voc.get("work_time_from") and _voc.get("work_time_to")) else "🎓 Berufsschule"
+                day_badges.setdefault(_iso, []).append((_lbl, "#8b5cf6"))
+            _cur += datetime.timedelta(days=1)
+    except Exception:
+        pass
     if _feature_enabled("staffing"):
         _db_so_y = connect()
         try:
@@ -6560,6 +6631,19 @@ def calendar_view():
     exc_days_month = _get_weekend_exceptions_month(u["id"], first_iso, last_iso)
 
     day_badges = {}
+    # Berufsschule-Badges für Monatsansicht
+    try:
+        _voc_cur = datetime.date.fromisoformat(first_iso)
+        _voc_end = datetime.date.fromisoformat(last_iso)
+        while _voc_cur <= _voc_end:
+            _viso = _voc_cur.isoformat()
+            _voc_e = _get_vocational_school_entry(u["id"], _viso)
+            if _voc_e and not _is_holiday(_viso, u["id"]) and not _is_school_holiday(_viso, u["id"]):
+                _lbl = "🎓 BS Halbtag" if (_voc_e.get("work_time_from") and _voc_e.get("work_time_to")) else "🎓 Berufsschule"
+                day_badges.setdefault(_viso, []).append((_lbl, "#8b5cf6", True, True))
+            _voc_cur += datetime.timedelta(days=1)
+    except Exception:
+        pass
     if _feature_enabled("staffing"):
         _db_so = connect()
         try:
@@ -8610,6 +8694,150 @@ def settings_view():
             f"</form>"
         )
 
+    # Berufsschule-Daten laden
+    _voc_db = connect()
+    _voc_entries = _voc_db.execute(
+        "SELECT * FROM vocational_school WHERE user_id=? ORDER BY schedule_type, weekday, date_from",
+        (u["id"],)
+    ).fetchall()
+    _voc_region = _get_user_holiday_region(u["id"])
+    _school_hols = _voc_db.execute(
+        "SELECT * FROM school_holidays WHERE region=? ORDER BY date_from",
+        (_voc_region,)
+    ).fetchall()
+    _voc_db.close()
+
+    _WD_NAMES_VOC = [t("wd.mon"), t("wd.tue"), t("wd.wed"), t("wd.thu"),
+                     t("wd.fri"), t("wd.sat"), t("wd.sun")]
+    _voc_show = bool(_voc_entries) or bool(u.get("is_apprentice"))
+
+    def _fmt_time_voc(s):
+        return s[:5] if s else "–"
+
+    _voc_weekly_rows = "".join(
+        f"<tr>"
+        f"<td style='font-size:13px;'>{_WD_NAMES_VOC[int(e['weekday'])] if e['weekday'] is not None else '–'}</td>"
+        f"<td style='font-size:13px;'>{'Ganztag' if not e['school_time_from'] else _fmt_time_voc(e['school_time_from'])+' – '+_fmt_time_voc(e['school_time_to'])}</td>"
+        f"<td style='font-size:13px;'>{'–' if not e['work_time_from'] else _fmt_time_voc(e['work_time_from'])+' – '+_fmt_time_voc(e['work_time_to'])}</td>"
+        f"<td style='font-size:13px;'>{(e['valid_from'] or '–')+' – '+(e['valid_to'] or 'offen')}</td>"
+        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;'>"
+        f"<input type='hidden' name='entry_id' value='{e['id']}'>"
+        f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></td>"
+        f"</tr>"
+        for e in _voc_entries if e["schedule_type"] == "weekly"
+    ) or f"<tr><td colspan='5' style='color:var(--mu);font-size:13px;'>–</td></tr>"
+
+    _voc_block_rows = "".join(
+        f"<tr>"
+        f"<td style='font-size:13px;'>{_fmt_date_de(e['date_from'])}</td>"
+        f"<td style='font-size:13px;'>{_fmt_date_de(e['date_to'])}</td>"
+        f"<td style='font-size:13px;'>{_html.escape(e['note'] or '')}</td>"
+        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;'>"
+        f"<input type='hidden' name='entry_id' value='{e['id']}'>"
+        f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></td>"
+        f"</tr>"
+        for e in _voc_entries if e["schedule_type"] == "block"
+    ) or f"<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>–</td></tr>"
+
+    _wd_opts_voc = "".join(
+        f'<option value="{i}">{_WD_NAMES_VOC[i]}</option>' for i in range(7)
+    )
+    _school_hols_rows = "".join(
+        f"<tr><td style='font-size:13px;'>{_html.escape(h['name'])}</td>"
+        f"<td style='font-size:13px;'>{_fmt_date_de(h['date_from'])}</td>"
+        f"<td style='font-size:13px;'>{_fmt_date_de(h['date_to'])}</td></tr>"
+        for h in _school_hols
+    ) or f"<tr><td colspan='3' style='color:var(--mu);font-size:13px;'>Keine Schulferien für {_html.escape(_voc_region)}</td></tr>"
+
+    _voc_accordion = f"""
+    <div class="acc" id="acc-voc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-voc-body')">
+        <span>🎓 Berufsschule</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-voc-body">
+        <div class="acc-inner">
+          <p class="small" style="color:var(--mu);margin-bottom:14px;">
+            An Berufsschultagen wird das Tagessoll automatisch auf 0 (Ganztag) oder die Arbeitszeit (Halbtag) gesetzt.
+          </p>
+          <h4 style="margin:0 0 8px;">A – Wöchentliche Berufsschultage</h4>
+          <div class="table-scroll" style="margin-bottom:10px;">
+            <table style="width:100%;"><thead><tr>
+              <th>Wochentag</th><th>BS-Zeit</th><th>Arbeitszeit</th><th>Gültig ab/bis</th><th></th>
+            </tr></thead><tbody>{_voc_weekly_rows}</tbody></table>
+          </div>
+          <form method="post" action="/settings/vocational/add" style="margin-bottom:16px;">
+            <input type="hidden" name="schedule_type" value="weekly">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Wochentag</label>
+                <select name="weekday" style="display:block;margin-top:4px;font-size:13px;">{_wd_opts_voc}</select>
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Typ</label>
+                <select name="voc_type" style="display:block;margin-top:4px;font-size:13px;"
+                        onchange="document.getElementById('voc-half').style.display=this.value==='half'?'flex':'none'">
+                  <option value="full">Ganztag</option>
+                  <option value="half">Halbtag</option>
+                </select>
+              </div>
+              <div id="voc-half" style="display:none;gap:8px;flex-wrap:wrap;">
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">BS von – bis</label>
+                  <div style="display:flex;gap:4px;margin-top:4px;">
+                    <input type="time" name="school_time_from" step="900" style="width:96px;">
+                    <input type="time" name="school_time_to" step="900" style="width:96px;">
+                  </div>
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Arbeit von – bis</label>
+                  <div style="display:flex;gap:4px;margin-top:4px;">
+                    <input type="time" name="work_time_from" step="900" style="width:96px;">
+                    <input type="time" name="work_time_to" step="900" style="width:96px;">
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Gültig ab</label>
+                {_date_input("valid_from", "")}
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Gültig bis</label>
+                {_date_input("valid_to", "")}
+              </div>
+              <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+            </div>
+          </form>
+          <h4 style="margin:0 0 8px;">B – Blockunterricht</h4>
+          <div class="table-scroll" style="margin-bottom:10px;">
+            <table style="width:100%;"><thead><tr>
+              <th>Von</th><th>Bis</th><th>Notiz</th><th></th>
+            </tr></thead><tbody>{_voc_block_rows}</tbody></table>
+          </div>
+          <form method="post" action="/settings/vocational/add" style="margin-bottom:16px;">
+            <input type="hidden" name="schedule_type" value="block">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+              <div><label style="font-size:12px;color:var(--mu);">Von</label>
+                {_date_input("date_from", "")}</div>
+              <div><label style="font-size:12px;color:var(--mu);">Bis</label>
+                {_date_input("date_to", "")}</div>
+              <div style="flex:1;min-width:120px;">
+                <label style="font-size:12px;color:var(--mu);">Notiz</label>
+                <input type="text" name="note" maxlength="80" placeholder="z.B. Block 1"
+                       style="display:block;margin-top:4px;width:100%;">
+              </div>
+              <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+            </div>
+          </form>
+          <h4 style="margin:0 0 8px;">C – Schulferien ({_html.escape(_voc_region)})</h4>
+          <p class="small" style="color:var(--mu);margin-bottom:8px;">An Ferientagen entfällt die Berufsschule automatisch.</p>
+          <div class="table-scroll">
+            <table style="width:100%;"><thead><tr><th>Name</th><th>Von</th><th>Bis</th></tr></thead>
+            <tbody>{_school_hols_rows}</tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>""" if _voc_show else ""
+
     body = f"""
     {flash_html()}
 <style>
@@ -8848,7 +9076,10 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 6. Kalender-Integration -->
+    <!-- 6. Berufsschule -->
+    {_voc_accordion}
+
+    <!-- 7. Kalender-Integration -->
     {_render_calendar_integration_section(
         cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url,
         cal_auth_mode, _basic_webcal_url, _basic_ical_url,
@@ -9275,6 +9506,63 @@ def settings_admin_only():
     msg = t("flash.success.time_tracking_disabled") if new_val else t("flash.success.time_tracking_enabled")
     add_flash(msg, "success")
     return redirect("/settings")
+
+
+# ── Berufsschule Einstellungen ─────────────────────────────────────────────────
+
+@app.post("/settings/vocational/add")
+@login_required
+def settings_vocational_add():
+    bootstrap()
+    u = current_user()
+    stype = request.form.get("schedule_type", "weekly")
+    voc_type = request.form.get("voc_type", "full")
+    weekday = request.form.get("weekday")
+    school_tf = request.form.get("school_time_from", "").strip() or None
+    school_tt = request.form.get("school_time_to", "").strip() or None
+    work_tf   = request.form.get("work_time_from", "").strip() or None
+    work_tt   = request.form.get("work_time_to", "").strip() or None
+    date_from = _parse_date_input(request.form.get("date_from") or "")
+    date_to   = _parse_date_input(request.form.get("date_to") or "")
+    valid_from = _parse_date_input(request.form.get("valid_from") or "")
+    valid_to   = _parse_date_input(request.form.get("valid_to") or "")
+    note = (request.form.get("note") or "").strip()
+    if stype == "weekly":
+        if weekday is None:
+            return redirect("/settings#acc-voc")
+        if voc_type != "half":
+            school_tf = school_tt = work_tf = work_tt = None
+    elif stype == "block":
+        if not date_from or not date_to:
+            return redirect("/settings#acc-voc")
+        weekday = None
+    db = connect()
+    db.execute(
+        "INSERT INTO vocational_school(user_id, schedule_type, weekday, "
+        "school_time_from, school_time_to, work_time_from, work_time_to, "
+        "date_from, date_to, valid_from, valid_to, note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (u["id"], stype, int(weekday) if weekday is not None else None,
+         school_tf, school_tt, work_tf, work_tt,
+         date_from, date_to, valid_from, valid_to, note)
+    )
+    db.commit()
+    db.close()
+    add_flash(t("admin.user_saved"), "success")
+    return redirect("/settings#acc-voc")
+
+
+@app.post("/settings/vocational/delete")
+@login_required
+def settings_vocational_delete():
+    bootstrap()
+    u = current_user()
+    entry_id = int(request.form.get("entry_id") or 0)
+    if entry_id:
+        db = connect()
+        db.execute("DELETE FROM vocational_school WHERE id=? AND user_id=?", (entry_id, u["id"]))
+        db.commit()
+        db.close()
+    return redirect("/settings#acc-voc")
 
 
 # ── iCloud Einstellungen ───────────────────────────────────────────────────────
@@ -12796,10 +13084,13 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id, team_restriction, end_date, balance_rollover FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id, team_restriction, end_date, balance_rollover, is_apprentice FROM users WHERE id=?", (user_id,)).fetchone()
     _all_approvers = db.execute("SELECT id, username, display_name FROM users WHERE is_approver=1 AND is_active=1 ORDER BY username").fetchall()
     _all_teams_edit = db.execute("SELECT id, name FROM teams ORDER BY name").fetchall()
     _entitlements = db.execute("SELECT * FROM user_vacation_entitlement WHERE user_id=? ORDER BY valid_from DESC", (user_id,)).fetchall()
+    _voc_admin_entries = db.execute(
+        "SELECT * FROM vocational_school WHERE user_id=? ORDER BY schedule_type, weekday, date_from", (user_id,)
+    ).fetchall()
     db.close()
     if not r:
         abort(404)
@@ -13132,6 +13423,10 @@ def admin_users_edit(user_id: int):
             <div class='small' style='color:var(--mu);margin-top:2px;'>{t('admin.balance_rollover_hint')}</div>
           </div>
         </div>
+        <label style='display:flex;align-items:center;gap:6px;font-size:13px;'>
+          <input type='checkbox' name='is_apprentice' value='1' {'checked' if r.get('is_apprentice') else ''}>
+          🎓 Auszubildende/r (Berufsschule sichtbar)
+        </label>
       """)}
 
       {"" if not (_can_edit_role or is_timemanager(u)) else _section("⚙", "admin.section_admin", f"""
@@ -13148,6 +13443,73 @@ def admin_users_edit(user_id: int):
         </form>
       </div>
     </form>
+
+    <!-- Berufsschule -->
+    <div class="card" id="vocational">
+      <h3 style="margin-top:0;">🎓 Berufsschule</h3>
+      {"".join(
+        f"<div style='font-size:13px;padding:6px 10px;background:var(--sf);border:1px solid var(--bd);"
+        f"border-radius:6px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;'>"
+        f"<span>{'Wöchentlich: ' + ['Mo','Di','Mi','Do','Fr','Sa','So'][int(e['weekday'])] if e['schedule_type']=='weekly' else 'Block: '+str(e['date_from'])+'–'+str(e['date_to'])}"
+        f"{(' | Halbtag Arbeit: '+str(e['work_time_from'])[:5]+'–'+str(e['work_time_to'])[:5]) if e['work_time_from'] else ''}"
+        f"{(' | '+e['note']) if e['note'] else ''}</span>"
+        f"<form method='post' action='/admin/users/{user_id}/vocational/delete' style='display:inline;'>"
+        f"<input type='hidden' name='entry_id' value='{e['id']}'>"
+        f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></div>"
+        for e in _voc_admin_entries
+      ) or f"<p style='color:var(--mu);font-size:13px;'>Noch keine Einträge.</p>"}
+      <!-- Wöchentlich hinzufügen -->
+      <details style="margin-top:10px;">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">+ Wöchentlichen Tag hinzufügen</summary>
+        <form method="post" action="/admin/users/{user_id}/vocational/add" style="margin-top:10px;padding:10px;background:var(--sf);border:1px solid var(--bd);border-radius:8px;">
+          <input type="hidden" name="schedule_type" value="weekly">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">Wochentag</label>
+              <select name="weekday" style="display:block;margin-top:4px;font-size:13px;">
+                {"".join(f'<option value="{i}">{["Mo","Di","Mi","Do","Fr","Sa","So"][i]}</option>' for i in range(7))}
+              </select>
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--mu);">Typ</label>
+              <select name="voc_type" style="display:block;margin-top:4px;font-size:13px;"
+                      onchange="this.closest('form').querySelector('#voc-adm-half').style.display=this.value==='half'?'flex':'none'">
+                <option value="full">Ganztag</option><option value="half">Halbtag</option>
+              </select>
+            </div>
+            <div id="voc-adm-half" style="display:none;gap:8px;flex-wrap:wrap;">
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Arbeit von – bis</label>
+                <div style="display:flex;gap:4px;margin-top:4px;">
+                  <input type="time" name="work_time_from" step="900" style="width:96px;">
+                  <input type="time" name="work_time_to" step="900" style="width:96px;">
+                </div>
+              </div>
+            </div>
+            <div><label style="font-size:12px;color:var(--mu);">Gültig ab</label>{_date_input("valid_from", "")}</div>
+            <div><label style="font-size:12px;color:var(--mu);">Gültig bis</label>{_date_input("valid_to", "")}</div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+          </div>
+        </form>
+      </details>
+      <!-- Blockunterricht hinzufügen -->
+      <details style="margin-top:6px;">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">+ Blockunterricht hinzufügen</summary>
+        <form method="post" action="/admin/users/{user_id}/vocational/add" style="margin-top:10px;padding:10px;background:var(--sf);border:1px solid var(--bd);border-radius:8px;">
+          <input type="hidden" name="schedule_type" value="block">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+            <div><label style="font-size:12px;color:var(--mu);">Von</label>{_date_input("date_from", "")}</div>
+            <div><label style="font-size:12px;color:var(--mu);">Bis</label>{_date_input("date_to", "")}</div>
+            <div style="flex:1;min-width:120px;">
+              <label style="font-size:12px;color:var(--mu);">Notiz</label>
+              <input type="text" name="note" maxlength="80" placeholder="z.B. Block 1"
+                     style="display:block;margin-top:4px;width:100%;">
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+          </div>
+        </form>
+      </details>
+    </div>
 
     <!-- BEREICH 2: Zeitschema -->
     <div class="card" id="schedule">
@@ -13422,18 +13784,19 @@ def admin_users_edit_post(user_id: int):
         db.commit()
         db.close()
 
-    # Overtime limits + end_date + balance_rollover
+    # Overtime limits + end_date + balance_rollover + is_apprentice
     lim_plus      = request.form.get("overtime_limit_plus", "").strip() or None
     lim_minus     = request.form.get("overtime_limit_minus", "").strip() or None
     end_date_val  = request.form.get("end_date", "").strip() or None
     rollover_val  = request.form.get("balance_rollover", "manual").strip()
     if rollover_val not in ("manual", "keep", "forfeit"):
         rollover_val = "manual"
+    is_apprentice_val = 1 if request.form.get("is_apprentice") == "1" else 0
     db = connect()
     db.execute(
         "UPDATE users SET overtime_limit_plus=?, overtime_limit_minus=?, "
-        "end_date=?, balance_rollover=?, updated_at=datetime('now') WHERE id=?",
-        (lim_plus, lim_minus, end_date_val, rollover_val, user_id)
+        "end_date=?, balance_rollover=?, is_apprentice=?, updated_at=datetime('now') WHERE id=?",
+        (lim_plus, lim_minus, end_date_val, rollover_val, is_apprentice_val, user_id)
     )
     db.commit()
     db.close()
@@ -13472,6 +13835,50 @@ def admin_users_edit_post(user_id: int):
 
     add_flash(t("admin.user_saved"), "success")
     return redirect(f"/admin/users/{user_id}/edit")
+
+
+@app.post("/admin/users/<int:user_id>/vocational/add")
+@admin_required
+def admin_vocational_add(user_id: int):
+    bootstrap()
+    stype   = request.form.get("schedule_type", "weekly")
+    voc_type = request.form.get("voc_type", "full")
+    weekday = request.form.get("weekday")
+    work_tf = request.form.get("work_time_from", "").strip() or None
+    work_tt = request.form.get("work_time_to", "").strip() or None
+    date_from = _parse_date_input(request.form.get("date_from") or "")
+    date_to   = _parse_date_input(request.form.get("date_to") or "")
+    valid_from = _parse_date_input(request.form.get("valid_from") or "")
+    valid_to   = _parse_date_input(request.form.get("valid_to") or "")
+    note = (request.form.get("note") or "").strip()
+    if stype == "weekly" and voc_type != "half":
+        work_tf = work_tt = None
+    db = connect()
+    db.execute(
+        "INSERT INTO vocational_school(user_id, schedule_type, weekday, "
+        "work_time_from, work_time_to, date_from, date_to, valid_from, valid_to, note) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (user_id, stype,
+         int(weekday) if weekday is not None and stype == "weekly" else None,
+         work_tf, work_tt, date_from, date_to, valid_from, valid_to, note)
+    )
+    db.commit()
+    db.close()
+    add_flash(t("admin.user_saved"), "success")
+    return redirect(f"/admin/users/{user_id}/edit#vocational")
+
+
+@app.post("/admin/users/<int:user_id>/vocational/delete")
+@admin_required
+def admin_vocational_delete(user_id: int):
+    bootstrap()
+    entry_id = int(request.form.get("entry_id") or 0)
+    if entry_id:
+        db = connect()
+        db.execute("DELETE FROM vocational_school WHERE id=? AND user_id=?", (entry_id, user_id))
+        db.commit()
+        db.close()
+    return redirect(f"/admin/users/{user_id}/edit#vocational")
 
 
 @app.post("/admin/users/<int:user_id>/delete")
