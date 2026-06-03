@@ -628,7 +628,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # ── Schedule / Zeitschema ─────────────────────────────────────
         "schedule.mode_weekly":  "Woche",
-        "schedule.mode_daily":   "Tag",
+        "schedule.mode_daily":   "Je Tag",
+        "schedule.mode_fixed":   "Feste Zeiten",
         "schedule.hours_week":   "h/Woche",
         "schedule.mo": "Mo",
         "schedule.tu": "Di",
@@ -1057,9 +1058,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wd.weekday":                   "Wochentag",
 
         # ── Zeitschema Tagesblöcke ────────────────────────────────
-        "settings.schedule_blocks":       "Tagesblöcke",
-        "settings.schedule_add_block":    "Block hinzufügen",
-        "settings.schedule_blocks_hint":  "Mehrere Zeitblöcke pro Tag, z.B. für Split-Schichten",
+        "settings.schedule_blocks":            "Tagesblöcke",
+        "settings.schedule_add_block":         "Block hinzufügen",
+        "settings.schedule_blocks_hint":       "Mehrere Zeitblöcke pro Tag, z.B. für Split-Schichten",
+        "settings.schedule_exceptions":        "Ausnahmen",
+        "settings.schedule_add_exception":     "Ausnahme hinzufügen",
+        "settings.schedule_exception_hint":    "z.B. jeden 1. und 3. Mittwoch andere Zeiten",
+        "onboarding.sched_fixed":              "Feste Arbeitszeiten (Von-Bis je Tag)",
 
         # ── Gleitzeitkonto Korrekturen ────────────────────────────
         "balance.adjustment":             "Manuelle Korrektur",
@@ -1850,7 +1855,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # ── Schedule / Work schedule ──────────────────────────────────
         "schedule.mode_weekly":  "Week",
-        "schedule.mode_daily":   "Daily",
+        "schedule.mode_daily":   "Per day",
+        "schedule.mode_fixed":   "Fixed hours",
         "schedule.hours_week":   "h/week",
         "schedule.mo": "Mon",
         "schedule.tu": "Tue",
@@ -2279,9 +2285,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "wd.weekday":                   "Weekday",
 
         # ── Zeitschema Tagesblöcke ────────────────────────────────
-        "settings.schedule_blocks":       "Daily blocks",
-        "settings.schedule_add_block":    "Add block",
-        "settings.schedule_blocks_hint":  "Multiple time blocks per day, e.g. for split shifts",
+        "settings.schedule_blocks":            "Daily blocks",
+        "settings.schedule_add_block":         "Add block",
+        "settings.schedule_blocks_hint":       "Multiple time blocks per day, e.g. for split shifts",
+        "settings.schedule_exceptions":        "Exceptions",
+        "settings.schedule_add_exception":     "Add exception",
+        "settings.schedule_exception_hint":    "e.g. different times on 1st and 3rd Wednesday",
+        "onboarding.sched_fixed":              "Fixed working hours (from-to per day)",
 
         # ── Gleitzeitkonto Korrekturen ────────────────────────────
         "balance.adjustment":             "Manual adjustment",

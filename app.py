@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.5"
+APP_VERSION = "v3.0.6.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -401,6 +401,17 @@ def _ensure_user_schedules_schema() -> None:
         time_from TEXT NOT NULL,
         time_to TEXT NOT NULL,
         sort_order INTEGER DEFAULT 0
+    )""")
+
+    # v3.0.6.dev1 – Ausnahmen (nth_weekday) für Tagesblöcke-Modus
+    cur.execute("""CREATE TABLE IF NOT EXISTS schedule_exceptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id INTEGER NOT NULL
+            REFERENCES user_schedules(id) ON DELETE CASCADE,
+        weekday INTEGER NOT NULL,
+        nth_weeks TEXT NOT NULL,
+        time_from TEXT NOT NULL,
+        time_to TEXT NOT NULL
     )""")
 
     db.commit()
@@ -1264,6 +1275,8 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
         return 0
 
     mode = (sched.get("mode") or "weekly").strip().lower()
+    if mode == "daily_hours":
+        return int(sched.get(_weekday_col(d), 0) or 0)
     if mode == "daily":
         sched_id = sched.get("id")
         if sched_id:
@@ -1275,6 +1288,28 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
             ).fetchall()
             _db2.close()
             if _blocks:
+                # Check nth-week exceptions first — they override normal blocks
+                week_num = (d.day - 1) // 7 + 1
+                _db3 = connect()
+                try:
+                    _exceptions = _db3.execute(
+                        "SELECT nth_weeks, time_from, time_to FROM schedule_exceptions "
+                        "WHERE schedule_id=? AND weekday=?",
+                        (sched_id, wd)
+                    ).fetchall()
+                except Exception:
+                    _exceptions = []
+                finally:
+                    _db3.close()
+                for exc in _exceptions:
+                    weeks = [int(w) for w in exc["nth_weeks"].split(",") if w.strip()]
+                    if week_num in weeks:
+                        try:
+                            h_from = int(exc["time_from"][:2]) * 60 + int(exc["time_from"][3:])
+                            h_to   = int(exc["time_to"][:2]) * 60 + int(exc["time_to"][3:])
+                            return max(0, h_to - h_from)
+                        except Exception:
+                            pass
                 total = 0
                 for b in _blocks:
                     try:
@@ -1324,6 +1359,8 @@ def _scheduled_minutes_ignoring_absence(user_id: int, iso_day: str) -> int:
     if not _mask_allows(mask, wd):
         return 0
     mode = (sched.get("mode") or "weekly").strip().lower()
+    if mode == "daily_hours":
+        return int(sched.get(_weekday_col(d), 0) or 0)
     if mode == "daily":
         return int(sched.get(_weekday_col(d), 0) or 0)
     weekly = int(sched.get("weekly_minutes", 0) or 0)
@@ -1659,7 +1696,7 @@ def _parse_sched_form(form) -> dict:
     """Parse schedule form fields into a normalized dict."""
     valid_from = _parse_date_input(form.get("valid_from") or "") or ""
     mode = (form.get("mode") or "weekly").strip().lower()
-    if mode not in ("weekly", "daily"):
+    if mode not in ("weekly", "daily_hours", "daily"):
         mode = "weekly"
     weekly_hours_raw = (form.get("weekly_hours") or "0").strip().replace(",", ".")
     try:
@@ -1743,10 +1780,32 @@ def _sched_save_blocks(schedule_id: int, blocks: dict) -> None:
     db.close()
 
 
+def _sched_save_exceptions_from_form(sched_id: int, form) -> None:
+    """Replace schedule_exceptions for schedule_id from form exc_{wd}_* fields."""
+    db = connect()
+    db.execute("DELETE FROM schedule_exceptions WHERE schedule_id=?", (sched_id,))
+    for wd in range(7):
+        exc_froms = form.getlist(f"exc_{wd}_from[]")
+        exc_tos   = form.getlist(f"exc_{wd}_to[]")
+        exc_weeks = form.getlist(f"exc_{wd}_weeks[]")
+        for tf, tt in zip(exc_froms, exc_tos):
+            tf = (tf or "").strip()
+            tt = (tt or "").strip()
+            if tf and tt and exc_weeks:
+                db.execute(
+                    "INSERT INTO schedule_exceptions "
+                    "(schedule_id, weekday, nth_weeks, time_from, time_to) VALUES (?,?,?,?,?)",
+                    (sched_id, wd, ",".join(exc_weeks), tf, tt)
+                )
+    db.commit()
+    db.close()
+
+
 def _sched_daily_blocks_html(sched_id, mode: str) -> str:
     """Render the Tagesblöcke section for the schedule form."""
     _WD_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
     existing: dict[int, list] = {}
+    existing_exc: dict[int, list] = {}
     has_blocks = False
     if sched_id:
         try:
@@ -1756,15 +1815,30 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
                 "WHERE schedule_id=? ORDER BY weekday, sort_order",
                 (sched_id,)
             ).fetchall()
+            exc_rows = []
+            try:
+                exc_rows = _db.execute(
+                    "SELECT weekday, nth_weeks, time_from, time_to FROM schedule_exceptions "
+                    "WHERE schedule_id=? ORDER BY weekday, id",
+                    (sched_id,)
+                ).fetchall()
+            except Exception:
+                pass
             _db.close()
             for r in rows:
                 existing.setdefault(r["weekday"], []).append((r["time_from"], r["time_to"]))
                 has_blocks = True
+            for r in exc_rows:
+                existing_exc.setdefault(r["weekday"], []).append(
+                    (r["nth_weeks"], r["time_from"], r["time_to"])
+                )
         except Exception:
             pass
 
     checked = "checked" if has_blocks else ""
     display = "block" if has_blocks else "none"
+    _exc_label = t("settings.schedule_exceptions")
+    _add_exc_label = t("settings.schedule_add_exception")
 
     wd_rows = ""
     for wd in range(7):
@@ -1779,6 +1853,25 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
                 f'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>'
                 f'</div>'
             )
+        exc_html = ""
+        for nth_weeks, etf, ett in existing_exc.get(wd, []):
+            weeks_set = nth_weeks.split(",")
+            week_checks = "".join(
+                f'<label><input type="checkbox" name="exc_{wd}_weeks[]" value="{wn}"'
+                f'{" checked" if wn in weeks_set else ""}> {wn}.</label> '
+                for wn in ["1", "2", "3", "4", "5"]
+            )
+            exc_html += (
+                f'<div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">'
+                f'<span style="font-size:12px;color:var(--mu);">{_exc_label}:</span> '
+                f'{week_checks}'
+                f'<input type="time" name="exc_{wd}_from[]" value="{etf}" step="900" style="font-size:13px;padding:4px;">'
+                f'<span>–</span>'
+                f'<input type="time" name="exc_{wd}_to[]" value="{ett}" step="900" style="font-size:13px;padding:4px;">'
+                f'<button type="button" onclick="this.parentElement.remove()" '
+                f'style="color:#dc2626;background:none;border:none;cursor:pointer;">×</button>'
+                f'</div>'
+            )
         wd_rows += (
             f'<div style="margin-bottom:10px;">'
             f'<div style="font-size:12px;font-weight:600;margin-bottom:4px;">{_WD_LABELS[wd]}</div>'
@@ -1786,6 +1879,10 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
             f'<button type="button" onclick="sdbAdd({wd})" '
             f'style="font-size:12px;color:var(--ac);background:none;border:none;cursor:pointer;padding:0;">'
             f'+ {t("settings.schedule_add_block")}</button>'
+            f'<div class="sched-exceptions" id="exc-{wd}">{exc_html}</div>'
+            f'<button type="button" onclick="addSchedException({wd})" '
+            f'style="font-size:12px;color:var(--ac);background:none;border:none;cursor:pointer;padding:0;margin-top:2px;">'
+            f'+ {_add_exc_label}</button>'
             f'</div>'
         )
 
@@ -1816,6 +1913,23 @@ def _sched_daily_blocks_html(sched_id, mode: str) -> str:
             +'<button type="button" onclick="this.parentElement.remove()" '
             +'style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:16px;padding:0 4px;">×</button>';
           c.appendChild(d);
+        }}
+        function addSchedException(wd){{
+          var container=document.getElementById('exc-'+wd);
+          var div=document.createElement('div');
+          div.style.cssText='display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;';
+          div.innerHTML='<span style="font-size:12px;color:var(--mu);">{_exc_label}:</span> '
+            +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="1"> 1.</label> '
+            +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="2"> 2.</label> '
+            +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="3"> 3.</label> '
+            +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="4"> 4.</label> '
+            +'<label><input type="checkbox" name="exc_'+wd+'_weeks[]" value="5"> 5.</label> '
+            +'<input type="time" name="exc_'+wd+'_from[]" step="900" style="font-size:13px;padding:4px;"> '
+            +'<span>–</span> '
+            +'<input type="time" name="exc_'+wd+'_to[]" step="900" style="font-size:13px;padding:4px;"> '
+            +'<button type="button" onclick="this.parentElement.remove()" '
+            +'style="color:#dc2626;background:none;border:none;cursor:pointer;">×</button>';
+          container.appendChild(div);
         }}
         </script>"""
 
@@ -1850,16 +1964,19 @@ def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bo
           <div class="small" style="color:#777;">Ab diesem Datum wird dieses Zeitschema angewendet.</div>
         </div>
         {auto_breaks_html}
-        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
-          <div>
-            <label><b>Modus</b></label><br>
-            <label><input type="radio" name="mode" value="weekly" {"checked" if mode=="weekly" else ""}> Wochenarbeitszeit verteilen</label><br>
-            <label><input type="radio" name="mode" value="daily" {"checked" if mode=="daily" else ""}> Sollstunden je Wochentag</label>
-          </div>
-          <div>
+        <div style="margin-bottom:10px;">
+          <label><b>Modus</b></label><br>
+          <label><input type="radio" name="mode" value="weekly" {"checked" if mode=="weekly" else ""}
+                 onchange="switchSchedModeForm('weekly')"> Wochenarbeitszeit verteilen</label><br>
+          <label><input type="radio" name="mode" value="daily_hours" {"checked" if mode=="daily_hours" else ""}
+                 onchange="switchSchedModeForm('daily_hours')"> Sollstunden je Wochentag</label><br>
+          <label><input type="radio" name="mode" value="daily" {"checked" if mode=="daily" else ""}
+                 onchange="switchSchedModeForm('daily')"> {t('onboarding.sched_fixed')}</label>
+        </div>
+        <div id="sform-weekly" style="">
+          <div style="margin-bottom:10px;">
             <label><b>Wochenarbeitszeit (Stunden)</b></label><br>
             <input type="number" name="weekly_hours" min="0" step="0.25" value="{wh}">
-            <div class="small" style="color:#777;">Nur relevant im Modus "Wochenarbeitszeit verteilen".</div>
           </div>
         </div>
         <hr style="margin:12px 0;">
@@ -1877,25 +1994,37 @@ def _sched_form_html(sched, action_url: str, back_url: str, show_auto_breaks: bo
           <label><input type="checkbox" name="block_weekends_holidays" value="1" {block_chk}> Arbeiten an Wochenende/Feiertag blockieren (Standard)</label>
         </div>
         <hr style="margin:12px 0;">
-        <div class="card" style="background:#fafafa;">
-          <h4 style="margin-top:0;">Sollstunden je Wochentag (nur Modus "Sollstunden je Wochentag")</h4>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <div>Mo<br><input type="text" name="mon" value="{hm(sched.get('mon_minutes'))}" style="width:90px;"></div>
-            <div>Di<br><input type="text" name="tue" value="{hm(sched.get('tue_minutes'))}" style="width:90px;"></div>
-            <div>Mi<br><input type="text" name="wed" value="{hm(sched.get('wed_minutes'))}" style="width:90px;"></div>
-            <div>Do<br><input type="text" name="thu" value="{hm(sched.get('thu_minutes'))}" style="width:90px;"></div>
-            <div>Fr<br><input type="text" name="fri" value="{hm(sched.get('fri_minutes'))}" style="width:90px;"></div>
-            <div>Sa<br><input type="text" name="sat" value="{hm(sched.get('sat_minutes'))}" style="width:90px;"></div>
-            <div>So<br><input type="text" name="sun" value="{hm(sched.get('sun_minutes'))}" style="width:90px;"></div>
+        <div id="sform-daily-hours" style="display:none;">
+          <div class="card" style="background:#fafafa;">
+            <h4 style="margin-top:0;">Sollstunden je Wochentag</h4>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+              <div>Mo<br><input type="text" name="mon" value="{hm(sched.get('mon_minutes'))}" style="width:90px;"></div>
+              <div>Di<br><input type="text" name="tue" value="{hm(sched.get('tue_minutes'))}" style="width:90px;"></div>
+              <div>Mi<br><input type="text" name="wed" value="{hm(sched.get('wed_minutes'))}" style="width:90px;"></div>
+              <div>Do<br><input type="text" name="thu" value="{hm(sched.get('thu_minutes'))}" style="width:90px;"></div>
+              <div>Fr<br><input type="text" name="fri" value="{hm(sched.get('fri_minutes'))}" style="width:90px;"></div>
+              <div>Sa<br><input type="text" name="sat" value="{hm(sched.get('sat_minutes'))}" style="width:90px;"></div>
+              <div>So<br><input type="text" name="sun" value="{hm(sched.get('sun_minutes'))}" style="width:90px;"></div>
+            </div>
+            <div class="small" style="color:#777;margin-top:6px;">Format: HH:MM (z. B. 07:30). Leer oder 00:00 = kein Soll.</div>
           </div>
-          <div class="small" style="color:#777;margin-top:6px;">Format: HH:MM (z. B. 07:30). Leer oder 00:00 = kein Soll.</div>
         </div>
-        {_sched_daily_blocks_html(sched_id, mode)}
+        <div id="sform-daily-blocks" style="display:none;">
+          {_sched_daily_blocks_html(sched_id, mode)}
+        </div>
         <div style="margin-top:12px;display:flex;gap:8px;">
           <button class="btn primary" type="submit">Speichern</button>
           <a class="btn" href="{_html.escape(back_url)}">Abbrechen</a>
         </div>
-      </form>"""
+      </form>
+      <script>
+      function switchSchedModeForm(m){{
+        document.getElementById('sform-weekly').style.display = m==='weekly' ? '' : 'none';
+        document.getElementById('sform-daily-hours').style.display = m==='daily_hours' ? '' : 'none';
+        document.getElementById('sform-daily-blocks').style.display = m==='daily' ? '' : 'none';
+      }}
+      switchSchedModeForm('{mode}');
+      </script>"""
 
 
 def _get_user_holiday_region(user_id=None) -> str:
@@ -2491,6 +2620,9 @@ def onboarding():
         def hm3(mins):
             return _fmt_minutes(int(mins or 0))
 
+        cur_mode3 = sched.get("mode") or "weekly"
+        sched_id3 = sched.get("id")
+
         body = f"""
         {flash_html()}
         {FORM_ASSETS_JS}
@@ -2505,34 +2637,46 @@ def onboarding():
             </div>
             <div style="margin-bottom:10px;">
               <label><b>Modus</b></label><br>
-              <label><input type="radio" name="mode" value="weekly" {"checked" if sched.get("mode","weekly")=="weekly" else ""}> Wochenarbeitszeit verteilen</label><br>
-              <label><input type="radio" name="mode" value="daily" {"checked" if sched.get("mode")=="daily" else ""}> Sollstunden je Wochentag</label>
+              <label><input type="radio" name="mode" value="weekly" {"checked" if cur_mode3=="weekly" else ""}
+                     onchange="switchSchedMode('weekly')"> Wochenarbeitszeit verteilen</label><br>
+              <label><input type="radio" name="mode" value="daily_hours" {"checked" if cur_mode3=="daily_hours" else ""}
+                     onchange="switchSchedMode('daily_hours')"> Sollstunden je Wochentag</label><br>
+              <label><input type="radio" name="mode" value="daily" {"checked" if cur_mode3=="daily" else ""}
+                     onchange="switchSchedMode('daily')"> {t('onboarding.sched_fixed')}</label>
             </div>
-            <div style="margin-bottom:10px;">
-              <label><b>Wochenstunden</b></label><br>
-              <input type="number" name="weekly_hours" min="0" step="0.25" value="{(int(sched.get('weekly_minutes',2400))/60):g}" style="width:120px;">
-            </div>
-            <div style="margin-bottom:10px;">
-              <label><b>Arbeitstage</b></label><br>
-              <label><input type="checkbox" name="wd_mon" value="1" {chk3(1)}> Mo</label>
-              <label><input type="checkbox" name="wd_tue" value="1" {chk3(2)}> Di</label>
-              <label><input type="checkbox" name="wd_wed" value="1" {chk3(4)}> Mi</label>
-              <label><input type="checkbox" name="wd_thu" value="1" {chk3(8)}> Do</label>
-              <label><input type="checkbox" name="wd_fri" value="1" {chk3(16)}> Fr</label>
-              <label><input type="checkbox" name="wd_sat" value="1" {chk3(32)}> Sa</label>
-              <label><input type="checkbox" name="wd_sun" value="1" {chk3(64)}> So</label>
-            </div>
-            <div class="card" style="margin-bottom:10px;">
-              <b>Sollstunden je Wochentag</b> <span class="small">(nur Modus "je Wochentag")</span><br>
-              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
-                <div>Mo<br><input type="text" name="mon" value="{hm3(sched['mon_minutes'])}" style="width:90px;"></div>
-                <div>Di<br><input type="text" name="tue" value="{hm3(sched['tue_minutes'])}" style="width:90px;"></div>
-                <div>Mi<br><input type="text" name="wed" value="{hm3(sched['wed_minutes'])}" style="width:90px;"></div>
-                <div>Do<br><input type="text" name="thu" value="{hm3(sched['thu_minutes'])}" style="width:90px;"></div>
-                <div>Fr<br><input type="text" name="fri" value="{hm3(sched['fri_minutes'])}" style="width:90px;"></div>
-                <div>Sa<br><input type="text" name="sat" value="{hm3(sched['sat_minutes'])}" style="width:90px;"></div>
-                <div>So<br><input type="text" name="sun" value="{hm3(sched['sun_minutes'])}" style="width:90px;"></div>
+            <div id="sec-weekly">
+              <div style="margin-bottom:10px;">
+                <label><b>Wochenstunden</b></label><br>
+                <input type="number" name="weekly_hours" min="0" step="0.25" value="{(int(sched.get('weekly_minutes',2400))/60):g}" style="width:120px;">
               </div>
+              <div style="margin-bottom:10px;">
+                <label><b>Arbeitstage</b></label><br>
+                <label><input type="checkbox" name="wd_mon" value="1" {chk3(1)}> Mo</label>
+                <label><input type="checkbox" name="wd_tue" value="1" {chk3(2)}> Di</label>
+                <label><input type="checkbox" name="wd_wed" value="1" {chk3(4)}> Mi</label>
+                <label><input type="checkbox" name="wd_thu" value="1" {chk3(8)}> Do</label>
+                <label><input type="checkbox" name="wd_fri" value="1" {chk3(16)}> Fr</label>
+                <label><input type="checkbox" name="wd_sat" value="1" {chk3(32)}> Sa</label>
+                <label><input type="checkbox" name="wd_sun" value="1" {chk3(64)}> So</label>
+              </div>
+            </div>
+            <div id="sec-daily-hours" style="display:none;">
+              <div class="card" style="margin-bottom:10px;">
+                <b>Sollstunden je Wochentag</b><br>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
+                  <div>Mo<br><input type="text" name="mon" value="{hm3(sched['mon_minutes'])}" style="width:90px;"></div>
+                  <div>Di<br><input type="text" name="tue" value="{hm3(sched['tue_minutes'])}" style="width:90px;"></div>
+                  <div>Mi<br><input type="text" name="wed" value="{hm3(sched['wed_minutes'])}" style="width:90px;"></div>
+                  <div>Do<br><input type="text" name="thu" value="{hm3(sched['thu_minutes'])}" style="width:90px;"></div>
+                  <div>Fr<br><input type="text" name="fri" value="{hm3(sched['fri_minutes'])}" style="width:90px;"></div>
+                  <div>Sa<br><input type="text" name="sat" value="{hm3(sched['sat_minutes'])}" style="width:90px;"></div>
+                  <div>So<br><input type="text" name="sun" value="{hm3(sched['sun_minutes'])}" style="width:90px;"></div>
+                </div>
+              </div>
+            </div>
+            <div id="sec-daily-blocks" style="display:none;">
+              <p class="small" style="margin-bottom:8px;">{t('settings.schedule_blocks_hint')}</p>
+              {_sched_daily_blocks_html(sched_id3, "daily")}
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn primary" type="submit">Weiter →</button>
@@ -2540,6 +2684,17 @@ def onboarding():
             </div>
           </form>
         </div>
+        <script>
+        function switchSchedMode(mode){{
+          document.getElementById('sec-weekly').style.display = mode==='weekly' ? '' : 'none';
+          document.getElementById('sec-daily-hours').style.display = mode==='daily_hours' ? '' : 'none';
+          document.getElementById('sec-daily-blocks').style.display = mode==='daily' ? '' : 'none';
+        }}
+        document.querySelectorAll('input[name="mode"]').forEach(function(r){{
+          r.addEventListener('change', function(){{ switchSchedMode(r.value); }});
+        }});
+        switchSchedMode('{cur_mode3}');
+        </script>
         """
 
     elif step == 4:
@@ -2705,7 +2860,7 @@ def onboarding_post():
             add_flash(t("flash.error.invalid_date"), "error")
             return redirect("/onboarding?step=3")
         mode = (request.form.get("mode") or "weekly").strip().lower()
-        if mode not in ("weekly", "daily"):
+        if mode not in ("weekly", "daily_hours", "daily"):
             mode = "weekly"
         weekly_hours_raw = (request.form.get("weekly_hours") or "0").strip().replace(",", ".")
         try:
@@ -2716,6 +2871,9 @@ def onboarding_post():
         for i, key in enumerate(["wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun"]):
             if (request.form.get(key) or "") == "1":
                 mask |= _workday_bit(i)
+        if mode == "daily":
+            blocks_3 = _parse_sched_blocks_from_form(request.form)
+            mask = sum(1 << wd for wd in blocks_3.keys()) if blocks_3 else mask
 
         def _day_min(name):
             raw = (request.form.get(name) or "").strip()
@@ -2744,9 +2902,13 @@ def onboarding_post():
         db.execute("DELETE FROM user_schedules WHERE user_id=? AND valid_from=?", (row["user_id"], row["valid_from"]))
         col_list = ", ".join(row.keys())
         ph_list = ", ".join(["?"] * len(row))
-        db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+        cur3 = db.execute(f"INSERT INTO user_schedules ({col_list}) VALUES ({ph_list})", list(row.values()))
+        sid3 = cur3.lastrowid
         db.commit()
         db.close()
+        if mode == "daily":
+            _sched_save_blocks(sid3, blocks_3)
+            _sched_save_exceptions_from_form(sid3, request.form)
         return redirect("/onboarding?step=4")
 
     elif step == 4:
@@ -8080,7 +8242,14 @@ def settings_view():
         except Exception:
             badge = ""
 
-        mode_txt = t('schedule.mode_weekly') if mode == "weekly" else (t('schedule.mode_daily') if mode == "daily" else mode)
+        if mode == "weekly":
+            mode_txt = t('schedule.mode_weekly')
+        elif mode == "daily":
+            mode_txt = t('schedule.mode_fixed')
+        elif mode == "daily_hours":
+            mode_txt = t('schedule.mode_daily')
+        else:
+            mode_txt = mode
 
         allow_self = int(s.get("allow_self_edit") if s.get("allow_self_edit") is not None else 1)
         locked_badge = (
@@ -8108,6 +8277,8 @@ def settings_view():
             except Exception:
                 soll_txt = "–"
         elif mode == "daily":
+            soll_txt = "–"
+        elif mode == "daily_hours":
             soll_txt = "–"
         else:
             soll_txt = f"{weekly_hours_txt} {t('schedule.hours_week')}" if weekly_hours_txt else "–"
@@ -8846,6 +9017,7 @@ def settings_schedule_edit(sid: int):
     )
     db.commit()
     _sched_save_blocks(sid, blocks)
+    _sched_save_exceptions_from_form(sid, request.form)
     db.close()
     add_flash(t("success.schedule_saved"), "success")
     return redirect(url_for("settings_view") + "#acc-zeit")
@@ -8873,10 +9045,11 @@ def settings_schedule_add():
     db.close()
     _set_pref_auto_breaks(u["id"], 1 if (request.form.get("auto_breaks") or "") == "1" else 0)
     sched_id = _sched_save_to_db(u["id"], sched)
-    if request.form.get("use_daily_blocks"):
+    if sched["mode"] == "daily" or request.form.get("use_daily_blocks"):
         blocks = _parse_sched_blocks_from_form(request.form)
         _sched_save_blocks(sched_id, blocks)
-    db.close()
+        if sched["mode"] == "daily":
+            _sched_save_exceptions_from_form(sched_id, request.form)
     add_flash(t("success.schedule_saved"), "success")
     return redirect(url_for("settings_view") + "#acc-zeit")
 
@@ -10151,8 +10324,10 @@ def settings_save():
             return render_template_string(layout("Zeitschema – Überschneidung", warn_body, u, APP_VERSION))
 
     sid = _sched_save_to_db(u["id"], sched)
-    if request.form.get("use_daily_blocks"):
+    if sched["mode"] == "daily" or request.form.get("use_daily_blocks"):
         _sched_save_blocks(sid, _parse_sched_blocks_from_form(request.form))
+        if sched["mode"] == "daily":
+            _sched_save_exceptions_from_form(sid, request.form)
     else:
         _sched_save_blocks(sid, {})
     add_flash(t("settings.schedule_saved"), "success")
@@ -13135,6 +13310,7 @@ def admin_user_schedule(uid: int):
             ).fetchone()["id"]
         if blocks:
             _sched_save_blocks(sched_id, blocks)
+        _sched_save_exceptions_from_form(sched_id, request.form)
         db.close()
         add_flash(t("success.schedule_saved"), "success")
         return redirect(f"/admin/user/{uid}/schedule")
@@ -13556,6 +13732,7 @@ def admin_schedule_edit_post(user_id: int, schedule_id: str):
         ).fetchone()["id"]
 
     _sched_save_blocks(sid, blocks)
+    _sched_save_exceptions_from_form(sid, request.form)
     db.close()
     add_flash(t("success.schedule_saved"), "success")
     return redirect(f"/admin/users/{user_id}/edit")
