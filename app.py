@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.8.dev2"
+APP_VERSION = "v3.0.8.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16400,7 +16400,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
               <!-- Slot anlegen -->
-              <details style="margin-top:8px;" onToggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s)s.dispatchEvent(new Event('change'));}}">
+              <details style="margin-top:8px;" ontoggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s){{var m=s.getAttribute('onchange').match(/(\\d+)/);if(m)toggleSlotType(s,m[1]);}}}}">
                 <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
                   + {t('staffing.add_slot')}
                 </summary>
@@ -16921,7 +16921,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 </form>
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
-              <details style="margin-top:8px;" onToggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s)s.dispatchEvent(new Event('change'));}}">
+              <details style="margin-top:8px;" ontoggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s){{var m=s.getAttribute('onchange').match(/(\\d+)/);if(m)toggleSlotType(s,m[1]);}}}}">
                 <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
                   + {t('staffing.add_slot')}
                 </summary>
