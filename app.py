@@ -16332,6 +16332,20 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                         <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
                         <button class="btn btn-sm" type="button" onclick="toggleSlotEdit({sid})">{t('btn.cancel')}</button>
                       </div>
+                      <script>(function(){{
+                        var _div=document.getElementById('slot-edit-{sid}');
+                        if(!_div)return;
+                        var _sel=_div.querySelector('select[name="slot_type"]');
+                        if(!_sel)return;
+                        function doToggle(){{
+                          var n=document.getElementById('wd-normal-edit-{sid}');
+                          var s=document.getElementById('wd-special-edit-{sid}');
+                          if(!n||!s)return;
+                          if(_sel.value==='special'){{n.style.display='none';s.style.display='';}}
+                          else{{n.style.display='';s.style.display='none';}}
+                        }}
+                        _sel.addEventListener('change',doToggle);
+                      }})();</script>
                     </form>
                   </div>
                   {no_members}
@@ -16386,7 +16400,7 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
               <!-- Slot anlegen -->
-              <details style="margin-top:8px;">
+              <details style="margin-top:8px;" onToggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s)s.dispatchEvent(new Event('change'));}}">
                 <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
                   + {t('staffing.add_slot')}
                 </summary>
@@ -16461,6 +16475,17 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     </div>
                   </div>
                   <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+                  <script>(function(){{
+                    function doToggle(sel,pid){{
+                      var n=document.getElementById('wd-normal-'+pid);
+                      var s=document.getElementById('wd-special-'+pid);
+                      if(!n||!s)return;
+                      if(sel.value==='special'){{n.style.display='none';s.style.display='';}}
+                      else{{n.style.display='';s.style.display='none';}}
+                    }}
+                    var sel=document.querySelector('select[name="slot_type"][onchange*="\\'{pid}\\'"]');
+                    if(sel){{sel.addEventListener('change',function(){{doToggle(this,'{pid}');}});doToggle(sel,'{pid}');}}
+                  }})();</script>
                 </form>
               </details>
             </div>"""
@@ -16828,6 +16853,20 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                         <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
                         <button class="btn btn-sm" type="button" onclick="toggleSlotEdit({sid})">{t('btn.cancel')}</button>
                       </div>
+                      <script>(function(){{
+                        var _div=document.getElementById('slot-edit-{sid}');
+                        if(!_div)return;
+                        var _sel=_div.querySelector('select[name="slot_type"]');
+                        if(!_sel)return;
+                        function doToggle(){{
+                          var n=document.getElementById('wd-normal-edit-{sid}');
+                          var s=document.getElementById('wd-special-edit-{sid}');
+                          if(!n||!s)return;
+                          if(_sel.value==='special'){{n.style.display='none';s.style.display='';}}
+                          else{{n.style.display='';s.style.display='none';}}
+                        }}
+                        _sel.addEventListener('change',doToggle);
+                      }})();</script>
                     </form>
                   </div>
                   {no_members}
@@ -16880,7 +16919,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 </form>
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
-              <details style="margin-top:8px;">
+              <details style="margin-top:8px;" onToggle="if(this.open){{var s=this.querySelector('select[name=slot_type]');if(s)s.dispatchEvent(new Event('change'));}}">
                 <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ac);">
                   + {t('staffing.add_slot')}
                 </summary>
@@ -16955,6 +16994,17 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                     </div>
                   </div>
                   <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+                  <script>(function(){{
+                    function doToggle(sel,pid){{
+                      var n=document.getElementById('wd-normal-'+pid);
+                      var s=document.getElementById('wd-special-'+pid);
+                      if(!n||!s)return;
+                      if(sel.value==='special'){{n.style.display='none';s.style.display='';}}
+                      else{{n.style.display='';s.style.display='none';}}
+                    }}
+                    var sel=document.querySelector('select[name="slot_type"][onchange*="\\'{pid}\\'"]');
+                    if(sel){{sel.addEventListener('change',function(){{doToggle(this,'{pid}');}});doToggle(sel,'{pid}');}}
+                  }})();</script>
                 </form>
               </details>
             </div>"""
