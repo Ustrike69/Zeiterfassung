@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.6.dev3"
+APP_VERSION = "v3.0.6.dev4"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16003,12 +16003,26 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 f'<input type="checkbox" name="wd_{i}" value="{i}" checked> {_WD_MAP[i]}</label>'
                 for i in range(5)
             )
+            _plan_lead_lbl = _html.escape(
+                (p["lead_label"] if "lead_label" in p.keys() and p["lead_label"] else None) or "Leiter"
+            )
             plans_html += f"""
             <div style="background:var(--bg);border:1px solid var(--br);border-radius:10px;
                          padding:14px;margin-bottom:12px;">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
                 <strong style="font-size:15px;">{pname}</strong>
                 <span style="font-size:12px;color:var(--mu);">{p["description"] or ""}</span>
+                <form method="post" action="/admin/staffing"
+                      style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+                  <input type="hidden" name="action" value="edit_plan">
+                  <input type="hidden" name="plan_id" value="{pid}">
+                  <label style="font-size:12px;color:var(--mu);">{t("staffing.lead_label")}:</label>
+                  <input type="text" name="lead_label" value="{_plan_lead_lbl}"
+                         maxlength="30" placeholder="Leiter"
+                         style="font-size:12px;padding:3px 6px;border-radius:4px;width:120px;">
+                  <button class="btn btn-sm" type="submit"
+                          style="font-size:12px;padding:3px 8px;">{t("btn.save")}</button>
+                </form>
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
               <!-- Slot anlegen -->
@@ -16383,12 +16397,26 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 f'<input type="checkbox" name="wd_{i}" value="{i}" checked> {_WD_MAP[i]}</label>'
                 for i in range(5)
             )
+            _plan_lead_lbl2 = _html.escape(
+                (p["lead_label"] if "lead_label" in p.keys() and p["lead_label"] else None) or "Leiter"
+            )
             plans_html += f"""
             <div style="background:var(--bg);border:1px solid var(--br);border-radius:10px;
                          padding:14px;margin-bottom:12px;">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
                 <strong style="font-size:15px;">{pname}</strong>
                 <span style="font-size:12px;color:var(--mu);">{p["description"] or ""}</span>
+                <form method="post" action="/admin/staffing"
+                      style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+                  <input type="hidden" name="action" value="edit_plan">
+                  <input type="hidden" name="plan_id" value="{pid}">
+                  <label style="font-size:12px;color:var(--mu);">{t("staffing.lead_label")}:</label>
+                  <input type="text" name="lead_label" value="{_plan_lead_lbl2}"
+                         maxlength="30" placeholder="Leiter"
+                         style="font-size:12px;padding:3px 6px;border-radius:4px;width:120px;">
+                  <button class="btn btn-sm" type="submit"
+                          style="font-size:12px;padding:3px 8px;">{t("btn.save")}</button>
+                </form>
               </div>
               {slots_html if slots_html else f'<p style="font-size:12px;color:var(--mu);margin-bottom:8px;">{t("staffing.no_slots")}</p>'}
               <details style="margin-top:8px;">
@@ -18897,6 +18925,17 @@ def admin_staffing():
                 )
                 db.commit()
                 add_flash(t("success.plan_created"), "success")
+
+        elif action == "edit_plan":
+            _ep_pid        = int(request.form.get("plan_id", 0))
+            _ep_lead_label = request.form.get("lead_label", "").strip() or "Leiter"
+            if _ep_pid:
+                db.execute(
+                    "UPDATE staffing_plans SET lead_label=? WHERE id=?",
+                    (_ep_lead_label, _ep_pid)
+                )
+                db.commit()
+                add_flash(t("success.plan_updated"), "success")
 
         elif action == "create_slot":
             plan_id    = int(request.form.get("plan_id", 0))
