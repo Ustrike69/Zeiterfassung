@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.7"
+APP_VERSION = "v3.0.8.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16229,6 +16229,24 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                 _srole_label = _html.escape(_plan_lead_label) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
+                _s_wd_checks = "".join(
+                    f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;">'
+                    f'<input type="checkbox" name="wd_{i}" value="{i}"'
+                    f'{" checked" if s["weekdays"] and str(i) in str(s["weekdays"]).split(",") else ""}>'
+                    f' {_WD_MAP[i]}</label>'
+                    for i in range(7)
+                )
+                _s_nth_checks = "".join(
+                    f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;">'
+                    f'<input type="checkbox" name="nth_w_{i}" value="{i}"'
+                    f'{" checked" if s["nth_week"] and str(i) in str(s["nth_week"]).split(",") else ""}>'
+                    f' {i}.</label>'
+                    for i in range(1, 6)
+                )
+                _s_spwd_opts = "".join(
+                    f'<option value="{i}" {"selected" if s["special_weekday"] is not None and int(s["special_weekday"])==i else ""}>{_WD_MAP[i]}</option>'
+                    for i in range(7)
+                )
                 slots_html += f"""
                 <div class="slot-card" data-slot-id="{sid}">
                   <div class="slot-header">
@@ -16241,8 +16259,80 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
                     {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
                     <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
                     {f'<span style="font-size:12px;color:#eab308;">👑≥{s["min_lead"]}</span>' if (s["min_lead"] or 0) > 0 else ""}
-                    <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
+                    <button class="btn btn-sm" style="margin-left:auto;padding:2px 8px;"
+                            onclick="toggleSlotEdit({sid})">✏</button>
+                    <button class="btn btn-sm" style="color:#dc2626;padding:2px 8px;"
                             onclick="deleteSlot({sid})">×</button>
+                  </div>
+                  <div id="slot-edit-{sid}" style="display:none;margin-bottom:12px;padding:12px;background:var(--ca);border-radius:8px;border:1px solid var(--bd);">
+                    <form method="post" action="/admin/staffing">
+                      <input type="hidden" name="action" value="edit_slot">
+                      <input type="hidden" name="slot_id" value="{sid}">
+                      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_label')} *</label>
+                          <input type="text" name="label" required maxlength="60"
+                                 value="{_html.escape(s['label'])}"
+                                 style="display:block;margin-top:4px;min-width:120px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_type')}</label>
+                          <select name="slot_type" style="display:block;margin-top:4px;"
+                                  onchange="toggleSlotType(this,'edit-{sid}')">
+                            <option value="vm" {"selected" if s["slot_type"]=="vm" else ""}>{t('staffing.slot_vm')}</option>
+                            <option value="nm" {"selected" if s["slot_type"]=="nm" else ""}>{t('staffing.slot_nm')}</option>
+                            <option value="special" {"selected" if s["slot_type"]=="special" else ""}>{t('staffing.slot_special')}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.min_staff')}</label>
+                          <input type="number" name="min_staff" value="{s['min_staff']}" min="1" max="99"
+                                 style="display:block;margin-top:4px;width:70px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_role')}</label>
+                          <select name="slot_role" style="display:block;margin-top:4px;">
+                            <option value="staff" {"selected" if (s["slot_role"] or "staff")=="staff" else ""}>{t('staffing.role_staff')}</option>
+                            <option value="lead" {"selected" if s["slot_role"]=="lead" else ""}>{t('staffing.role_lead')}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.min_lead')}</label>
+                          <input type="number" name="min_lead" value="{s['min_lead'] or 0}" min="0" max="99"
+                                 style="display:block;margin-top:4px;width:70px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">Von – Bis</label>
+                          <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+                            <input type="time" name="time_from" step="900" value="{s['time_from'] or ''}" style="width:96px;">
+                            <span>–</span>
+                            <input type="time" name="time_to" step="900" value="{s['time_to'] or ''}" style="width:96px;">
+                          </div>
+                        </div>
+                      </div>
+                      <div id="wd-normal-edit-{sid}" style="margin-top:8px;{"display:none;" if s["slot_type"]=="special" else ""}">
+                        <label style="font-size:12px;display:block;margin-bottom:4px;">{t('staffing.weekdays')}</label>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;">{_s_wd_checks}</div>
+                        <input type="hidden" name="weekdays" id="wd-val-edit-{sid}" value="{s['weekdays'] or '0,1,2,3,4'}">
+                      </div>
+                      <div id="wd-special-edit-{sid}" style="margin-top:8px;{"" if s["slot_type"]=="special" else "display:none;"}">
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                          <div>
+                            <label style="font-size:12px;">{t('wd.weekday')}</label>
+                            <select name="special_weekday" style="display:block;margin-top:4px;">{_s_spwd_opts}</select>
+                          </div>
+                          <div>
+                            <label style="font-size:12px;">{t('staffing.nth_week')}</label>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">{_s_nth_checks}</div>
+                            <input type="hidden" name="nth_week" id="nth-val-edit-{sid}" value="{s['nth_week'] or ''}">
+                          </div>
+                        </div>
+                      </div>
+                      <div style="margin-top:10px;display:flex;gap:8px;">
+                        <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                        <button class="btn btn-sm" type="button" onclick="toggleSlotEdit({sid})">{t('btn.cancel')}</button>
+                      </div>
+                    </form>
                   </div>
                   {no_members}
                   <div class="slot-body">
@@ -16503,6 +16593,11 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
       }});
       document.body.appendChild(form);form.submit();
     }}
+    function toggleSlotEdit(sid){{
+      var el=document.getElementById('slot-edit-'+sid);
+      if(!el)return;
+      el.style.display=el.style.display==='none'?'block':'none';
+    }}
     function toggleSlotType(sel,pid){{
       var normal=document.getElementById('wd-normal-'+pid);
       var special=document.getElementById('wd-special-'+pid);
@@ -16513,18 +16608,24 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
     document.addEventListener('change',function(e){{
       if(!e.target.name||!e.target.name.startsWith('wd_'))return;
       var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
-      var pid=pEl.value;var checked=[];
+      var pEl=f.querySelector('[name=plan_id]');
+      var sEl=f.querySelector('[name=slot_id]');
+      var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
+      if(!hid_id)return;
+      var checked=[];
       f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById('wd-val-'+pid);if(hid)hid.value=checked.join(',');
+      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
     }});
     document.addEventListener('change',function(e){{
       if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
       var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
-      var pid=pEl.value;var checked=[];
+      var pEl=f.querySelector('[name=plan_id]');
+      var sEl=f.querySelector('[name=slot_id]');
+      var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
+      if(!hid_id)return;
+      var checked=[];
       f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById('nth-val-'+pid);if(hid)hid.value=checked.join(',');
+      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
     }});
     </script>"""
 
@@ -16624,6 +16725,24 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                 _srole_label = _html.escape(_plan_lead_label2) if _srole == "lead" else t("staffing.role_staff")
                 _srole_bg    = "#eab308" if _srole == "lead" else "var(--ca)"
                 _srole_color = "#000"    if _srole == "lead" else "var(--tx)"
+                _s_wd_checks2 = "".join(
+                    f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;">'
+                    f'<input type="checkbox" name="wd_{i}" value="{i}"'
+                    f'{" checked" if s["weekdays"] and str(i) in str(s["weekdays"]).split(",") else ""}>'
+                    f' {_WD_MAP[i]}</label>'
+                    for i in range(7)
+                )
+                _s_nth_checks2 = "".join(
+                    f'<label style="font-size:12px;display:flex;align-items:center;gap:3px;">'
+                    f'<input type="checkbox" name="nth_w_{i}" value="{i}"'
+                    f'{" checked" if s["nth_week"] and str(i) in str(s["nth_week"]).split(",") else ""}>'
+                    f' {i}.</label>'
+                    for i in range(1, 6)
+                )
+                _s_spwd_opts2 = "".join(
+                    f'<option value="{i}" {"selected" if s["special_weekday"] is not None and int(s["special_weekday"])==i else ""}>{_WD_MAP[i]}</option>'
+                    for i in range(7)
+                )
                 slots_html += f"""
                 <div class="slot-card" data-slot-id="{sid}">
                   <div class="slot-header">
@@ -16636,8 +16755,80 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                     {f'<span style="font-size:12px;color:var(--ac);">{s["time_from"]}–{s["time_to"]}</span>' if s["time_from"] and s["time_to"] else ""}
                     <span class="slot-min" style="font-size:12px;color:var(--mu);">Min: {s["min_staff"]}</span>
                     {f'<span style="font-size:12px;color:#eab308;">👑≥{s["min_lead"]}</span>' if (s["min_lead"] or 0) > 0 else ""}
-                    <button class="btn btn-sm" style="color:#dc2626;margin-left:auto;padding:2px 8px;"
+                    <button class="btn btn-sm" style="margin-left:auto;padding:2px 8px;"
+                            onclick="toggleSlotEdit({sid})">✏</button>
+                    <button class="btn btn-sm" style="color:#dc2626;padding:2px 8px;"
                             onclick="deleteSlot({sid})">×</button>
+                  </div>
+                  <div id="slot-edit-{sid}" style="display:none;margin-bottom:12px;padding:12px;background:var(--ca);border-radius:8px;border:1px solid var(--bd);">
+                    <form method="post" action="/admin/staffing">
+                      <input type="hidden" name="action" value="edit_slot">
+                      <input type="hidden" name="slot_id" value="{sid}">
+                      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_label')} *</label>
+                          <input type="text" name="label" required maxlength="60"
+                                 value="{_html.escape(s['label'])}"
+                                 style="display:block;margin-top:4px;min-width:120px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_type')}</label>
+                          <select name="slot_type" style="display:block;margin-top:4px;"
+                                  onchange="toggleSlotType(this,'edit-{sid}')">
+                            <option value="vm" {"selected" if s["slot_type"]=="vm" else ""}>{t('staffing.slot_vm')}</option>
+                            <option value="nm" {"selected" if s["slot_type"]=="nm" else ""}>{t('staffing.slot_nm')}</option>
+                            <option value="special" {"selected" if s["slot_type"]=="special" else ""}>{t('staffing.slot_special')}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.min_staff')}</label>
+                          <input type="number" name="min_staff" value="{s['min_staff']}" min="1" max="99"
+                                 style="display:block;margin-top:4px;width:70px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.slot_role')}</label>
+                          <select name="slot_role" style="display:block;margin-top:4px;">
+                            <option value="staff" {"selected" if (s["slot_role"] or "staff")=="staff" else ""}>{t('staffing.role_staff')}</option>
+                            <option value="lead" {"selected" if s["slot_role"]=="lead" else ""}>{t('staffing.role_lead')}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">{t('staffing.min_lead')}</label>
+                          <input type="number" name="min_lead" value="{s['min_lead'] or 0}" min="0" max="99"
+                                 style="display:block;margin-top:4px;width:70px;">
+                        </div>
+                        <div>
+                          <label style="font-size:12px;">Von – Bis</label>
+                          <div style="display:flex;align-items:center;gap:4px;margin-top:4px;">
+                            <input type="time" name="time_from" step="900" value="{s['time_from'] or ''}" style="width:96px;">
+                            <span>–</span>
+                            <input type="time" name="time_to" step="900" value="{s['time_to'] or ''}" style="width:96px;">
+                          </div>
+                        </div>
+                      </div>
+                      <div id="wd-normal-edit-{sid}" style="margin-top:8px;{"display:none;" if s["slot_type"]=="special" else ""}">
+                        <label style="font-size:12px;display:block;margin-bottom:4px;">{t('staffing.weekdays')}</label>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;">{_s_wd_checks2}</div>
+                        <input type="hidden" name="weekdays" id="wd-val-edit-{sid}" value="{s['weekdays'] or '0,1,2,3,4'}">
+                      </div>
+                      <div id="wd-special-edit-{sid}" style="margin-top:8px;{"" if s["slot_type"]=="special" else "display:none;"}">
+                        <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                          <div>
+                            <label style="font-size:12px;">{t('wd.weekday')}</label>
+                            <select name="special_weekday" style="display:block;margin-top:4px;">{_s_spwd_opts2}</select>
+                          </div>
+                          <div>
+                            <label style="font-size:12px;">{t('staffing.nth_week')}</label>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">{_s_nth_checks2}</div>
+                            <input type="hidden" name="nth_week" id="nth-val-edit-{sid}" value="{s['nth_week'] or ''}">
+                          </div>
+                        </div>
+                      </div>
+                      <div style="margin-top:10px;display:flex;gap:8px;">
+                        <button class="btn primary btn-sm" type="submit">{t('btn.save')}</button>
+                        <button class="btn btn-sm" type="button" onclick="toggleSlotEdit({sid})">{t('btn.cancel')}</button>
+                      </div>
+                    </form>
                   </div>
                   {no_members}
                   <div class="slot-body">
@@ -16887,6 +17078,11 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
       }});
       document.body.appendChild(form);form.submit();
     }}
+    function toggleSlotEdit(sid){{
+      var el=document.getElementById('slot-edit-'+sid);
+      if(!el)return;
+      el.style.display=el.style.display==='none'?'block':'none';
+    }}
     function toggleSlotType(sel,pid){{
       var normal=document.getElementById('wd-normal-'+pid);
       var special=document.getElementById('wd-special-'+pid);
@@ -16897,18 +17093,24 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
     document.addEventListener('change',function(e){{
       if(!e.target.name||!e.target.name.startsWith('wd_'))return;
       var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
-      var pid=pEl.value;var checked=[];
+      var pEl=f.querySelector('[name=plan_id]');
+      var sEl=f.querySelector('[name=slot_id]');
+      var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
+      if(!hid_id)return;
+      var checked=[];
       f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById('wd-val-'+pid);if(hid)hid.value=checked.join(',');
+      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
     }});
     document.addEventListener('change',function(e){{
       if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
       var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');if(!pEl)return;
-      var pid=pEl.value;var checked=[];
+      var pEl=f.querySelector('[name=plan_id]');
+      var sEl=f.querySelector('[name=slot_id]');
+      var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
+      if(!hid_id)return;
+      var checked=[];
       f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById('nth-val-'+pid);if(hid)hid.value=checked.join(',');
+      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
     }});
     </script>"""
 
@@ -19264,6 +19466,31 @@ def admin_staffing():
             slot_id = int(request.form.get("slot_id", 0))
             db.execute("DELETE FROM staffing_slots WHERE id=?", (slot_id,))
             db.commit()
+
+        elif action == "edit_slot":
+            sid       = int(request.form.get("slot_id", 0))
+            label     = request.form.get("label", "").strip()
+            stype     = request.form.get("slot_type", "vm")
+            weekdays  = request.form.get("weekdays", "0,1,2,3,4")
+            nth_week  = request.form.get("nth_week", "") or None
+            special_wd = request.form.get("special_weekday", "") or None
+            min_staff = max(1, int(request.form.get("min_staff", 1) or 1))
+            time_from = request.form.get("time_from", "").strip() or None
+            time_to   = request.form.get("time_to", "").strip() or None
+            slot_role = request.form.get("slot_role", "staff")
+            if slot_role not in ("staff", "lead"):
+                slot_role = "staff"
+            min_lead  = max(0, int(request.form.get("min_lead", 0) or 0))
+            if sid and label:
+                db.execute("""UPDATE staffing_slots SET
+                    label=?, slot_type=?, weekdays=?, nth_week=?,
+                    special_weekday=?, min_staff=?, time_from=?,
+                    time_to=?, slot_role=?, min_lead=?
+                    WHERE id=?""",
+                    (label, stype, weekdays, nth_week, special_wd,
+                     min_staff, time_from, time_to, slot_role, min_lead, sid))
+                db.commit()
+                add_flash(t("success.slot_updated"), "success")
 
         elif action == "save_assignments":
             slot_id  = int(request.form.get("slot_id", 0))
