@@ -18170,7 +18170,8 @@ def _render_staffing_week(data: dict, plan_id: int) -> str:
             if slot["time_from"] and slot["time_to"] else ""
         )
         _min_lead_hint = (
-            f'<span style="font-size:10px;color:#eab308;margin-left:4px;">👑≥{slot["min_lead"]}</span>'
+            f'<span style="font-size:10px;color:#eab308;margin-left:4px;" '
+            f'title="{_html.escape(lead_label)}">♦≥{slot["min_lead"]}</span>'
             if int(slot["min_lead"] or 0) > 0 else ""
         )
         cells = (
