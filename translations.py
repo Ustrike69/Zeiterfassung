@@ -807,6 +807,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # ── Admin extras ──────────────────────────────────────────────
         "admin.role_sysadmin_badge": "🔧 Systemadmin",
         "admin.role_tm_badge":       "📋 Zeitmanager",
+        "admin.role_hr_badge":       "👤 HR",
+        "admin.team_restriction":    "Team-Einschränkung",
+        "admin.team_restriction_auto": "Leer = automatisch aus eigenen Teams",
         "admin.inactive_badge":      "inaktiv",
         "admin.admin_only_badge":    "nur Admin",
         "admin.identity_btn":        "👤 Identität",
@@ -1117,6 +1120,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.lead_label_hint":         "Wie wird der Leiter in diesem Plan genannt?",
         "staffing.default_min_staff":       "Standard Mindestbesetzung",
         "staffing.is_lead":                 "Ist Leiter",
+        "staffing.readonly_hint":           "Du siehst nur deinen Team-Plan",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - User wechseln",
@@ -2037,6 +2041,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # ── Admin extras ──────────────────────────────────────────────
         "admin.role_sysadmin_badge": "🔧 System Admin",
         "admin.role_tm_badge":       "📋 Time Manager",
+        "admin.role_hr_badge":       "👤 HR",
+        "admin.team_restriction":    "Team restriction",
+        "admin.team_restriction_auto": "Empty = automatic from own teams",
         "admin.inactive_badge":      "inactive",
         "admin.admin_only_badge":    "admin only",
         "admin.identity_btn":        "👤 Impersonate",
@@ -2347,6 +2354,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "staffing.lead_label_hint":         "How is the lead called in this plan?",
         "staffing.default_min_staff":       "Default min. staff",
         "staffing.is_lead":                 "Is lead",
+        "staffing.readonly_hint":           "You can only see your team plan",
 
         # ── Dev Mode ─────────────────────────────────────────────
         "dev.users_title":              "DEV - Switch User",

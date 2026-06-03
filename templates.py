@@ -22,10 +22,11 @@ def layout(title: str, body: str, user=None, app_version: str = "v1.4.5", impers
             if user.get("is_approver"):
                 items.append(("/approvals", _t("nav.approvals")))
             try:
-                from app import _feature_enabled as _fe
+                from app import _feature_enabled as _fe, _user_has_team_plan as _uhtp
                 if _fe("staffing") and (
-                    user.get("admin_role") in ("sysadmin", "timemanager")
+                    user.get("admin_role") in ("sysadmin", "timemanager", "hr")
                     or user.get("is_approver")
+                    or _uhtp(user["id"])
                 ):
                     items.append(("/staffing", _t("nav.staffing")))
                 if _fe("staffing"):

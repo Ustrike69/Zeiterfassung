@@ -283,7 +283,7 @@ def current_user():
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
         "password_changed, onboarding_done, display_name, email, admin_role, "
         "must_change_password, admin_only, language, password_compliant, "
-        "totp_enabled, login_attempts, last_login, is_approver FROM users WHERE id=?",
+        "totp_enabled, login_attempts, last_login, is_approver, team_restriction FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
@@ -297,18 +297,25 @@ def is_sysadmin(u=None) -> bool:
 
 
 def is_timemanager(u=None) -> bool:
-    """True for any admin role (sysadmin or timemanager)."""
+    """True for any admin role (sysadmin, timemanager, or hr)."""
     if u is None:
         u = current_user()
-    return bool(u and u.get("admin_role") in ("sysadmin", "timemanager"))
+    return bool(u and u.get("admin_role") in ("sysadmin", "timemanager", "hr"))
+
+
+def is_hr(u=None) -> bool:
+    """True for sysadmin, timemanager, or hr role."""
+    if u is None:
+        u = current_user()
+    return bool(u and u.get("admin_role") in ("sysadmin", "timemanager", "hr"))
 
 
 def set_admin_role(user_id: int, role) -> None:
-    """Set admin_role and sync is_admin flag. role: 'sysadmin', 'timemanager', or None."""
+    """Set admin_role and sync is_admin flag. role: 'sysadmin', 'timemanager', 'hr', or None."""
     db = connect()
     db.execute(
         "UPDATE users SET admin_role=?, is_admin=?, updated_at=datetime('now') WHERE id=?",
-        (role or None, 1 if role in ("sysadmin", "timemanager") else 0, user_id),
+        (role or None, 1 if role in ("sysadmin", "timemanager", "hr") else 0, user_id),
     )
     db.commit()
     db.close()
@@ -443,6 +450,19 @@ def admin_required(view):
 
 # Alias – semantically clearer in route definitions
 timemanager_required = admin_required
+
+
+def hr_required(f):
+    """Allows sysadmin, timemanager, and hr roles."""
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        u = current_user()
+        if not u:
+            return redirect(url_for("login"))
+        if u.get("admin_role") not in ("sysadmin", "timemanager", "hr"):
+            abort(403)
+        return f(*args, **kwargs)
+    return wrapped
 
 
 def sysadmin_required(view):

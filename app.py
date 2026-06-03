@@ -9,16 +9,16 @@ import json as _json
 from db import init_db, seed_defaults, db_path, connect
 from calendar_seed import seed_all_regions_if_needed, REGION_GROUPS, ALL_REGIONS
 from auth import (has_users, create_user, authenticate, current_user, login_required,
-                  admin_required, sysadmin_required, timemanager_required,
+                  admin_required, sysadmin_required, timemanager_required, hr_required,
                   set_password, set_flags, set_admin_role, set_active,
-                  is_sysadmin, is_timemanager, validate_password, set_must_change_password,
+                  is_sysadmin, is_timemanager, is_hr, validate_password, set_must_change_password,
                   set_language, unlock_account, validate_unlock_token, get_lockout_until,
                   set_totp, disable_totp, get_totp_row, update_totp_backup_codes)
 from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.6"
+APP_VERSION = "v3.0.7.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -69,6 +69,48 @@ def _get_app_config() -> dict:
 
 def _feature_enabled(key: str) -> bool:
     return _get_app_config().get(f"feature_{key}", "0") == "1"
+
+
+def _get_visible_user_ids(u: dict):
+    """Return list of user IDs visible to this admin, or None (= all) for sysadmin."""
+    role = u.get("admin_role")
+    if role == "sysadmin":
+        return None
+    db = connect()
+    restriction = u.get("team_restriction")
+    if restriction:
+        team_ids = [int(x) for x in restriction.split(",") if x.strip().isdigit()]
+    else:
+        rows = db.execute(
+            "SELECT team_id FROM user_teams WHERE user_id=?", (u["id"],)
+        ).fetchall()
+        team_ids = [r["team_id"] for r in rows]
+    if not team_ids:
+        db.close()
+        return []
+    ph = ",".join("?" * len(team_ids))
+    users = db.execute(
+        f"SELECT DISTINCT user_id FROM user_teams WHERE team_id IN ({ph})",
+        team_ids
+    ).fetchall()
+    db.close()
+    return [r["user_id"] for r in users]
+
+
+def _user_has_team_plan(user_id: int) -> bool:
+    """True if user belongs to a team that has an active staffing plan."""
+    try:
+        db = connect()
+        row = db.execute("""
+            SELECT sp.id FROM staffing_plans sp
+            JOIN user_teams ut ON ut.team_id = sp.team_id
+            WHERE ut.user_id = ? AND sp.active = 1
+            LIMIT 1
+        """, (user_id,)).fetchone()
+        db.close()
+        return row is not None
+    except Exception:
+        return False
 
 
 def _slot_applies_on_date(slot, iso_date: str,
@@ -12641,9 +12683,9 @@ def admin_users_new_post():
     u = current_user()
     username = (request.form.get("username") or "").strip()
     new_role = (request.form.get("admin_role") or "").strip()
-    if new_role not in ("", "timemanager", "sysadmin"):
+    if new_role not in ("", "timemanager", "sysadmin", "hr"):
         new_role = ""
-    is_admin = new_role in ("timemanager", "sysadmin")
+    is_admin = new_role in ("timemanager", "sysadmin", "hr")
     is_active = (request.form.get("is_active") or "0") == "1"
     admin_only_val = 1 if (request.form.get("admin_only") or "0") == "1" and is_admin else 0
     tracking_start_date = _parse_date_input(request.form.get("tracking_start_date") or "")
@@ -12711,8 +12753,9 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id, team_restriction FROM users WHERE id=?", (user_id,)).fetchone()
     _all_approvers = db.execute("SELECT id, username, display_name FROM users WHERE is_approver=1 AND is_active=1 ORDER BY username").fetchall()
+    _all_teams_edit = db.execute("SELECT id, name FROM teams ORDER BY name").fetchall()
     db.close()
     if not r:
         abort(404)
@@ -12775,14 +12818,35 @@ def admin_users_edit(user_id: int):
         sel = "selected" if cur == val else ""
         return f'<option value="{val}" {sel}>{label}</option>'
     cur_role = r["admin_role"] or ""
+    _cur_team_restriction = r["team_restriction"] or ""
+    _cur_tr_ids = {int(x) for x in _cur_team_restriction.split(",") if x.strip().isdigit()}
+    _team_restriction_checks = "".join(
+        f'<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
+        f'<input type="checkbox" name="tr_{_te["id"]}" value="1" {"checked" if _te["id"] in _cur_tr_ids else ""}>'
+        f'<span>{_html.escape(_te["name"])}</span></label>'
+        for _te in _all_teams_edit
+    )
+    _team_restriction_hidden = "".join(
+        f'<input type="hidden" name="_tr_team_{_te["id"]}" value="{_te["id"]}">'
+        for _te in _all_teams_edit
+    )
     role_dropdown = f"""
         <div style="margin-bottom:12px;">
           <label>Rolle</label>
           <select name="admin_role" style="font-size:13px;padding:5px 8px;width:auto;">
             {_role_opt("","Keine Adminrechte",cur_role)}
             {_role_opt("timemanager","📋 Zeitmanager",cur_role)}
+            {_role_opt("hr","👤 HR",cur_role)}
             {_role_opt("sysadmin","🔧 Systemadmin",cur_role)}
           </select>
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="font-size:12px;font-weight:600;">{t('admin.team_restriction')}</label>
+          <div class="small" style="color:var(--mu);margin-bottom:6px;">{t('admin.team_restriction_auto')}</div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            {_team_restriction_checks if _team_restriction_checks else '<span class="small" style="color:var(--mu);">Keine Teams vorhanden</span>'}
+          </div>
+          <input type="hidden" name="_tr_submitted" value="1">
         </div>""" if _can_edit_role else ""
     admin_only_field = f"""
         <div style="margin-bottom:12px;">
@@ -13078,7 +13142,7 @@ def admin_users_edit_post(user_id: int):
     # Role change: only sysadmin, only for other users
     if is_sysadmin(u) and user_id != u["id"] and "admin_role" in request.form:
         new_role = (request.form.get("admin_role") or "").strip() or None
-        if new_role not in (None, "sysadmin", "timemanager"):
+        if new_role not in (None, "sysadmin", "timemanager", "hr"):
             new_role = None
         # Guard: don't demote last sysadmin
         if new_role != "sysadmin":
@@ -13165,6 +13229,21 @@ def admin_users_edit_post(user_id: int):
         db.execute(
             "UPDATE users SET is_approver=?, approver_id=?, approval_required_types=?, updated_at=datetime('now') WHERE id=?",
             (new_is_approver, new_approver_id, new_art, user_id),
+        )
+        db.commit()
+        db.close()
+
+    # team_restriction: sysadmin can set for timemanager/hr users
+    if is_sysadmin(u) and user_id != u["id"] and "_tr_submitted" in request.form:
+        _tr_db = connect()
+        _all_team_ids = [r["id"] for r in _tr_db.execute("SELECT id FROM teams").fetchall()]
+        _tr_db.close()
+        _tr_ids = [str(tid) for tid in _all_team_ids if request.form.get(f"tr_{tid}") == "1"]
+        _tr_val = ",".join(_tr_ids) or None
+        db = connect()
+        db.execute(
+            "UPDATE users SET team_restriction=?, updated_at=datetime('now') WHERE id=?",
+            (_tr_val, user_id),
         )
         db.commit()
         db.close()
@@ -13968,6 +14047,11 @@ def admin_home():
 
     # ── Section 1+2+3: build user table rows ──────────────────────────────────
     _is_sysadm = is_sysadmin(u)
+    if not _is_sysadm:
+        _vis_ids = _get_visible_user_ids(u)
+        if _vis_ids is not None:
+            _vis_id_set = set(_vis_ids)
+            all_users = [r for r in all_users if r["id"] in _vis_id_set]
     user_trs = ""
     sched_trs = ""
     vac_trs = ""
@@ -13983,6 +14067,8 @@ def admin_home():
             role_badge = f" <span class='small' style='color:#6366f1;'>{t('admin.role_sysadmin_badge')}</span>"
         elif role == "timemanager":
             role_badge = f" <span class='small' style='color:#0891b2;'>{t('admin.role_tm_badge')}</span>"
+        elif role == "hr":
+            role_badge = f" <span class='small' style='color:#059669;'>{t('admin.role_hr_badge')}</span>"
         else:
             role_badge = ""
         inact_badge = f" <span class='small' style='color:var(--mu);'>· {t('admin.inactive_badge')}</span>" if not r["is_active"] else ""
@@ -14153,8 +14239,8 @@ def admin_home():
     _is_approver = bool(u.get("is_approver"))
 
     _html_per_user  = _render_per_user_settings_section()
-    _html_overtime  = _tab(_render_admin_overtime_section(), "reporting")
-    _html_absences  = _tab(_render_admin_absences_section(), "reporting")
+    _html_overtime  = _tab(_render_admin_overtime_section(u), "reporting")
+    _html_absences  = _tab(_render_admin_absences_section(u), "reporting")
     _html_appearance = _tab(_render_appearance_section(), "system") if _is_sysadm else ""
     _html_regional  = _tab(_render_regional_section(), "system") if _is_sysadm else ""
     _html_backup    = _tab(_render_backup_section(), "system") if _is_sysadm else ""
@@ -14331,6 +14417,7 @@ window.addEventListener('DOMContentLoaded',function(){{
                   <select name="admin_role" id="nu-role" onchange="nuRoleChange()" style="font-size:13px;padding:5px 8px;width:auto;">
                     <option value="">{t('admin.role_user')}</option>
                     <option value="timemanager">{t('admin.role_tm_badge')}</option>
+                    <option value="hr">{t('admin.role_hr_badge')}</option>
                     <option value="sysadmin">{t('admin.role_sysadmin_badge')}</option>
                   </select>
                 </div>
@@ -15368,7 +15455,7 @@ def admin_mail_settings_test():
     return redirect("/admin#acc-mail")
 
 
-def _render_admin_absences_section() -> str:
+def _render_admin_absences_section(u=None) -> str:
     today = datetime.date.today()
     yesterday = (today - datetime.timedelta(days=1)).isoformat()
 
@@ -15391,6 +15478,11 @@ def _render_admin_absences_section() -> str:
         "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
     ).fetchall()
     db.close()
+    if u and not is_sysadmin(u):
+        _vis = _get_visible_user_ids(u)
+        if _vis is not None:
+            _vis_set = set(_vis)
+            active_users = [r for r in active_users if r["id"] in _vis_set]
 
     # --- Section 1: vacation status all users ---
     vac_rows = ""
@@ -16701,7 +16793,7 @@ def _render_overtime_defaults_section() -> str:
     </div>"""
 
 
-def _render_admin_overtime_section() -> str:
+def _render_admin_overtime_section(u=None) -> str:
     today_iso = datetime.date.today().isoformat()
 
     cfg = _get_app_config()
@@ -16718,6 +16810,12 @@ def _render_admin_overtime_section() -> str:
     _adj_users = db.execute(
         "SELECT id, username, display_name FROM users WHERE is_active=1 ORDER BY display_name, username"
     ).fetchall()
+    if u and not is_sysadmin(u):
+        _vis = _get_visible_user_ids(u)
+        if _vis is not None:
+            _vis_set = set(_vis)
+            active_users = [r for r in active_users if r["id"] in _vis_set]
+            _adj_users = [r for r in _adj_users if r["id"] in _vis_set]
     _adj_rows = db.execute("""
         SELECT ba.*, u.display_name as uname, u.username,
                cb.display_name as cname
@@ -18379,11 +18477,17 @@ def _render_staffing_view(plans, plan_id, view, data, u) -> str:
         body_html = _render_staffing_month(data, plan_id)
 
     manage_link = ""
-    if u.get("admin_role") in ("sysadmin", "timemanager"):
+    if u.get("admin_role") in ("sysadmin", "timemanager", "hr"):
         manage_link = (
             f'<a href="/admin/staffing" class="btn btn-sm" style="margin-left:8px;">'
             f'⚙ {t("staffing.manage_plans")}</a>'
         )
+
+    _is_readonly = u.get("admin_role") not in ("sysadmin", "timemanager", "hr") and not u.get("is_approver")
+    readonly_hint = (
+        f'<div class="small" style="color:var(--mu);margin-bottom:8px;">'
+        f'ℹ {t("staffing.readonly_hint")}</div>'
+    ) if _is_readonly else ""
 
     return f"""
     <div style="max-width:960px;margin:1rem auto;">
@@ -18393,6 +18497,7 @@ def _render_staffing_view(plans, plan_id, view, data, u) -> str:
         <div style="display:flex;gap:4px;">{view_btns}</div>
         {manage_link}
       </div>
+      {readonly_hint}
       {body_html}
     </div>"""
 
@@ -18648,7 +18753,8 @@ def staffing_day_view():
     if not _feature_enabled("staffing"):
         abort(404)
     u = current_user()
-    if not (u.get("admin_role") in ("sysadmin", "timemanager") or u.get("is_approver")):
+    if not (u.get("admin_role") in ("sysadmin", "timemanager", "hr")
+            or u.get("is_approver") or _user_has_team_plan(u["id"])):
         abort(403)
     iso_date = request.args.get("date", "")
     try:
@@ -18870,20 +18976,36 @@ def staffing_view():
     if not _feature_enabled("staffing"):
         abort(404)
     u = current_user()
-    if not (u.get("admin_role") in ("sysadmin", "timemanager") or u.get("is_approver")):
+    _can_see_staffing = (
+        u.get("admin_role") in ("sysadmin", "timemanager", "hr")
+        or u.get("is_approver")
+        or _user_has_team_plan(u["id"])
+    )
+    if not _can_see_staffing:
         abort(403)
 
     view    = request.args.get("view", "week")
     plan_id = request.args.get("plan_id", type=int)
 
     db = connect()
-    plans = db.execute("""
-        SELECT sp.*, t.name as team_name
-        FROM staffing_plans sp
-        JOIN teams t ON t.id = sp.team_id
-        WHERE sp.active = 1
-        ORDER BY t.name, sp.name
-    """).fetchall()
+    _is_admin_role = u.get("admin_role") in ("sysadmin", "timemanager", "hr")
+    if _is_admin_role or u.get("is_approver"):
+        plans = db.execute("""
+            SELECT sp.*, t.name as team_name
+            FROM staffing_plans sp
+            JOIN teams t ON t.id = sp.team_id
+            WHERE sp.active = 1
+            ORDER BY t.name, sp.name
+        """).fetchall()
+    else:
+        plans = db.execute("""
+            SELECT sp.*, t.name as team_name
+            FROM staffing_plans sp
+            JOIN teams t ON t.id = sp.team_id
+            JOIN user_teams ut ON ut.team_id = sp.team_id
+            WHERE sp.active = 1 AND ut.user_id = ?
+            ORDER BY t.name, sp.name
+        """, (u["id"],)).fetchall()
     db.close()
 
     if not plan_id and plans:
