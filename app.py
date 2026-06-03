@@ -7073,11 +7073,13 @@ def day_detail(day: str):
         ).fetchall()
         _db_p.close()
 
-    # Sollzeiten aus Zeitschema für diesen Wochentag
+    # Sollzeiten aus Zeitschema für diesen Wochentag (inkl. nth-week Ausnahmen)
     _schedule_blocks = []
     if not day_locked:
         _db_sb = connect()
-        _wd = datetime.date.fromisoformat(day).weekday()
+        _day_d = datetime.date.fromisoformat(day)
+        _wd = _day_d.weekday()
+        _week_num = (_day_d.day - 1) // 7 + 1
         _sched = _db_sb.execute("""
             SELECT us.id FROM user_schedules us
             WHERE us.user_id=? AND us.mode='daily'
@@ -7085,12 +7087,32 @@ def day_detail(day: str):
             ORDER BY us.valid_from DESC LIMIT 1
         """, (u["id"], day)).fetchone()
         if _sched:
-            _schedule_blocks = _db_sb.execute("""
-                SELECT time_from, time_to, 0 as break_minutes
-                FROM schedule_daily_blocks
-                WHERE schedule_id=? AND weekday=?
-                ORDER BY sort_order
-            """, (_sched["id"], _wd)).fetchall()
+            _sid = _sched["id"]
+            # Check nth-week exceptions first
+            _exc_applied = False
+            try:
+                _excs = _db_sb.execute(
+                    "SELECT nth_weeks, time_from, time_to FROM schedule_exceptions "
+                    "WHERE schedule_id=? AND weekday=?",
+                    (_sid, _wd)
+                ).fetchall()
+                for _exc in _excs:
+                    _weeks = [int(w) for w in _exc["nth_weeks"].split(",") if w.strip()]
+                    if _week_num in _weeks:
+                        _schedule_blocks = [{"time_from": _exc["time_from"],
+                                             "time_to": _exc["time_to"],
+                                             "break_minutes": 0}]
+                        _exc_applied = True
+                        break
+            except Exception:
+                pass
+            if not _exc_applied:
+                _schedule_blocks = _db_sb.execute("""
+                    SELECT time_from, time_to, 0 as break_minutes
+                    FROM schedule_daily_blocks
+                    WHERE schedule_id=? AND weekday=?
+                    ORDER BY sort_order
+                """, (_sid, _wd)).fetchall()
         _db_sb.close()
 
     _preset_opts = "".join(
