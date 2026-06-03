@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.8.dev4"
+APP_VERSION = "v3.0.8.dev5"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14455,6 +14455,101 @@ def admin_home():
     )
     _default_tab = _tabs[0][0] if _tabs else "system"
 
+    _staffing_js = ""
+    if _feature_enabled("staffing"):
+        _staffing_js = f"""<script>
+function toggleSlotType(sel,pid){{
+  var n=document.getElementById('wd-normal-'+pid);
+  var s=document.getElementById('wd-special-'+pid);
+  if(!n||!s)return;
+  if(sel.value==='special'){{n.style.display='none';s.style.display='block';}}
+  else{{n.style.display='block';s.style.display='none';}}
+}}
+function toggleSlotEdit(sid){{
+  var el=document.getElementById('slot-edit-'+sid);
+  if(!el)return;
+  el.style.display=el.style.display==='none'?'block':'none';
+}}
+function slotFormInit(details){{
+  var s=details.querySelector('select[name=slot_type]');
+  if(!s)return;
+  var oc=s.getAttribute('onchange')||'';
+  var i1=oc.indexOf("'")+1;
+  var i2=oc.lastIndexOf("'");
+  if(i1>0&&i2>i1){{toggleSlotType(s,oc.substring(i1,i2));}}
+}}
+function allowDrop(e){{e.preventDefault();}}
+function drag(e){{e.dataTransfer.setData("userId",e.target.dataset.userId);}}
+function drop(e,slotId,target){{
+  e.preventDefault();
+  var uid=e.dataTransfer.getData("userId");
+  var card=document.querySelector('[data-user-id="'+uid+'"]');
+  if(card)e.currentTarget.appendChild(card);
+  e.currentTarget.classList.remove("dragover");
+}}
+function toggleLead(btn){{
+  var card=btn.closest('.user-card');
+  var isLead=card.dataset.isLead==='1';
+  card.dataset.isLead=isLead?'0':'1';
+  btn.textContent=isLead?'○':'👑';
+  btn.style.color=isLead?'var(--mu)':'#eab308';
+}}
+function saveAssignments(slotId){{
+  var assigned=document.querySelectorAll("#assigned-"+slotId+" .user-card");
+  var userIds=[].map.call(assigned,function(c){{return c.dataset.userId;}});
+  var leadIds=[].map.call(assigned,function(c){{return c.dataset.isLead==='1'?c.dataset.userId:null;}}).filter(Boolean);
+  var form=document.createElement("form");
+  form.method="POST";form.action="/admin/staffing";
+  [["action","save_assignments"],["slot_id",slotId]].forEach(function(p){{
+    var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
+  }});
+  userIds.forEach(function(uid){{
+    var i=document.createElement("input");i.type="hidden";i.name="user_ids";i.value=uid;form.appendChild(i);
+  }});
+  leadIds.forEach(function(uid){{
+    var i=document.createElement("input");i.type="hidden";i.name="lead_user_ids";i.value=uid;form.appendChild(i);
+  }});
+  document.body.appendChild(form);form.submit();
+}}
+function deleteSlot(slotId){{
+  if(!confirm("{t('confirm.delete')}"))return;
+  var form=document.createElement("form");
+  form.method="POST";form.action="/admin/staffing";
+  [["action","delete_slot"],["slot_id",slotId]].forEach(function(p){{
+    var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
+  }});
+  document.body.appendChild(form);form.submit();
+}}
+document.addEventListener('change',function(e){{
+  if(e.target.name&&e.target.name.startsWith('wd_')){{
+    var f=e.target.closest('form');if(!f)return;
+    var pEl=f.querySelector('[name=plan_id]');
+    var sEl=f.querySelector('[name=slot_id]');
+    var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
+    if(!hid_id)return;
+    var c=[];
+    f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)c.push(cb.value);}});
+    var h=document.getElementById(hid_id);if(h)h.value=c.join(',');
+  }}
+  if(e.target.name&&e.target.name.startsWith('nth_w_')){{
+    var f=e.target.closest('form');if(!f)return;
+    var pEl=f.querySelector('[name=plan_id]');
+    var sEl=f.querySelector('[name=slot_id]');
+    var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
+    if(!hid_id)return;
+    var c=[];
+    f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)c.push(cb.value);}});
+    var h=document.getElementById(hid_id);if(h)h.value=c.join(',');
+  }}
+}});
+document.addEventListener('DOMContentLoaded',function(){{
+  document.querySelectorAll(".droptarget").forEach(function(el){{
+    el.addEventListener("dragover",function(e){{e.preventDefault();el.classList.add("dragover");}});
+    el.addEventListener("dragleave",function(){{el.classList.remove("dragover");}});
+  }});
+}});
+</script>"""
+
     _all_active_users = [r for r in all_users if r["is_active"]]
     _html_teams_accordion = f"""
     <div class="acc" data-tab="planning" id="acc-teams">
@@ -14566,7 +14661,7 @@ window.addEventListener('DOMContentLoaded',function(){{
 }});
 </script>
 
-<div class="tab-bar">{_tab_html}</div>
+<div class="tab-bar">{_tab_html}</div>{_staffing_js}
 
     <!-- Section 1: Benutzerverwaltung -->
     <div class="acc" id="acc-user" data-tab="users">
@@ -17007,17 +17102,6 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
                     </div>
                   </div>
                   <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
-                  <script>(function(){{
-                    function doToggle(sel,pid){{
-                      var n=document.getElementById('wd-normal-'+pid);
-                      var s=document.getElementById('wd-special-'+pid);
-                      if(!n||!s)return;
-                      if(sel.value==='special'){{n.style.display='none';s.style.display='';}}
-                      else{{n.style.display='';s.style.display='none';}}
-                    }}
-                    var sel=document.querySelector('select[name="slot_type"][onchange*="\\'{pid}\\'"]');
-                    if(sel){{sel.addEventListener('change',function(){{doToggle(this,'{pid}');}});doToggle(sel,'{pid}');}}
-                  }})();</script>
                 </form>
               </details>
             </div>"""
@@ -17077,53 +17161,6 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
     no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>' if not teams else ""
 
     return f"""
-    <script>
-    function toggleSlotType(sel,pid){{
-      var normal=document.getElementById('wd-normal-'+pid);
-      var special=document.getElementById('wd-special-'+pid);
-      if(!normal||!special)return;
-      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
-      else{{normal.style.display='block';special.style.display='none';}}
-    }}
-    function toggleSlotEdit(sid){{
-      var el=document.getElementById('slot-edit-'+sid);
-      if(!el)return;
-      el.style.display=el.style.display==='none'?'block':'none';
-    }}
-    function slotFormInit(details){{
-      var s=details.querySelector('select[name=slot_type]');
-      if(!s)return;
-      var oc=s.getAttribute('onchange')||'';
-      var start=oc.indexOf("'")+1;
-      var end=oc.lastIndexOf("'");
-      if(start>0&&end>start){{
-        var pid=oc.substring(start,end);
-        toggleSlotType(s,pid);
-      }}
-    }}
-    document.addEventListener('change',function(e){{
-      if(e.target.name&&e.target.name.startsWith('wd_')){{
-        var f=e.target.closest('form');if(!f)return;
-        var pEl=f.querySelector('[name=plan_id]');
-        var sEl=f.querySelector('[name=slot_id]');
-        var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
-        if(!hid_id)return;
-        var checked=[];
-        f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-      }}
-      if(e.target.name&&e.target.name.startsWith('nth_w_')){{
-        var f=e.target.closest('form');if(!f)return;
-        var pEl=f.querySelector('[name=plan_id]');
-        var sEl=f.querySelector('[name=slot_id]');
-        var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
-        if(!hid_id)return;
-        var checked=[];
-        f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-      }}
-    }});
-    </script>
     <style>
     .slot-card{{border:1px solid var(--br);border-radius:8px;padding:1rem;margin-bottom:1rem;}}
     .slot-header{{display:flex;gap:8px;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;}}
@@ -17138,57 +17175,7 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
     .user-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0;}}
     </style>
     {no_teams_hint}
-    {plan_html}
-    <script>
-    function allowDrop(e){{e.preventDefault();}}
-    function drag(e){{
-      e.dataTransfer.setData("userId",e.target.dataset.userId);
-    }}
-    function drop(e,slotId,target){{
-      e.preventDefault();
-      var uid=e.dataTransfer.getData("userId");
-      var card=document.querySelector('[data-user-id="'+uid+'"]');
-      if(card)e.currentTarget.appendChild(card);
-      e.currentTarget.classList.remove("dragover");
-    }}
-    document.querySelectorAll(".droptarget").forEach(function(el){{
-      el.addEventListener("dragover",function(e){{e.preventDefault();el.classList.add("dragover");}});
-      el.addEventListener("dragleave",function(){{el.classList.remove("dragover");}});
-    }});
-    function toggleLead(btn){{
-      var card=btn.closest('.user-card');
-      var isLead=card.dataset.isLead==='1';
-      card.dataset.isLead=isLead?'0':'1';
-      btn.textContent=isLead?'○':'👑';
-      btn.style.color=isLead?'var(--mu)':'#eab308';
-    }}
-    function saveAssignments(slotId){{
-      var assigned=document.querySelectorAll("#assigned-"+slotId+" .user-card");
-      var userIds=[].map.call(assigned,function(c){{return c.dataset.userId;}});
-      var leadIds=[].map.call(assigned,function(c){{return c.dataset.isLead==='1'?c.dataset.userId:null;}}).filter(Boolean);
-      var form=document.createElement("form");
-      form.method="POST";form.action="/admin/staffing";
-      [["action","save_assignments"],["slot_id",slotId]].forEach(function(p){{
-        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
-      }});
-      userIds.forEach(function(uid){{
-        var i=document.createElement("input");i.type="hidden";i.name="user_ids";i.value=uid;form.appendChild(i);
-      }});
-      leadIds.forEach(function(uid){{
-        var i=document.createElement("input");i.type="hidden";i.name="lead_user_ids";i.value=uid;form.appendChild(i);
-      }});
-      document.body.appendChild(form);form.submit();
-    }}
-    function deleteSlot(slotId){{
-      if(!confirm("{t('confirm.delete')}"))return;
-      var form=document.createElement("form");
-      form.method="POST";form.action="/admin/staffing";
-      [["action","delete_slot"],["slot_id",slotId]].forEach(function(p){{
-        var i=document.createElement("input");i.type="hidden";i.name=p[0];i.value=p[1];form.appendChild(i);
-      }});
-      document.body.appendChild(form);form.submit();
-    }}
-    </script>"""
+    {plan_html}"""
 
 
 def _render_features_section() -> str:
