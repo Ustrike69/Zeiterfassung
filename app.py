@@ -17935,6 +17935,11 @@ def _get_staffing_week_data(plan_id: int) -> dict:
             f"WHERE user_id IN ({ph}) AND date_from <= ? AND date_to >= ?",
             (*user_ids, d_to, d_from)
         ).fetchall()
+    try:
+        _plan_row = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
+        lead_label = (_plan_row["lead_label"] if _plan_row and _plan_row["lead_label"] else None) or "Leiter"
+    except Exception:
+        lead_label = "Leiter"
     db.close()
 
     def is_absent(uid, iso):
@@ -17942,12 +17947,6 @@ def _get_staffing_week_data(plan_id: int) -> dict:
             ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
             for ab in absences
         )
-
-    try:
-        _plan_row = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
-        lead_label = (_plan_row["lead_label"] if _plan_row and _plan_row["lead_label"] else None) or "Leiter"
-    except Exception:
-        lead_label = "Leiter"
 
     result = {"monday": monday, "days": days, "slots": [], "lead_label": lead_label}
     for slot in slots:
@@ -18040,6 +18039,11 @@ def _get_staffing_month_data(plan_id: int) -> dict:
         accepted_dates = {r["iso_date"] for r in _acc_rows}
     except Exception:
         accepted_dates = set()
+    try:
+        _plan_row_m = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
+        lead_label_m = (_plan_row_m["lead_label"] if _plan_row_m and _plan_row_m["lead_label"] else None) or "Leiter"
+    except Exception:
+        lead_label_m = "Leiter"
     db.close()
 
     def is_absent(uid, iso):
@@ -18047,12 +18051,6 @@ def _get_staffing_month_data(plan_id: int) -> dict:
             ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
             for ab in absences
         )
-
-    try:
-        _plan_row_m = db.execute("SELECT lead_label FROM staffing_plans WHERE id=?", (plan_id,)).fetchone()
-        lead_label_m = (_plan_row_m["lead_label"] if _plan_row_m and _plan_row_m["lead_label"] else None) or "Leiter"
-    except Exception:
-        lead_label_m = "Leiter"
 
     result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates,
               "lead_label": lead_label_m}
