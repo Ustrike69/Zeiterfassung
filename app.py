@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.9.dev1"
+APP_VERSION = "v3.0.9"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -1395,15 +1395,19 @@ def _expected_minutes_for_day(user_id: int, iso_day: str) -> int:
 
     # Berufsschule: Soll=0 (Ganztag) oder reduziert (Halbtag)
     voc = _get_vocational_school_entry(user_id, iso_day)
-    if voc and not _is_holiday(iso_day, user_id) and not _is_school_holiday(iso_day, user_id):
-        if voc.get("work_time_from") and voc.get("work_time_to"):
-            try:
-                h_from = int(voc["work_time_from"][:2]) * 60 + int(voc["work_time_from"][3:])
-                h_to   = int(voc["work_time_to"][:2]) * 60 + int(voc["work_time_to"][3:])
-                return max(0, h_to - h_from)
-            except Exception:
-                pass
-        return 0
+    if voc and not _is_holiday(iso_day, user_id):
+        # Schulferien nur bei wöchentlichem BS-Tag relevant (Blockunterricht läuft durch)
+        if voc["schedule_type"] == "weekly" and _is_school_holiday(iso_day, user_id):
+            pass  # Ferientag → normaler Arbeitstag
+        else:
+            if voc.get("work_time_from") and voc.get("work_time_to"):
+                try:
+                    h_from = int(voc["work_time_from"][:2]) * 60 + int(voc["work_time_from"][3:])
+                    h_to   = int(voc["work_time_to"][:2]) * 60 + int(voc["work_time_to"][3:])
+                    return max(0, h_to - h_from)
+                except Exception:
+                    pass
+            return 0
 
     mode = (sched.get("mode") or "weekly").strip().lower()
     if mode == "daily_hours":
@@ -6459,9 +6463,11 @@ def calendar_year_list():
         while _cur <= _end:
             _iso = _cur.isoformat()
             _voc = _get_vocational_school_entry(uid, _iso)
-            if _voc and not _is_holiday(_iso, uid) and not _is_school_holiday(_iso, uid):
-                _lbl = "🎓 BS Halbtag" if (_voc.get("work_time_from") and _voc.get("work_time_to")) else "🎓 Berufsschule"
-                day_badges.setdefault(_iso, []).append((_lbl, "#8b5cf6"))
+            if _voc and not _is_holiday(_iso, uid):
+                _skip = _voc["schedule_type"] == "weekly" and _is_school_holiday(_iso, uid)
+                if not _skip:
+                    _lbl = "🎓 BS Halbtag" if (_voc.get("work_time_from") and _voc.get("work_time_to")) else "🎓 Berufsschule"
+                    day_badges.setdefault(_iso, []).append((_lbl, "#8b5cf6"))
             _cur += datetime.timedelta(days=1)
     except Exception:
         pass
@@ -6638,9 +6644,11 @@ def calendar_view():
         while _voc_cur <= _voc_end:
             _viso = _voc_cur.isoformat()
             _voc_e = _get_vocational_school_entry(u["id"], _viso)
-            if _voc_e and not _is_holiday(_viso, u["id"]) and not _is_school_holiday(_viso, u["id"]):
-                _lbl = "🎓 BS Halbtag" if (_voc_e.get("work_time_from") and _voc_e.get("work_time_to")) else "🎓 Berufsschule"
-                day_badges.setdefault(_viso, []).append((_lbl, "#8b5cf6", True, True))
+            if _voc_e and not _is_holiday(_viso, u["id"]):
+                _vskip = _voc_e["schedule_type"] == "weekly" and _is_school_holiday(_viso, u["id"])
+                if not _vskip:
+                    _lbl = "🎓 BS Halbtag" if (_voc_e.get("work_time_from") and _voc_e.get("work_time_to")) else "🎓 Berufsschule"
+                    day_badges.setdefault(_viso, []).append((_lbl, "#8b5cf6", True, True))
             _voc_cur += datetime.timedelta(days=1)
     except Exception:
         pass
@@ -13424,7 +13432,7 @@ def admin_users_edit(user_id: int):
           </div>
         </div>
         <label style='display:flex;align-items:center;gap:6px;font-size:13px;'>
-          <input type='checkbox' name='is_apprentice' value='1' {'checked' if r.get('is_apprentice') else ''}>
+          <input type='checkbox' name='is_apprentice' value='1' {'checked' if r['is_apprentice'] else ''}>
           🎓 Auszubildende/r (Berufsschule sichtbar)
         </label>
       """)}
@@ -14845,6 +14853,7 @@ def admin_home():
     _html_update    = _tab(_render_update_section(), "system") if _is_sysadm else ""
     _html_ot_defs   = _tab(_render_overtime_defaults_section(), "system") if _is_sysadm else ""
     _html_features  = _tab(_render_features_section(), "system") if _is_sysadm else ""
+    _html_schoolhols = _tab(_render_school_holidays_section(), "system") if _is_sysadm else ""
     _new_user_btn   = f'<button class="btn primary btn-sm" type="button" onclick="toggleNewUser()">{t("admin.new_user_btn")}</button>' if _is_sysadm else ""
 
     # 4-Tab-Struktur
@@ -15033,7 +15042,7 @@ function nuSendChange(){{
 var _TAB_MAP={{
   'acc-mail':'system','acc-bot':'system',
   'acc-appearance':'system','acc-regional':'system',
-  'acc-backup':'system','acc-update':'system','acc-features':'system',
+  'acc-backup':'system','acc-update':'system','acc-features':'system','acc-schoolhols':'system',
   'acc-user':'users','acc-tm-users':'users',
   'acc-per-user-settings':'users',
   'acc-overtime':'reporting',
@@ -15232,6 +15241,9 @@ window.addEventListener('DOMContentLoaded',function(){{
 
     <!-- Section 9b: Features -->
     {_html_features}
+
+    <!-- Section 9c: Schulferien -->
+    {_html_schoolhols}
 
     <!-- Section 10: Backup & Restore -->
     {_html_backup}
@@ -17583,6 +17595,160 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
     </style>
     {no_teams_hint}
     {plan_html}"""
+
+
+_DE_STATES = [
+    ("DE-BW", "BW", "Baden-Württemberg"),
+    ("DE-BY", "BY", "Bayern"),
+    ("DE-BE", "BE", "Berlin"),
+    ("DE-BB", "BB", "Brandenburg"),
+    ("DE-HB", "HB", "Bremen"),
+    ("DE-HH", "HH", "Hamburg"),
+    ("DE-HE", "HE", "Hessen"),
+    ("DE-MV", "MV", "Mecklenburg-Vorpommern"),
+    ("DE-NI", "NI", "Niedersachsen"),
+    ("DE-NW", "NW", "Nordrhein-Westfalen"),
+    ("DE-RP", "RP", "Rheinland-Pfalz"),
+    ("DE-SL", "SL", "Saarland"),
+    ("DE-SN", "SN", "Sachsen"),
+    ("DE-ST", "ST", "Sachsen-Anhalt"),
+    ("DE-SH", "SH", "Schleswig-Holstein"),
+    ("DE-TH", "TH", "Thüringen"),
+]
+
+
+def _render_school_holidays_section() -> str:
+    db = connect()
+    entries = db.execute(
+        "SELECT * FROM school_holidays ORDER BY region, date_from"
+    ).fetchall()
+    db.close()
+
+    rows_by_region: dict = {}
+    for e in entries:
+        rows_by_region.setdefault(e["region"], []).append(e)
+
+    trs = ""
+    for region, hols in sorted(rows_by_region.items()):
+        state_name = next((name for rcode, _, name in _DE_STATES if rcode == region), region)
+        for h in hols:
+            trs += (
+                f"<tr>"
+                f"<td style='font-size:12px;color:var(--mu);'>{_html.escape(region)}</td>"
+                f"<td style='font-size:13px;'>{_html.escape(h['name'])}</td>"
+                f"<td style='font-size:13px;'>{h['date_from']}</td>"
+                f"<td style='font-size:13px;'>{h['date_to']}</td>"
+                f"<td><form method='post' action='/admin/school-holidays/delete' style='display:inline;'"
+                f" onsubmit=\"sessionStorage.setItem('openAcc','acc-schoolhols')\">"
+                f"<input type='hidden' name='entry_id' value='{h['id']}'>"
+                f"<button class='btn btn-sm danger' type='submit' style='padding:2px 7px;'>×</button>"
+                f"</form></td>"
+                f"</tr>"
+            )
+    if not trs:
+        trs = f"<tr><td colspan='5' style='color:var(--mu);'>Noch keine Schulferien importiert.</td></tr>"
+
+    state_opts = "".join(
+        f'<option value="{api}">{name} ({api})</option>'
+        for _, api, name in _DE_STATES
+    )
+    clear_opts = "".join(
+        f'<option value="{rcode}">{name}</option>'
+        for rcode, _, name in _DE_STATES
+    )
+    cur_year = datetime.date.today().year
+    year_opts = "".join(
+        f'<option value="{y}" {"selected" if y == cur_year else ""}>{y}</option>'
+        for y in range(cur_year - 1, cur_year + 3)
+    )
+
+    return f"""
+    <div class="acc" data-tab="system" id="acc-schoolhols">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-schoolhols-body')">
+        <span>🎓 Schulferien</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-schoolhols-body">
+        <div class="acc-inner">
+          <p class="small" style="color:var(--mu);margin-bottom:14px;">
+            Schulferien werden bei wöchentlichen Berufsschultagen automatisch berücksichtigt.
+            Quelle: <a href="https://ferien-api.de" target="_blank">ferien-api.de</a>
+          </p>
+
+          <!-- Fetch von API -->
+          <div style="border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:14px;background:var(--sf);">
+            <div style="font-weight:600;font-size:14px;margin-bottom:10px;">🌐 Online-Import (ferien-api.de)</div>
+            <form method="post" action="/admin/school-holidays/fetch"
+                  onsubmit="sessionStorage.setItem('openAcc','acc-schoolhols')">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Bundesland</label>
+                  <select name="state_code" style="display:block;margin-top:4px;font-size:13px;">{state_opts}</select>
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Jahr</label>
+                  <select name="year" style="display:block;margin-top:4px;font-size:13px;">{year_opts}</select>
+                </div>
+                <div style="display:flex;gap:6px;align-items:flex-end;">
+                  <button class="btn primary btn-sm" type="submit">⬇ Importieren</button>
+                  <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                    <input type="checkbox" name="replace" value="1"> Vorhandene ersetzen
+                  </label>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <!-- Manuell hinzufügen -->
+          <div style="border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:14px;background:var(--sf);">
+            <div style="font-weight:600;font-size:14px;margin-bottom:10px;">✏ Manuell hinzufügen</div>
+            <form method="post" action="/admin/school-holidays/add"
+                  onsubmit="sessionStorage.setItem('openAcc','acc-schoolhols')">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Region</label>
+                  <select name="region" style="display:block;margin-top:4px;font-size:13px;">{clear_opts}</select>
+                </div>
+                <div style="flex:1;min-width:140px;">
+                  <label style="font-size:12px;color:var(--mu);">Name</label>
+                  <input type="text" name="name" required maxlength="80" placeholder="Sommerferien"
+                         style="display:block;margin-top:4px;">
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Von</label>
+                  <input type="date" name="date_from" required style="display:block;margin-top:4px;">
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--mu);">Bis</label>
+                  <input type="date" name="date_to" required style="display:block;margin-top:4px;">
+                </div>
+                <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Vorhandene Einträge -->
+          <div style="font-weight:600;font-size:14px;margin-bottom:8px;">Eingetragene Schulferien ({len(entries)})</div>
+          <div class="table-scroll" style="margin-bottom:12px;">
+            <table style="width:100%;font-size:13px;">
+              <thead><tr><th>Region</th><th>Name</th><th>Von</th><th>Bis</th><th></th></tr></thead>
+              <tbody>{trs}</tbody>
+            </table>
+          </div>
+
+          <!-- Alle löschen für Region -->
+          <form method="post" action="/admin/school-holidays/clear"
+                onsubmit="return confirm('Alle Schulferien für diese Region löschen?')&&(sessionStorage.setItem('openAcc','acc-schoolhols'),true)">
+            <div style="display:flex;gap:8px;align-items:flex-end;">
+              <div>
+                <label style="font-size:12px;color:var(--mu);">Region leeren</label>
+                <select name="region" style="display:block;margin-top:4px;font-size:13px;">{clear_opts}</select>
+              </div>
+              <button class="btn danger btn-sm" type="submit">🗑 Region löschen</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>"""
 
 
 def _render_features_section() -> str:
@@ -20001,6 +20167,120 @@ def admin_features_save():
         del _g._app_config_cache
     add_flash(t("success.settings_saved"), "success")
     return redirect("/admin#acc-features")
+
+
+# ── Schulferien Admin ──────────────────────────────────────────────────────────
+
+@app.post("/admin/school-holidays/fetch")
+@sysadmin_required
+def admin_school_holidays_fetch():
+    import urllib.request as _ur
+    import json as _json
+    bootstrap()
+    state_code = (request.form.get("state_code") or "").strip().upper()
+    try:
+        year = int(request.form.get("year") or datetime.date.today().year)
+    except ValueError:
+        year = datetime.date.today().year
+    replace = request.form.get("replace") == "1"
+
+    if not state_code or len(state_code) > 4:
+        add_flash("Ungültiger Bundesland-Code.", "error")
+        return redirect("/admin#acc-schoolhols")
+
+    # Map API code to DB region
+    region = f"DE-{state_code}"
+
+    try:
+        url = f"https://ferien-api.de/api/v1/holidays/{state_code}/{year}"
+        req = _ur.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Zeiterfassung)",
+            "Accept": "application/json",
+        })
+        with _ur.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode())
+    except Exception as e:
+        add_flash(f"API-Fehler: {e}", "error")
+        return redirect("/admin#acc-schoolhols")
+
+    db = connect()
+    if replace:
+        db.execute(
+            "DELETE FROM school_holidays WHERE region=? AND date_from LIKE ?",
+            (region, f"{year}%")
+        )
+    imported = 0
+    for item in data:
+        try:
+            name = item.get("name") or item.get("slug") or "Ferien"
+            start = str(item.get("start") or "")[:10]
+            end_raw = str(item.get("end") or "")[:10]
+            if not start or not end_raw:
+                continue
+            # ferien-api: end is exclusive → subtract 1 day
+            end_dt = datetime.date.fromisoformat(end_raw) - datetime.timedelta(days=1)
+            start_dt = datetime.date.fromisoformat(start)
+            if end_dt < start_dt:
+                end_dt = start_dt  # Single-day or API quirk
+            end = end_dt.isoformat()
+            db.execute(
+                "INSERT INTO school_holidays(region, name, date_from, date_to) VALUES(?,?,?,?)",
+                (region, name, start, end)
+            )
+            imported += 1
+        except Exception:
+            continue
+    db.commit()
+    db.close()
+    add_flash(f"{imported} Schulferien-Einträge für {region} {year} importiert.", "success")
+    return redirect("/admin#acc-schoolhols")
+
+
+@app.post("/admin/school-holidays/add")
+@sysadmin_required
+def admin_school_holidays_add():
+    bootstrap()
+    region    = (request.form.get("region") or "").strip()
+    name      = (request.form.get("name") or "").strip()
+    date_from = (request.form.get("date_from") or "").strip()
+    date_to   = (request.form.get("date_to") or "").strip()
+    if region and name and date_from and date_to:
+        db = connect()
+        db.execute(
+            "INSERT INTO school_holidays(region, name, date_from, date_to) VALUES(?,?,?,?)",
+            (region, name, date_from, date_to)
+        )
+        db.commit()
+        db.close()
+        add_flash(t("admin.user_saved"), "success")
+    return redirect("/admin#acc-schoolhols")
+
+
+@app.post("/admin/school-holidays/delete")
+@sysadmin_required
+def admin_school_holidays_delete():
+    bootstrap()
+    entry_id = int(request.form.get("entry_id") or 0)
+    if entry_id:
+        db = connect()
+        db.execute("DELETE FROM school_holidays WHERE id=?", (entry_id,))
+        db.commit()
+        db.close()
+    return redirect("/admin#acc-schoolhols")
+
+
+@app.post("/admin/school-holidays/clear")
+@sysadmin_required
+def admin_school_holidays_clear():
+    bootstrap()
+    region = (request.form.get("region") or "").strip()
+    if region:
+        db = connect()
+        db.execute("DELETE FROM school_holidays WHERE region=?", (region,))
+        db.commit()
+        db.close()
+        add_flash(f"Alle Schulferien für {region} gelöscht.", "success")
+    return redirect("/admin#acc-schoolhols")
 
 
 # ── DEV-Mode routes (only active when ZEITERFASSUNG_DEV_MODE=1) ──────────────
