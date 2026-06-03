@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.8.dev1"
+APP_VERSION = "v3.0.8.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -16546,6 +16546,42 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
     no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")} – <a href="/admin/teams">{t("admin.teams")}</a></p>' if not teams else ""
 
     return f"""
+    <script>
+    function toggleSlotType(sel,pid){{
+      var normal=document.getElementById('wd-normal-'+pid);
+      var special=document.getElementById('wd-special-'+pid);
+      if(!normal||!special)return;
+      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
+      else{{normal.style.display='block';special.style.display='none';}}
+    }}
+    function toggleSlotEdit(sid){{
+      var el=document.getElementById('slot-edit-'+sid);
+      if(!el)return;
+      el.style.display=el.style.display==='none'?'block':'none';
+    }}
+    document.addEventListener('change',function(e){{
+      if(e.target.name&&e.target.name.startsWith('wd_')){{
+        var f=e.target.closest('form');if(!f)return;
+        var pEl=f.querySelector('[name=plan_id]');
+        var sEl=f.querySelector('[name=slot_id]');
+        var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
+        if(!hid_id)return;
+        var checked=[];
+        f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
+      }}
+      if(e.target.name&&e.target.name.startsWith('nth_w_')){{
+        var f=e.target.closest('form');if(!f)return;
+        var pEl=f.querySelector('[name=plan_id]');
+        var sEl=f.querySelector('[name=slot_id]');
+        var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
+        if(!hid_id)return;
+        var checked=[];
+        f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
+      }}
+    }});
+    </script>
     <style>
     .slot-card{{border:1px solid var(--br);border-radius:8px;padding:1rem;margin-bottom:1rem;}}
     .slot-header{{display:flex;gap:8px;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;}}
@@ -16618,40 +16654,6 @@ def _render_admin_staffing(teams, plans, slots, all_assignments, u) -> str:
       }});
       document.body.appendChild(form);form.submit();
     }}
-    function toggleSlotEdit(sid){{
-      var el=document.getElementById('slot-edit-'+sid);
-      if(!el)return;
-      el.style.display=el.style.display==='none'?'block':'none';
-    }}
-    function toggleSlotType(sel,pid){{
-      var normal=document.getElementById('wd-normal-'+pid);
-      var special=document.getElementById('wd-special-'+pid);
-      if(!normal||!special)return;
-      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
-      else{{normal.style.display='block';special.style.display='none';}}
-    }}
-    document.addEventListener('change',function(e){{
-      if(!e.target.name||!e.target.name.startsWith('wd_'))return;
-      var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');
-      var sEl=f.querySelector('[name=slot_id]');
-      var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
-      if(!hid_id)return;
-      var checked=[];
-      f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-    }});
-    document.addEventListener('change',function(e){{
-      if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
-      var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');
-      var sEl=f.querySelector('[name=slot_id]');
-      var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
-      if(!hid_id)return;
-      var checked=[];
-      f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-    }});
     </script>"""
 
 
@@ -17064,6 +17066,42 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
     no_teams_hint = f'<p style="color:var(--mu);">{t("admin.no_teams")}</p>' if not teams else ""
 
     return f"""
+    <script>
+    function toggleSlotType(sel,pid){{
+      var normal=document.getElementById('wd-normal-'+pid);
+      var special=document.getElementById('wd-special-'+pid);
+      if(!normal||!special)return;
+      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
+      else{{normal.style.display='block';special.style.display='none';}}
+    }}
+    function toggleSlotEdit(sid){{
+      var el=document.getElementById('slot-edit-'+sid);
+      if(!el)return;
+      el.style.display=el.style.display==='none'?'block':'none';
+    }}
+    document.addEventListener('change',function(e){{
+      if(e.target.name&&e.target.name.startsWith('wd_')){{
+        var f=e.target.closest('form');if(!f)return;
+        var pEl=f.querySelector('[name=plan_id]');
+        var sEl=f.querySelector('[name=slot_id]');
+        var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
+        if(!hid_id)return;
+        var checked=[];
+        f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
+      }}
+      if(e.target.name&&e.target.name.startsWith('nth_w_')){{
+        var f=e.target.closest('form');if(!f)return;
+        var pEl=f.querySelector('[name=plan_id]');
+        var sEl=f.querySelector('[name=slot_id]');
+        var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
+        if(!hid_id)return;
+        var checked=[];
+        f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
+        var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
+      }}
+    }});
+    </script>
     <style>
     .slot-card{{border:1px solid var(--br);border-radius:8px;padding:1rem;margin-bottom:1rem;}}
     .slot-header{{display:flex;gap:8px;align-items:center;margin-bottom:.75rem;flex-wrap:wrap;}}
@@ -17128,40 +17166,6 @@ def _render_admin_staffing_inline(teams, plans, slots, all_assignments, u) -> st
       }});
       document.body.appendChild(form);form.submit();
     }}
-    function toggleSlotEdit(sid){{
-      var el=document.getElementById('slot-edit-'+sid);
-      if(!el)return;
-      el.style.display=el.style.display==='none'?'block':'none';
-    }}
-    function toggleSlotType(sel,pid){{
-      var normal=document.getElementById('wd-normal-'+pid);
-      var special=document.getElementById('wd-special-'+pid);
-      if(!normal||!special)return;
-      if(sel.value==='special'){{normal.style.display='none';special.style.display='block';}}
-      else{{normal.style.display='block';special.style.display='none';}}
-    }}
-    document.addEventListener('change',function(e){{
-      if(!e.target.name||!e.target.name.startsWith('wd_'))return;
-      var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');
-      var sEl=f.querySelector('[name=slot_id]');
-      var hid_id=pEl?('wd-val-'+pEl.value):(sEl?('wd-val-edit-'+sEl.value):null);
-      if(!hid_id)return;
-      var checked=[];
-      f.querySelectorAll('[name^="wd_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-    }});
-    document.addEventListener('change',function(e){{
-      if(!e.target.name||!e.target.name.startsWith('nth_w_'))return;
-      var f=e.target.closest('form');if(!f)return;
-      var pEl=f.querySelector('[name=plan_id]');
-      var sEl=f.querySelector('[name=slot_id]');
-      var hid_id=pEl?('nth-val-'+pEl.value):(sEl?('nth-val-edit-'+sEl.value):null);
-      if(!hid_id)return;
-      var checked=[];
-      f.querySelectorAll('[name^="nth_w_"]').forEach(function(cb){{if(cb.checked)checked.push(cb.value);}});
-      var hid=document.getElementById(hid_id);if(hid)hid.value=checked.join(',');
-    }});
     </script>"""
 
 
