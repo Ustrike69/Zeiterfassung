@@ -638,6 +638,24 @@ def init_db():
             "ALTER TABLE user_schedules ADD COLUMN allow_self_edit INTEGER DEFAULT 1"
         )
 
+    # v3.0.7.dev2 – Urlaubsanspruch-Tabelle
+    db.execute("""CREATE TABLE IF NOT EXISTS user_vacation_entitlement (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        days REAL NOT NULL,
+        valid_from TEXT NOT NULL,
+        note TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+
+    # v3.0.7.dev2 – Enddatum + Gleitzeitregel
+    for col, defn in [
+        ("end_date",         "TEXT DEFAULT NULL"),
+        ("balance_rollover", "TEXT DEFAULT 'manual'"),
+    ]:
+        if not _col_exists(db, "users", col):
+            db.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+
     # v3.0.0 – Feature-Flags
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")

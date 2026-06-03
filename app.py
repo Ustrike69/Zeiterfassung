@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.7.dev1"
+APP_VERSION = "v3.0.7.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -360,6 +360,7 @@ def bootstrap():
                 _ensure_business_trips_schema()
                 _ensure_contoured_days_schema()
                 seed_all_regions_if_needed()
+                _auto_lock_expired_users()
     except Exception as _be:
         import logging as _lg
         _lg.getLogger(__name__).error(f"bootstrap error: {_be}")
@@ -979,11 +980,46 @@ def _vacation_used_days_started_by(user_id: int, year: int, deadline_iso: str) -
     return float(used)
 
 
+def _get_vacation_entitlement(user_id: int, year: int) -> float:
+    """Return vacation entitlement for user+year from user_vacation_entitlement table, else app default."""
+    try:
+        db = connect()
+        row = db.execute("""
+            SELECT days FROM user_vacation_entitlement
+            WHERE user_id=? AND valid_from <= ?
+            ORDER BY valid_from DESC LIMIT 1
+        """, (user_id, f"{year}-12-31")).fetchone()
+        db.close()
+        if row:
+            return float(row["days"])
+    except Exception:
+        pass
+    cfg = _get_app_config()
+    return float(cfg.get("default_vacation_days") or 30)
+
+
+def _auto_lock_expired_users() -> None:
+    """Deactivate users whose end_date has passed."""
+    try:
+        today = datetime.date.today().isoformat()
+        db = connect()
+        db.execute("""
+            UPDATE users SET is_active=0, updated_at=datetime('now')
+            WHERE end_date IS NOT NULL AND end_date < ? AND is_active=1
+        """, (today,))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
 def _vacation_calc(user_id: int, year: int) -> dict:
     """Central vacation calculation. Returns all metrics needed for display and the homepage."""
     today = datetime.date.today()
     vac = _get_vacation_year(user_id, year)
     entitlement = float(vac.get("entitlement_days", 0.0) or 0.0)
+    if entitlement == 0.0:
+        entitlement = _get_vacation_entitlement(user_id, year)
     carryover = float(vac.get("carryover_days", 0.0) or 0.0)
     deadline = datetime.date(year, 3, 31)
     deadline_iso = deadline.isoformat()
@@ -4568,7 +4604,14 @@ def _calc_balance_end_at(user_id: int, end_iso: str) -> int:
         year_start = max(year_start, tracking_start)
 
     start_minutes = _get_start_balance_minutes(user_id)
-    running = int(start_minutes)
+    try:
+        _rdb = connect()
+        _rrow = _rdb.execute("SELECT balance_rollover FROM users WHERE id=?", (user_id,)).fetchone()
+        _rdb.close()
+        _rollover = (_rrow["balance_rollover"] or "manual") if _rrow else "manual"
+    except Exception:
+        _rollover = "manual"
+    running = 0 if _rollover == "forfeit" else int(start_minutes)
     today_iso = datetime.date.today().isoformat()
     flextag_ranges = _fetch_flextag_ranges(user_id)
 
@@ -12753,9 +12796,10 @@ def admin_users_edit(user_id: int):
     bootstrap()
     u = current_user()
     db = connect()
-    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id, team_restriction FROM users WHERE id=?", (user_id,)).fetchone()
+    r = db.execute("SELECT id, username, is_admin, is_active, tracking_start_date, admin_role, holiday_region, admin_only, enabled_absence_types, is_approver, approval_required_types, approver_id, team_restriction, end_date, balance_rollover FROM users WHERE id=?", (user_id,)).fetchone()
     _all_approvers = db.execute("SELECT id, username, display_name FROM users WHERE is_approver=1 AND is_active=1 ORDER BY username").fetchall()
     _all_teams_edit = db.execute("SELECT id, name FROM teams ORDER BY name").fetchall()
+    _entitlements = db.execute("SELECT * FROM user_vacation_entitlement WHERE user_id=? ORDER BY valid_from DESC", (user_id,)).fetchall()
     db.close()
     if not r:
         abort(404)
@@ -12904,11 +12948,11 @@ def admin_users_edit(user_id: int):
     cur_sched = _get_user_schedule_for_day(user_id, today_iso)
     cur_id = (cur_sched or {}).get("id")
 
-    # Extra user data: overtime limits + carryover
+    # Extra user data: overtime limits + carryover + new fields
     _ex_db = connect()
     _ex_row = _ex_db.execute(
         "SELECT overtime_limit_plus, overtime_limit_minus, "
-        "vacation_carryover_exception FROM users WHERE id=?", (user_id,)
+        "vacation_carryover_exception, end_date, balance_rollover FROM users WHERE id=?", (user_id,)
     ).fetchone()
     # Active schedule for inline edit
     _act_sched = _ex_db.execute(
@@ -12916,9 +12960,11 @@ def admin_users_edit(user_id: int):
         "ORDER BY valid_from DESC LIMIT 1", (user_id, today_iso)
     ).fetchone()
     _ex_db.close()
-    _ot_plus  = str(_ex_row["overtime_limit_plus"]  or "") if _ex_row else ""
-    _ot_minus = str(_ex_row["overtime_limit_minus"] or "") if _ex_row else ""
-    _co_exc   = str(_ex_row["vacation_carryover_exception"] or "") if _ex_row else ""
+    _ot_plus      = str(_ex_row["overtime_limit_plus"]  or "") if _ex_row else ""
+    _ot_minus     = str(_ex_row["overtime_limit_minus"] or "") if _ex_row else ""
+    _co_exc       = str(_ex_row["vacation_carryover_exception"] or "") if _ex_row else ""
+    _end_date_val = str(_ex_row["end_date"] or "") if _ex_row else ""
+    _rollover_val = str(_ex_row["balance_rollover"] or "manual") if _ex_row else "manual"
     _act_sched_id  = _act_sched["id"]  if _act_sched else None
     _act_sched_vf  = _act_sched["valid_from"] if _act_sched else today_iso
     _act_allow_self = int(_act_sched["allow_self_edit"] or 1) if _act_sched else 1
@@ -12985,77 +13031,125 @@ def admin_users_edit(user_id: int):
     if not sched_rows:
         sched_rows = "<tr><td colspan='4' class='small' style='color:#666;'>Noch kein Zeitschema vorhanden.</td></tr>"
 
+    # Entitlement table rows
+    _ent_rows = "".join(
+        f"<tr>"
+        f"<td style='font-size:13px;'>{e['days']} {t('common.days')}</td>"
+        f"<td style='font-size:13px;'>{_fmt_date_de(e['valid_from'])}</td>"
+        f"<td style='font-size:13px;color:var(--mu);'>{_html.escape(e['note'] or '')}</td>"
+        f"<td>"
+        f"<form method='post' action='/admin/users/{user_id}/edit' style='display:inline;'>"
+        f"<input type='hidden' name='_section' value='del_entitlement'>"
+        f"<input type='hidden' name='entitlement_id' value='{e['id']}'>"
+        f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button>"
+        f"</form>"
+        f"</td>"
+        f"</tr>"
+        for e in _entitlements
+    ) or f"<tr><td colspan='4' style='color:var(--mu);font-size:13px;'>–</td></tr>"
+
+    # Rollover select
+    def _ro(val, label):
+        sel = "selected" if _rollover_val == val else ""
+        return f'<option value="{val}" {sel}>{label}</option>'
+    _rollover_select = f"""
+        <select name="balance_rollover" style="display:block;margin-top:4px;font-size:13px;padding:5px 8px;">
+          {_ro('manual', t('admin.rollover_manual'))}
+          {_ro('keep', t('admin.rollover_keep'))}
+          {_ro('forfeit', t('admin.rollover_forfeit'))}
+        </select>"""
+
+    def _section(icon, title_key, content):
+        return (
+            f'<div style="border:1px solid var(--bd);border-radius:8px;margin-bottom:16px;overflow:hidden;">'
+            f'<div style="background:var(--sf);padding:10px 14px;font-weight:700;font-size:14px;'
+            f'border-bottom:1px solid var(--bd);">{icon} {t(title_key)}</div>'
+            f'<div style="padding:14px;">{content}</div>'
+            f'</div>'
+        )
+
     body = f'''
     {flash_html()}
     {FORM_ASSETS_JS}
     <div style="margin-bottom:12px;">
       <a href="/admin" class="btn btn-sm">← {t('nav.admin')}</a>
+      <span style="font-weight:700;font-size:16px;margin-left:10px;">👤 {_html.escape(r["username"])}</span>
     </div>
 
-    <!-- Basis + Passwort + Überstundenlimits -->
-    <div class="card" id="base">
-      <h3 style="margin-top:0;">👤 {_html.escape(r["username"])}</h3>
-      <form method="post" action="/admin/users/{user_id}/edit">
+    <!-- BEREICH 1+4+2-limits+5: Haupt-Formular -->
+    <form method="post" action="/admin/users/{user_id}/edit" id="main-edit-form">
+
+      {_section("📋", "admin.section_basedata", f"""
+        <label style='display:flex;align-items:center;gap:6px;margin-bottom:10px;'>
+          <input type='checkbox' name='is_active' value='1' {active_checked}> {t('admin.active')}
+        </label>
+        <div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;'>
+          <div>
+            <label style='font-size:12px;color:var(--mu);'>{t('admin.tracking_start_col')}</label>
+            {_date_input("tracking_start_date", tsd_val)}
+            <div class='small' style='color:var(--mu);margin-top:2px;'>Kein Eintrag vor diesem Datum möglich.</div>
+          </div>
+          <div>
+            <label style='font-size:12px;color:var(--mu);'>{t('admin.end_date')}</label>
+            <input type='date' name='end_date' value='{_end_date_val}'
+                   style='display:block;margin-top:4px;'>
+            <div class='small' style='color:var(--mu);margin-top:2px;'>{t('admin.end_date_hint')}</div>
+          </div>
+        </div>
+        <div style='margin-bottom:10px;'>
+          <label style='font-size:12px;color:var(--mu);'>{t('admin.new_password_optional')}</label>
+          <input type='password' name='new_password'
+                 placeholder='{t('admin.pw_empty_hint')}'
+                 style='display:block;margin-top:4px;'>
+        </div>
+      """)}
+
+      {_section("📅", "admin.section_absences", f"""
+        <div style='margin-bottom:12px;'>
+          <label style='font-size:12px;color:var(--mu);'>Region <span style='font-weight:400;'>(leer = Standard)</span></label>
+          <div style='margin-top:4px;'>{_region_picker("holiday_region", cur_holiday_region, include_default=True)}</div>
+        </div>
+        {_absence_types_html}
+      """)}
+
+      {_section("🕐", "admin.section_worktime", f"""
+        <div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;'>
+          <div>
+            <label style='font-size:12px;color:var(--mu);'>{t('admin.overtime_limit_plus')}</label>
+            <input type='number' name='overtime_limit_plus' value='{_ot_plus}'
+                   placeholder='{t('admin.no_limit')}'
+                   style='display:block;margin-top:4px;width:110px;'>
+          </div>
+          <div>
+            <label style='font-size:12px;color:var(--mu);'>{t('admin.overtime_limit_minus')}</label>
+            <input type='number' name='overtime_limit_minus' value='{_ot_minus}'
+                   placeholder='{t('admin.no_limit')}'
+                   style='display:block;margin-top:4px;width:110px;'>
+          </div>
+          <div>
+            <label style='font-size:12px;color:var(--mu);'>{t('admin.balance_rollover')}</label>
+            {_rollover_select}
+            <div class='small' style='color:var(--mu);margin-top:2px;'>{t('admin.balance_rollover_hint')}</div>
+          </div>
+        </div>
+      """)}
+
+      {"" if not (_can_edit_role or is_timemanager(u)) else _section("⚙", "admin.section_admin", f"""
         {role_dropdown}
         {admin_only_field}
-        <label><input type="checkbox" name="is_active" value="1" {active_checked}> {t('admin.active')}</label><br><br>
-
-        <div><label>{t('admin.tracking_start_col')}</label><br>
-          {_date_input("tracking_start_date", tsd_val)}
-          <div class="small" style="color:#777;margin-top:3px;">Kein Eintrag vor diesem Datum möglich.</div>
-        </div><br>
-
-        <div><label>Region <span class="small" style="color:var(--mu);">(leer = Standard verwenden)</span></label><br>
-          <div style="margin-top:4px;">{_region_picker("holiday_region", cur_holiday_region, include_default=True)}</div>
-        </div><br>
-
-        {_absence_types_html}
         {_approver_section}
+      """)}
 
-        <!-- Überstundenlimits -->
-        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--br);">
-          <h4 style="margin:0 0 8px;">{t('admin.overtime_limits')}</h4>
-          <div style="display:flex;gap:12px;flex-wrap:wrap;">
-            <div>
-              <label style="font-size:12px;color:var(--mu);">{t('admin.overtime_limit_plus')}</label>
-              <input type="number" name="overtime_limit_plus" value="{_ot_plus}"
-                     placeholder="{t('admin.no_limit')}"
-                     style="display:block;margin-top:4px;width:100px;">
-            </div>
-            <div>
-              <label style="font-size:12px;color:var(--mu);">{t('admin.overtime_limit_minus')}</label>
-              <input type="number" name="overtime_limit_minus" value="{_ot_minus}"
-                     placeholder="{t('admin.no_limit')}"
-                     style="display:block;margin-top:4px;width:100px;">
-            </div>
-          </div>
-        </div>
+      <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;'>
+        <button class='btn primary' type='submit'>{t('btn.save')}</button>
+        <a class='btn' href='/admin'>{t('btn.back')}</a>
+        <form method='post' action='/admin/users/{user_id}/reset-password' style='display:inline;'>
+          <button class='btn btn-sm' type='submit'>🔑 {t('admin.pw_reset_btn')}</button>
+        </form>
+      </div>
+    </form>
 
-        <!-- Passwort -->
-        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--br);">
-          <h4 style="margin:0 0 8px;">{t('admin.password_section')}</h4>
-          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-            <div>
-              <label style="font-size:12px;color:var(--mu);">{t('admin.new_password_optional')}</label>
-              <input type="password" name="new_password"
-                     placeholder="{t('admin.pw_empty_hint')}"
-                     style="display:block;margin-top:4px;">
-            </div>
-            <form method="post" action="/admin/users/{user_id}/reset-password"
-                  style="display:inline;padding-bottom:4px;">
-              <button class="btn btn-sm" type="submit">🔑 {t('admin.pw_reset_btn')}</button>
-            </form>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;">
-          <button class="btn primary" type="submit">{t('btn.save')}</button>
-          <a class="btn" href="/admin">{t('btn.back')}</a>
-        </div>
-      </form>
-    </div>
-
-    <!-- Zeitschema (inline bearbeitbar) -->
+    <!-- BEREICH 2: Zeitschema -->
     <div class="card" id="schedule">
       <h3 style="margin-top:0;">🕐 {t('admin.acc_schedules')}</h3>
       <form method="post" action="/admin/users/{user_id}/edit" style="margin-bottom:10px;">
@@ -13084,11 +13178,53 @@ def admin_users_edit(user_id: int):
       </table>
     </div>
 
-    <!-- Urlaub + Übertrag -->
+    <!-- BEREICH 3: Urlaub -->
     <div class="card" id="vacation">
-      <h3 style="margin-top:0;">🏖 {t('admin.acc_vacation')} {cur_year}</h3>
+      <h3 style="margin-top:0;">🏖 {t('admin.section_vacation')} {cur_year}</h3>
       {_vac_html}
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--br);">
+
+      <!-- Urlaubsanspruch -->
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--bd);">
+        <h4 style="margin:0 0 8px;">{t('admin.vacation_entitlement')}</h4>
+        <div class="table-scroll" style="margin-bottom:10px;">
+          <table style="width:100%;font-size:13px;">
+            <thead><tr>
+              <th>{t('admin.entitlement_days')}</th>
+              <th>{t('admin.entitlement_valid_from')}</th>
+              <th>{t('admin.entitlement_note')}</th>
+              <th></th>
+            </tr></thead>
+            <tbody>{_ent_rows}</tbody>
+          </table>
+        </div>
+        <form method="post" action="/admin/users/{user_id}/edit">
+          <input type="hidden" name="_section" value="add_entitlement">
+          <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.entitlement_days')}</label>
+              <input type="number" name="entitlement_days" min="0" max="365" step="0.5"
+                     placeholder="30"
+                     style="display:block;margin-top:4px;width:80px;">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--mu);">{t('admin.entitlement_valid_from')}</label>
+              <input type="date" name="entitlement_valid_from"
+                     value="{datetime.date.today().isoformat()}"
+                     style="display:block;margin-top:4px;">
+            </div>
+            <div style="flex:1;min-width:120px;">
+              <label style="font-size:12px;color:var(--mu);">{t('admin.entitlement_note')}</label>
+              <input type="text" name="entitlement_note" maxlength="100"
+                     placeholder="{t('admin.entitlement_note_hint')}"
+                     style="display:block;margin-top:4px;width:100%;">
+            </div>
+            <button class="btn primary btn-sm" type="submit">{t('btn.add')}</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Urlaubsübertrag -->
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--bd);">
         <h4 style="margin:0 0 8px;">{t('admin.vacation_carryover')}</h4>
         <form method="post" action="/admin/users/{user_id}/edit">
           <input type="hidden" name="_section" value="carryover">
@@ -13136,6 +13272,44 @@ def admin_users_edit(user_id: int):
 def admin_users_edit_post(user_id: int):
     bootstrap()
     u = current_user()
+
+    # Early-return sections (must come before the main form processing)
+    _sec = request.form.get("_section", "")
+
+    if _sec == "add_entitlement":
+        try:
+            _days = float(request.form.get("entitlement_days") or 0)
+            _vf   = (request.form.get("entitlement_valid_from") or "").strip()
+            _note = (request.form.get("entitlement_note") or "").strip()
+            if _days > 0 and _vf:
+                db = connect()
+                db.execute(
+                    "INSERT INTO user_vacation_entitlement(user_id, days, valid_from, note) VALUES(?,?,?,?)",
+                    (user_id, _days, _vf, _note)
+                )
+                db.commit()
+                db.close()
+                add_flash(t("admin.user_saved"), "success")
+        except Exception:
+            add_flash(t("flash.error"), "error")
+        return redirect(f"/admin/users/{user_id}/edit#vacation")
+
+    if _sec == "del_entitlement":
+        try:
+            _eid = int(request.form.get("entitlement_id") or 0)
+            if _eid:
+                db = connect()
+                db.execute(
+                    "DELETE FROM user_vacation_entitlement WHERE id=? AND user_id=?",
+                    (_eid, user_id)
+                )
+                db.commit()
+                db.close()
+                add_flash(t("admin.user_saved"), "success")
+        except Exception:
+            add_flash(t("flash.error"), "error")
+        return redirect(f"/admin/users/{user_id}/edit#vacation")
+
     is_active = (request.form.get("is_active") or "0") == "1"
     set_active(user_id, is_active)
 
@@ -13248,14 +13422,18 @@ def admin_users_edit_post(user_id: int):
         db.commit()
         db.close()
 
-    # Overtime limits
-    lim_plus  = request.form.get("overtime_limit_plus", "").strip() or None
-    lim_minus = request.form.get("overtime_limit_minus", "").strip() or None
+    # Overtime limits + end_date + balance_rollover
+    lim_plus      = request.form.get("overtime_limit_plus", "").strip() or None
+    lim_minus     = request.form.get("overtime_limit_minus", "").strip() or None
+    end_date_val  = request.form.get("end_date", "").strip() or None
+    rollover_val  = request.form.get("balance_rollover", "manual").strip()
+    if rollover_val not in ("manual", "keep", "forfeit"):
+        rollover_val = "manual"
     db = connect()
     db.execute(
         "UPDATE users SET overtime_limit_plus=?, overtime_limit_minus=?, "
-        "updated_at=datetime('now') WHERE id=?",
-        (lim_plus, lim_minus, user_id)
+        "end_date=?, balance_rollover=?, updated_at=datetime('now') WHERE id=?",
+        (lim_plus, lim_minus, end_date_val, rollover_val, user_id)
     )
     db.commit()
     db.close()
