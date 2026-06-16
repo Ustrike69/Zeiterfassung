@@ -13005,10 +13005,10 @@ def admin_users_new():
     <div class="card">
       <h3>Benutzer anlegen</h3>
       <p class="small">Das Passwort ist temporär – der Nutzer wird beim ersten Login durch den Einrichtungs-Wizard geführt.</p>
-      <form method="post" action="/admin/users/new">
+      <form method="post" action="/admin/users/new" autocomplete="off">
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
-          <div><label>Username</label><br><input name="username" required></div>
-          <div><label>Temporäres Passwort</label><br><input type="password" name="password" required></div>
+          <div><label>Username</label><br><input name="username" required autocomplete="off"></div>
+          <div><label>Temporäres Passwort</label><br><input type="password" name="password" required autocomplete="new-password"></div>
           <div><label>{t('admin.email')}</label><br><input type="email" name="user_email" placeholder="name@firma.de"></div>
         </div>
         <div style="margin-bottom:10px;">
@@ -15105,10 +15105,10 @@ window.addEventListener('DOMContentLoaded',function(){{
 
           <div id="new-user-panel" style="display:none;border:1px solid var(--bd);border-radius:var(--rs);padding:12px;margin-bottom:12px;background:var(--sf);">
             <div style="font-size:13px;font-weight:700;margin-bottom:8px;">{t('admin.new_user_title')}</div>
-            <form method="post" action="/admin/users/new" id="nu-form">
+            <form method="post" action="/admin/users/new" id="nu-form" autocomplete="off">
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
-                <div><label style="font-size:12px;">{t('admin.user_name')}</label><br><input name="username" required style="font-size:13px;padding:5px 8px;" id="nu-user"></div>
-                <div id="nu-pw-wrap"><label style="font-size:12px;">{t('admin.temp_password')}</label><br><input type="password" name="password" id="nu-pw" style="font-size:13px;padding:5px 8px;"></div>
+                <div><label style="font-size:12px;">{t('admin.user_name')}</label><br><input name="username" required autocomplete="off" style="font-size:13px;padding:5px 8px;" id="nu-user"></div>
+                <div id="nu-pw-wrap"><label style="font-size:12px;">{t('admin.temp_password')}</label><br><input type="password" name="password" id="nu-pw" autocomplete="new-password" style="font-size:13px;padding:5px 8px;"></div>
                 <div><label style="font-size:12px;">{t('admin.email')}</label><br><input type="email" name="user_email" placeholder="name@firma.de" style="font-size:13px;padding:5px 8px;"></div>
                 <div><label style="font-size:12px;">{t('admin.tracking_start_col')}</label><br>{_date_input("tracking_start_date", today_iso)}</div>
               </div>
