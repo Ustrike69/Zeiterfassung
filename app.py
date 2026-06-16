@@ -1,4 +1,5 @@
 from flask import Flask, request, redirect, url_for, session, render_template_string, abort, jsonify, send_file
+from werkzeug.middleware.proxy_fix import ProxyFix
 import datetime
 import calendar
 import sqlite3
@@ -18,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.10"
+APP_VERSION = "v3.0.11.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -28,6 +29,7 @@ if IS_DEV:
     )
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_for=1)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = True
