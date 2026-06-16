@@ -18,7 +18,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.9"
+APP_VERSION = "v3.0.10.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -29,6 +29,10 @@ if IS_DEV:
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 
 
 # -------------------------
@@ -2495,11 +2499,11 @@ def login():
     {flash_html()}
     <div class="card">
       <h3>{t("login.title", _login_lang)}</h3>
-      <form method="post" action="/login" id="login-form">
+      <form method="post" action="/login" id="login-form" autocomplete="on">
         <input type="hidden" name="next" value="{nxt}">
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <div><label>{t("login.username", _login_lang)}</label><br>
-            <input name="username" id="login-user" required autocomplete="username"
+            <input type="text" name="username" id="login-user" required autocomplete="username"
                    oninput="loginLockCheck()"></div>
           <div><label>{t("login.password", _login_lang)}</label><br>
             <input type="password" name="password" required autocomplete="current-password"></div>
@@ -2563,6 +2567,7 @@ def login_post():
         session["pre_2fa_next"] = nxt
         return redirect(url_for("login_2fa"))
 
+    session.permanent = True
     session["user_id"] = u["id"]
     session["lang"] = _lang
     return redirect(nxt)
@@ -2629,6 +2634,7 @@ def login_2fa_post():
     _final_lang = (_lrow["language"] if _lrow and _lrow["language"] else "de") or "de"
 
     session.clear()
+    session.permanent = True
     session["user_id"] = user_id
     session["lang"] = _final_lang
     return redirect(nxt)
@@ -8913,7 +8919,9 @@ function wizValidate(e){{
             </div>
             <div>
               <label>{t('settings.retire_age')}</label><br>
-              <input type="number" name="retirement_age" value="{profile_ra}" min="60" max="72" step="1" style="width:100px;">
+              <input type="number" name="retirement_age" value="{profile_ra}"
+                     min="60" max="72" step="1" inputmode="numeric"
+                     style="width:100px;">
               <div class="small" style="color:var(--mu);margin-top:3px;">{t('settings.retire_age_hint')}</div>
             </div>
             <div><button class="btn" type="submit">{t('settings.save_profile_btn')}</button></div>
@@ -14316,6 +14324,7 @@ def admin_impersonate(user_id: int):
         add_flash(t("flash.error.impersonate_inactive"), "error")
         return redirect(url_for("admin"))
     session["impersonator_id"] = u["id"]
+    session.permanent = True
     session["user_id"] = user_id
     return redirect("/")
 
@@ -14325,6 +14334,7 @@ def admin_impersonate_stop():
     impersonator_id = session.get("impersonator_id")
     if not impersonator_id:
         return redirect("/")
+    session.permanent = True
     session["user_id"] = impersonator_id
     session.pop("impersonator_id", None)
     session.pop("lang", None)  # reload admin's own language on next request
@@ -20344,6 +20354,7 @@ def dev_su(uid):
     db.close()
     if not u:
         abort(404)
+    session.permanent = True
     session["user_id"] = uid
     session.modified = True
     return redirect("/")
