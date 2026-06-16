@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.11.dev1"
+APP_VERSION = "v3.0.11.dev2"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -9621,12 +9621,13 @@ def _render_icloud_settings_section(
                 <div>
                   <label>{_html.escape(t('settings.icloud_apple_id', lang=lang))}</label><br>
                   <input type="email" name="icloud_apple_id" value="{_html.escape(ic_apple_id)}"
-                         placeholder="name@icloud.com" style="width:100%;margin-top:4px;">
+                         placeholder="name@icloud.com" autocomplete="off" data-lpignore="true"
+                         style="width:100%;margin-top:4px;">
                 </div>
                 <div>
                   <label>{_html.escape(t('settings.icloud_app_password', lang=lang))}</label><br>
                   <input type="password" name="icloud_app_password" value=""
-                         placeholder="{_pw_placeholder}" autocomplete="new-password"
+                         placeholder="{_pw_placeholder}" autocomplete="new-password" data-lpignore="true"
                          style="width:100%;margin-top:4px;">
                   {_pw_keep_note}
                   <div class="small" style="color:var(--mu);margin-top:3px;">
@@ -15196,7 +15197,7 @@ window.addEventListener('DOMContentLoaded',function(){{
       <div class="acc-body" id="acc-mail-body">
         <div class="acc-inner">
           {mail_status_html}
-          <form method="post" action="/admin/mail-settings" style="margin-bottom:16px;">
+          <form method="post" action="/admin/mail-settings" style="margin-bottom:16px;" autocomplete="off">
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
               <div style="flex:2;min-width:180px;">
                 <label style="font-size:12px;">{t('admin.smtp_host')}</label>
@@ -15209,11 +15210,11 @@ window.addEventListener('DOMContentLoaded',function(){{
             </div>
             <div style="margin-bottom:8px;">
               <label style="font-size:12px;">{t('admin.smtp_user')}</label>
-              <input type="text" name="mail_username" value="{mail_cfg.get('mail_username','')}" placeholder="user@beispiel.de" required style="font-size:13px;padding:5px 8px;">
+              <input type="text" name="mail_username" value="{mail_cfg.get('mail_username','')}" placeholder="user@beispiel.de" required autocomplete="off" data-lpignore="true" style="font-size:13px;padding:5px 8px;">
             </div>
             <div style="margin-bottom:8px;">
               <label style="font-size:12px;">{t('admin.smtp_pass')} {"<span style='font-weight:400;color:var(--mu);'>(" + t('admin.smtp_pass_hint') + ")</span>" if pw_set else ""}</label>
-              <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else t('admin.smtp_pass')}" style="font-size:13px;padding:5px 8px;">
+              <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else t('admin.smtp_pass')}" autocomplete="new-password" data-lpignore="true" style="font-size:13px;padding:5px 8px;">
             </div>
             <div style="margin-bottom:10px;">
               <label style="font-size:12px;">{t('admin.smtp_from')}</label>
@@ -16055,7 +16056,7 @@ def admin_mail_settings():
     <div class="card">
       <h3 style="margin-top:0;">Mailserver-Einstellungen</h3>
       <p class="small">Einstellungen werden in der Datenbank gespeichert und überschreiben Umgebungsvariablen.</p>
-      <form method="post" action="/admin/mail-settings">
+      <form method="post" action="/admin/mail-settings" autocomplete="off">
         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
           <div style="flex:2;min-width:200px;">
             <label>Mailserver (SMTP)</label>
@@ -16068,11 +16069,11 @@ def admin_mail_settings():
         </div>
         <div style="margin-bottom:10px;">
           <label>Benutzername (Login)</label>
-          <input type="text" name="mail_username" value="{cfg.get('mail_username','')}" placeholder="user@beispiel.de" required>
+          <input type="text" name="mail_username" value="{cfg.get('mail_username','')}" placeholder="user@beispiel.de" required autocomplete="off" data-lpignore="true">
         </div>
         <div style="margin-bottom:10px;">
           <label>Passwort {"<span class='small' style='color:var(--mu);font-weight:400;'>(leer lassen = unverändert)</span>" if pw_set else ""}</label>
-          <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else 'Passwort eingeben'}">
+          <input type="password" name="mail_password" value="" placeholder="{'••••••••' if pw_set else 'Passwort eingeben'}" autocomplete="new-password" data-lpignore="true">
         </div>
         <div style="margin-bottom:14px;">
           <label>Absender (Anzeigename &lt;adresse@domain&gt;)</label>
