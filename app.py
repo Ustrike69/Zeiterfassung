@@ -20,7 +20,7 @@ from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i1
 from blueprints.school_holidays import school_holidays_bp
 
 
-APP_VERSION = "v3.0.13.dev7"
+APP_VERSION = "v3.0.13.dev8"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:

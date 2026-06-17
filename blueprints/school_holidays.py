@@ -20,6 +20,7 @@ school_holidays_bp = Blueprint("school_holidays", __name__)
 def admin_school_holidays_fetch():
     from app import add_flash, bootstrap
     import urllib.request as _ur
+    import urllib.parse as _uparse
     import json as _json
     bootstrap()
     state_code = (request.form.get("state_code") or "").strip().upper()
@@ -35,17 +36,33 @@ def admin_school_holidays_fetch():
 
     region = f"DE-{state_code}"
 
+    params = _uparse.urlencode({
+        "countryIsoCode": "DE",
+        "subdivisionCode": region,
+        "languageIsoCode": "DE",
+        "validFrom": f"{year}-01-01",
+        "validTo":   f"{year}-12-31",
+    })
+    url = f"https://openholidaysapi.org/SchoolHolidays?{params}"
+    req = _ur.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; Zeiterfassung)",
+    })
     try:
-        url = f"https://ferien-api.de/api/v1/holidays/{state_code}/{year}"
-        req = _ur.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; Zeiterfassung)",
-            "Accept": "application/json",
-        })
         with _ur.urlopen(req, timeout=10) as resp:
             data = _json.loads(resp.read().decode())
     except Exception as e:
         add_flash(f"API-Fehler: {e}", "error")
         return redirect("/admin#acc-schoolhols")
+
+    def _extract_name(item):
+        names = item.get("name") or []
+        for n in names:
+            if n.get("language") == "DE":
+                return n.get("text") or "Ferien"
+        if names:
+            return names[0].get("text") or "Ferien"
+        return "Ferien"
 
     db = connect()
     if replace:
@@ -56,17 +73,12 @@ def admin_school_holidays_fetch():
     imported = 0
     for item in data:
         try:
-            name = item.get("name") or item.get("slug") or "Ferien"
-            start = str(item.get("start") or "")[:10]
-            end_raw = str(item.get("end") or "")[:10]
-            if not start or not end_raw:
+            name  = _extract_name(item)
+            start = str(item.get("startDate") or "")[:10]
+            end   = str(item.get("endDate")   or "")[:10]
+            if not start or not end:
                 continue
-            # ferien-api: end is exclusive → subtract 1 day
-            end_dt = datetime.date.fromisoformat(end_raw) - datetime.timedelta(days=1)
-            start_dt = datetime.date.fromisoformat(start)
-            if end_dt < start_dt:
-                end_dt = start_dt
-            end = end_dt.isoformat()
+            # openholidaysapi.org liefert inklusive Enddaten – keine Anpassung nötig
             db.execute(
                 "INSERT INTO school_holidays(region, name, date_from, date_to) VALUES(?,?,?,?)",
                 (region, name, start, end)
