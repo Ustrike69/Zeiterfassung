@@ -18,9 +18,10 @@ from auth import (has_users, create_user, authenticate, current_user, login_requ
 from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 from blueprints.school_holidays import school_holidays_bp
+from blueprints.vocational import vocational_bp
 
 
-APP_VERSION = "v3.0.13.dev8"
+APP_VERSION = "v3.0.13.dev9"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -33,6 +34,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_for=1)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 app.register_blueprint(school_holidays_bp)
+app.register_blueprint(vocational_bp)
 
 
 @app.errorhandler(404)
@@ -9622,63 +9624,6 @@ def settings_admin_only():
     return redirect("/settings")
 
 
-# ── Berufsschule Einstellungen ─────────────────────────────────────────────────
-
-@app.post("/settings/vocational/add")
-@login_required
-def settings_vocational_add():
-    bootstrap()
-    u = current_user()
-    stype = request.form.get("schedule_type", "weekly")
-    voc_type = request.form.get("voc_type", "full")
-    weekday = request.form.get("weekday")
-    school_tf = request.form.get("school_time_from", "").strip() or None
-    school_tt = request.form.get("school_time_to", "").strip() or None
-    work_tf   = request.form.get("work_time_from", "").strip() or None
-    work_tt   = request.form.get("work_time_to", "").strip() or None
-    date_from = _parse_date_input(request.form.get("date_from") or "")
-    date_to   = _parse_date_input(request.form.get("date_to") or "")
-    valid_from = _parse_date_input(request.form.get("valid_from") or "")
-    valid_to   = _parse_date_input(request.form.get("valid_to") or "")
-    note = (request.form.get("note") or "").strip()
-    if stype == "weekly":
-        if weekday is None:
-            return redirect("/settings#acc-voc")
-        if voc_type != "half":
-            school_tf = school_tt = work_tf = work_tt = None
-    elif stype == "block":
-        if not date_from or not date_to:
-            return redirect("/settings#acc-voc")
-        weekday = None
-    db = connect()
-    db.execute(
-        "INSERT INTO vocational_school(user_id, schedule_type, weekday, "
-        "school_time_from, school_time_to, work_time_from, work_time_to, "
-        "date_from, date_to, valid_from, valid_to, note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (u["id"], stype, int(weekday) if weekday is not None else None,
-         school_tf, school_tt, work_tf, work_tt,
-         date_from, date_to, valid_from, valid_to, note)
-    )
-    db.commit()
-    db.close()
-    add_flash(t("admin.user_saved"), "success")
-    return redirect("/settings#acc-voc")
-
-
-@app.post("/settings/vocational/delete")
-@login_required
-def settings_vocational_delete():
-    bootstrap()
-    u = current_user()
-    entry_id = int(request.form.get("entry_id") or 0)
-    if entry_id:
-        db = connect()
-        db.execute("DELETE FROM vocational_school WHERE id=? AND user_id=?", (entry_id, u["id"]))
-        db.commit()
-        db.close()
-    return redirect("/settings#acc-voc")
-
-
 # ── iCloud Einstellungen ───────────────────────────────────────────────────────
 
 def _render_icloud_settings_section(
@@ -13950,50 +13895,6 @@ def admin_users_edit_post(user_id: int):
 
     add_flash(t("admin.user_saved"), "success")
     return redirect(f"/admin/users/{user_id}/edit")
-
-
-@app.post("/admin/users/<int:user_id>/vocational/add")
-@admin_required
-def admin_vocational_add(user_id: int):
-    bootstrap()
-    stype   = request.form.get("schedule_type", "weekly")
-    voc_type = request.form.get("voc_type", "full")
-    weekday = request.form.get("weekday")
-    work_tf = request.form.get("work_time_from", "").strip() or None
-    work_tt = request.form.get("work_time_to", "").strip() or None
-    date_from = _parse_date_input(request.form.get("date_from") or "")
-    date_to   = _parse_date_input(request.form.get("date_to") or "")
-    valid_from = _parse_date_input(request.form.get("valid_from") or "")
-    valid_to   = _parse_date_input(request.form.get("valid_to") or "")
-    note = (request.form.get("note") or "").strip()
-    if stype == "weekly" and voc_type != "half":
-        work_tf = work_tt = None
-    db = connect()
-    db.execute(
-        "INSERT INTO vocational_school(user_id, schedule_type, weekday, "
-        "work_time_from, work_time_to, date_from, date_to, valid_from, valid_to, note) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (user_id, stype,
-         int(weekday) if weekday is not None and stype == "weekly" else None,
-         work_tf, work_tt, date_from, date_to, valid_from, valid_to, note)
-    )
-    db.commit()
-    db.close()
-    add_flash(t("admin.user_saved"), "success")
-    return redirect(f"/admin/users/{user_id}/edit#vocational")
-
-
-@app.post("/admin/users/<int:user_id>/vocational/delete")
-@admin_required
-def admin_vocational_delete(user_id: int):
-    bootstrap()
-    entry_id = int(request.form.get("entry_id") or 0)
-    if entry_id:
-        db = connect()
-        db.execute("DELETE FROM vocational_school WHERE id=? AND user_id=?", (entry_id, user_id))
-        db.commit()
-        db.close()
-    return redirect(f"/admin/users/{user_id}/edit#vocational")
 
 
 @app.post("/admin/users/<int:user_id>/delete")
