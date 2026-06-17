@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.12"
+APP_VERSION = "v3.0.13.dev1"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -31,6 +31,67 @@ if IS_DEV:
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_for=1)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
+
+
+@app.errorhandler(404)
+def handle_404(e):
+    try:
+        u = current_user()
+    except Exception:
+        u = None
+    body = f"""
+    <div style="max-width:480px;margin:80px auto;text-align:center;padding:0 20px;">
+      <div style="font-size:64px;margin-bottom:16px;">🔍</div>
+      <h2 style="margin-bottom:8px;">{t('error.404_title')}</h2>
+      <p style="color:var(--mu);margin-bottom:24px;">{t('error.404_text')}</p>
+      <a href="/" class="btn primary">{t('error.back_home')}</a>
+    </div>
+    """
+    return render_template_string(
+        layout(t('error.404_title'), body, u, APP_VERSION, show_back=False)
+    ), 404
+
+
+@app.errorhandler(403)
+def handle_403(e):
+    try:
+        u = current_user()
+    except Exception:
+        u = None
+    body = f"""
+    <div style="max-width:480px;margin:80px auto;text-align:center;padding:0 20px;">
+      <div style="font-size:64px;margin-bottom:16px;">🔒</div>
+      <h2 style="margin-bottom:8px;">{t('error.403_title')}</h2>
+      <p style="color:var(--mu);margin-bottom:24px;">{t('error.403_text')}</p>
+      <a href="/" class="btn primary">{t('error.back_home')}</a>
+    </div>
+    """
+    return render_template_string(
+        layout(t('error.403_title'), body, u, APP_VERSION, show_back=False)
+    ), 403
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    try:
+        u = current_user()
+    except Exception:
+        u = None
+    app.logger.error(f"500 error: {e}", exc_info=True)
+    body = f"""
+    <div style="max-width:480px;margin:80px auto;text-align:center;padding:0 20px;">
+      <div style="font-size:64px;margin-bottom:16px;">⚠️</div>
+      <h2 style="margin-bottom:8px;">{t('error.500_title')}</h2>
+      <p style="color:var(--mu);margin-bottom:24px;">{t('error.500_text')}</p>
+      <a href="/" class="btn primary">{t('error.back_home')}</a>
+    </div>
+    """
+    try:
+        return render_template_string(
+            layout(t('error.500_title'), body, u, APP_VERSION, show_back=False)
+        ), 500
+    except Exception:
+        return f"<h2>{t('error.500_title')}</h2><p><a href='/'>{t('error.back_home')}</a></p>", 500
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -8638,7 +8699,7 @@ def settings_view():
         f"<td style='padding:6px 10px;'>{p['time_out']}</td>"
         f"<td style='padding:6px 10px;'>{p['break_minutes']}</td>"
         f"<td style='padding:6px 10px;'>"
-        f"<form method='post' action='/settings/presets/delete' style='display:inline;'>"
+        f"<form method='post' action='/settings/presets/delete' style='display:inline;' onsubmit=\"return confirm('{t('confirm.delete_preset')}');\">"
         f"<input type='hidden' name='preset_id' value='{p['id']}'>"
         f"<button class='btn btn-sm' type='submit' style='color:#dc2626;'>{t('btn.delete')}</button>"
         f"</form></td>"
@@ -8724,7 +8785,7 @@ def settings_view():
         f"<td style='font-size:13px;'>{'Ganztag' if not e['school_time_from'] else _fmt_time_voc(e['school_time_from'])+' – '+_fmt_time_voc(e['school_time_to'])}</td>"
         f"<td style='font-size:13px;'>{'–' if not e['work_time_from'] else _fmt_time_voc(e['work_time_from'])+' – '+_fmt_time_voc(e['work_time_to'])}</td>"
         f"<td style='font-size:13px;'>{(e['valid_from'] or '–')+' – '+(e['valid_to'] or 'offen')}</td>"
-        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;'>"
+        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;' onsubmit=\"return confirm('{t('confirm.delete_vocational')}');\">"
         f"<input type='hidden' name='entry_id' value='{e['id']}'>"
         f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></td>"
         f"</tr>"
@@ -8736,7 +8797,7 @@ def settings_view():
         f"<td style='font-size:13px;'>{_fmt_date_de(e['date_from'])}</td>"
         f"<td style='font-size:13px;'>{_fmt_date_de(e['date_to'])}</td>"
         f"<td style='font-size:13px;'>{_html.escape(e['note'] or '')}</td>"
-        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;'>"
+        f"<td><form method='post' action='/settings/vocational/delete' style='display:inline;' onsubmit=\"return confirm('{t('confirm.delete_vocational')}');\">"
         f"<input type='hidden' name='entry_id' value='{e['id']}'>"
         f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></td>"
         f"</tr>"
@@ -13503,7 +13564,7 @@ def admin_users_edit(user_id: int):
         f"<span>{'Wöchentlich: ' + ['Mo','Di','Mi','Do','Fr','Sa','So'][int(e['weekday'])] if e['schedule_type']=='weekly' else 'Block: '+str(e['date_from'])+'–'+str(e['date_to'])}"
         f"{(' | Halbtag Arbeit: '+str(e['work_time_from'])[:5]+'–'+str(e['work_time_to'])[:5]) if e['work_time_from'] else ''}"
         f"{(' | '+e['note']) if e['note'] else ''}</span>"
-        f"<form method='post' action='/admin/users/{user_id}/vocational/delete' style='display:inline;'>"
+        f"<form method='post' action='/admin/users/{user_id}/vocational/delete' style='display:inline;' onsubmit=\"return confirm('{t('confirm.delete_vocational')}');\">"
         f"<input type='hidden' name='entry_id' value='{e['id']}'>"
         f"<button class='btn btn-sm danger' type='submit' style='padding:2px 8px;'>×</button></form></div>"
         for e in _voc_admin_entries
@@ -17683,7 +17744,7 @@ def _render_school_holidays_section() -> str:
                 f"<td style='font-size:13px;'>{h['date_from']}</td>"
                 f"<td style='font-size:13px;'>{h['date_to']}</td>"
                 f"<td><form method='post' action='/admin/school-holidays/delete' style='display:inline;'"
-                f" onsubmit=\"sessionStorage.setItem('openAcc','acc-schoolhols')\">"
+                f" onsubmit=\"if(!confirm('{t('confirm.delete_school_holiday')}'))return false;sessionStorage.setItem('openAcc','acc-schoolhols')\">"
                 f"<input type='hidden' name='entry_id' value='{h['id']}'>"
                 f"<button class='btn btn-sm danger' type='submit' style='padding:2px 7px;'>×</button>"
                 f"</form></td>"

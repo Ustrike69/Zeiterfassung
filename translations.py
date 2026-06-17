@@ -1260,6 +1260,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "flash.success.telegram_saved":       "Telegram-ID gespeichert.",
         "flash.success.telegram_removed":     "Telegram-ID entfernt.",
         "flash.success.reminder_saved":       "Erinnerungseinstellungen gespeichert.",
+
+        # ── Fehlerseiten ──────────────────────────────────────────────
+        "error.404_title":              "Seite nicht gefunden",
+        "error.404_text":               "Die angeforderte Seite existiert nicht oder wurde verschoben.",
+        "error.403_title":              "Kein Zugriff",
+        "error.403_text":               "Du hast keine Berechtigung für diesen Bereich.",
+        "error.500_title":              "Etwas ist schiefgelaufen",
+        "error.500_text":               "Es gab einen internen Fehler. Bitte versuche es erneut oder kontaktiere den Administrator.",
+        "error.back_home":              "Zurück zum Dashboard",
+
+        # ── Confirm-Dialoge ───────────────────────────────────────────
+        "confirm.delete_preset":        "Vorlage wirklich löschen?",
+        "confirm.delete_vocational":    "Eintrag wirklich löschen?",
+        "confirm.delete_school_holiday":"Schulferien-Eintrag wirklich löschen?",
     },
 
     # ─────────────────────────────────────────────────────────────────
@@ -2512,6 +2526,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "flash.success.telegram_saved":       "Telegram ID saved.",
         "flash.success.telegram_removed":     "Telegram ID removed.",
         "flash.success.reminder_saved":       "Reminder settings saved.",
+
+        # ── Error pages ───────────────────────────────────────────────
+        "error.404_title":              "Page not found",
+        "error.404_text":               "The requested page does not exist or has been moved.",
+        "error.403_title":              "Access denied",
+        "error.403_text":               "You do not have permission to view this area.",
+        "error.500_title":              "Something went wrong",
+        "error.500_text":               "An internal error occurred. Please try again or contact your administrator.",
+        "error.back_home":              "Back to dashboard",
+
+        # ── Confirm dialogs ───────────────────────────────────────────
+        "confirm.delete_preset":        "Really delete this template?",
+        "confirm.delete_vocational":    "Really delete this entry?",
+        "confirm.delete_school_holiday":"Really delete this school holiday entry?",
     },
 }
 
