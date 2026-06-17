@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.13.dev3"
+APP_VERSION = "v3.0.13.dev4"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -14813,8 +14813,9 @@ def admin_home():
                 f'<form method="post" action="/admin/users/{uid}/unlock" style="display:contents;">'
                 f'<button class="btn btn-sm" type="submit" style="color:var(--danger);">&#128275; {t("auth.admin_unlock_btn")}</button></form>'
             )
+        _search_key = _html.escape((r["username"] + " " + (r["display_name"] or "")).lower())
         user_trs += (
-            f'<tr>'
+            f'<tr data-search="{_search_key}">'
             f'<td>{display}{sub_html}{role_badge}{inact_badge}{admin_only_badge}{bl_badge}{locked_badge}</td>'
             f'<td class="small">{(r["created_at"] or "")[:10]}</td>'
             f'<td><div style="display:flex;gap:4px;flex-wrap:wrap;">'
@@ -15182,6 +15183,13 @@ window.addEventListener('DOMContentLoaded',function(){{
     if(el){{el.classList.add('open');if(hd)hd.classList.add('open');if(ar)ar.textContent='▲';}}
   }}
 }});
+function filterUserTable(query){{
+  query=query.toLowerCase().trim();
+  document.querySelectorAll('tr[data-search]').forEach(function(tr){{
+    var match=!query||tr.getAttribute('data-search').indexOf(query)!==-1;
+    tr.style.display=match?'':'none';
+  }});
+}}
 </script>
 
 <div class="tab-bar">{_tab_html}</div>{_staffing_js}
@@ -15193,6 +15201,12 @@ window.addEventListener('DOMContentLoaded',function(){{
       </button>
       <div class="acc-body" id="acc-user-body">
         <div class="acc-inner">
+          <div style="margin-bottom:10px;">
+            <input type="text" id="user-search-input"
+                   placeholder="{t('admin.search_users_placeholder')}"
+                   oninput="filterUserTable(this.value)"
+                   style="width:100%;max-width:320px;padding:7px 10px;border-radius:6px;font-size:13px;">
+          </div>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             <span class="small">{len(all_users)} {t('admin.users_title')}</span>
             {_new_user_btn}

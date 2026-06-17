@@ -1274,6 +1274,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "confirm.delete_preset":        "Vorlage wirklich löschen?",
         "confirm.delete_vocational":    "Eintrag wirklich löschen?",
         "confirm.delete_school_holiday":"Schulferien-Eintrag wirklich löschen?",
+        "admin.search_users_placeholder": "Benutzer suchen…",
     },
 
     # ─────────────────────────────────────────────────────────────────
@@ -2540,6 +2541,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "confirm.delete_preset":        "Really delete this template?",
         "confirm.delete_vocational":    "Really delete this entry?",
         "confirm.delete_school_holiday":"Really delete this school holiday entry?",
+        "admin.search_users_placeholder": "Search users…",
     },
 }
 
