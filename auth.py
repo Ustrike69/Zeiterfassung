@@ -283,7 +283,8 @@ def current_user():
         "SELECT id, username, is_admin, is_active, tracking_start_date, "
         "password_changed, onboarding_done, display_name, email, admin_role, "
         "must_change_password, admin_only, language, password_compliant, "
-        "totp_enabled, login_attempts, last_login, is_approver, team_restriction FROM users WHERE id=?",
+        "totp_enabled, login_attempts, last_login, is_approver, team_restriction, "
+        "is_apprentice FROM users WHERE id=?",
         (uid,),
     ).fetchone()
     db.close()
