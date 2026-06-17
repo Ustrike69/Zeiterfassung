@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.13.dev2"
+APP_VERSION = "v3.0.13.dev3"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -512,6 +512,7 @@ def _ensure_user_schedules_schema() -> None:
         time_to TEXT NOT NULL,
         sort_order INTEGER DEFAULT 0
     )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schedule_daily_blocks_schedule ON schedule_daily_blocks(schedule_id)")
 
     # v3.0.6.dev1 – Ausnahmen (nth_weekday) für Tagesblöcke-Modus
     cur.execute("""CREATE TABLE IF NOT EXISTS schedule_exceptions (
@@ -523,6 +524,7 @@ def _ensure_user_schedules_schema() -> None:
         time_from TEXT NOT NULL,
         time_to TEXT NOT NULL
     )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schedule_exceptions_schedule ON schedule_exceptions(schedule_id)")
 
     db.commit()
     db.close()

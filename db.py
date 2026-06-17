@@ -687,6 +687,19 @@ def init_db():
     db.execute("""INSERT OR IGNORE INTO app_config (key, value)
         VALUES ('feature_staffing', '0')""")
 
+    # v3.0.13 – fehlende Indizes
+    db.execute("CREATE INDEX IF NOT EXISTS idx_staffing_assignments_slot ON staffing_assignments(slot_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_staffing_assignments_user ON staffing_assignments(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_staffing_slots_plan ON staffing_slots(plan_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_user_teams_user ON user_teams(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_user_teams_team ON user_teams(team_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_balance_adjustments_user ON balance_adjustments(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_vocational_school_user ON vocational_school(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_user_time_presets_user ON user_time_presets(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_user_vacation_entitlement_user ON user_vacation_entitlement(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_staffing_overrides_user ON staffing_overrides(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_staffing_day_accepted_plan ON staffing_day_accepted(plan_id)")
+
     db.commit()
     db.close()
 
