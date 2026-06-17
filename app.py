@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.13.dev4"
+APP_VERSION = "v3.0.13.dev5"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -15190,6 +15190,13 @@ function filterUserTable(query){{
     tr.style.display=match?'':'none';
   }});
 }}
+function filterVacTable(query){{
+  query=query.toLowerCase().trim();
+  document.querySelectorAll('#acc-absoverview-body tr[data-search]').forEach(function(tr){{
+    var match=!query||tr.getAttribute('data-search').indexOf(query)!==-1;
+    tr.style.display=match?'':'none';
+  }});
+}}
 </script>
 
 <div class="tab-bar">{_tab_html}</div>{_staffing_js}
@@ -16316,8 +16323,9 @@ def _render_admin_absences_section(u=None) -> str:
             rem_col = "var(--mu)"
         else:
             rem_col = "var(--danger)"
+        _vac_search_key = _html.escape((u_row["username"] + " " + (u_row["display_name"] or "")).lower())
         vac_rows += (
-            f"<tr><td>{name}</td>"
+            f"<tr data-search='{_vac_search_key}'><td>{name}</td>"
             f"<td style='text-align:center;'>{_fmt_vac_days(entitlement)}</td>"
             f"<td style='text-align:center;'>{_fmt_vac_days(eff_carry)}</td>"
             f"<td style='text-align:center;font-weight:600;'>{_fmt_vac_days(total)}</td>"
@@ -16449,6 +16457,12 @@ def _render_admin_absences_section(u=None) -> str:
             </div>
             <button class="btn btn-sm" type="submit">{t('periods.show_btn')}</button>
           </form>
+          <div style="margin-bottom:8px;">
+            <input type="text" id="vac-search-input"
+                   placeholder="{t('admin.search_users_placeholder')}"
+                   oninput="filterVacTable(this.value)"
+                   style="width:100%;max-width:320px;padding:7px 10px;border-radius:6px;font-size:13px;">
+          </div>
           <div class="table-scroll" style="margin-bottom:16px;">
             <table>
               <thead><tr>
