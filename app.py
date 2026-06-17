@@ -21,7 +21,7 @@ from blueprints.school_holidays import school_holidays_bp
 from blueprints.vocational import vocational_bp
 
 
-APP_VERSION = "v3.0.13.dev11"
+APP_VERSION = "v3.0.13.dev12"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -18571,9 +18571,15 @@ def _get_staffing_week_data(plan_id: int) -> dict:
         key = (uid, iso)
         if key not in _voc_cache_w:
             voc = _get_vocational_school_entry(uid, iso)
-            # Ganztag (work_time_from/to fehlen) → nicht verfügbar
-            # Halbtag (work_time_from/to gesetzt) → noch Arbeitsanteil, nicht als absent werten
-            _voc_cache_w[key] = bool(voc and not (voc.get("work_time_from") and voc.get("work_time_to")))
+            is_voc_active = False
+            if voc and not _is_holiday(iso, uid):
+                if voc["schedule_type"] == "weekly" and _is_school_holiday(iso, uid):
+                    is_voc_active = False  # Schulferien → Berufsschule entfällt
+                else:
+                    is_voc_active = True
+            _voc_cache_w[key] = bool(
+                is_voc_active and not (voc.get("work_time_from") and voc.get("work_time_to"))
+            )
         return _voc_cache_w[key]
 
     result = {"monday": monday, "days": days, "slots": [], "lead_label": lead_label}
@@ -18685,9 +18691,15 @@ def _get_staffing_month_data(plan_id: int) -> dict:
         key = (uid, iso)
         if key not in _voc_cache_m:
             voc = _get_vocational_school_entry(uid, iso)
-            # Ganztag (work_time_from/to fehlen) → nicht verfügbar
-            # Halbtag (work_time_from/to gesetzt) → noch Arbeitsanteil, nicht als absent werten
-            _voc_cache_m[key] = bool(voc and not (voc.get("work_time_from") and voc.get("work_time_to")))
+            is_voc_active = False
+            if voc and not _is_holiday(iso, uid):
+                if voc["schedule_type"] == "weekly" and _is_school_holiday(iso, uid):
+                    is_voc_active = False  # Schulferien → Berufsschule entfällt
+                else:
+                    is_voc_active = True
+            _voc_cache_m[key] = bool(
+                is_voc_active and not (voc.get("work_time_from") and voc.get("work_time_to"))
+            )
         return _voc_cache_m[key]
 
     result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates,
