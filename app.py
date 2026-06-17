@@ -21,7 +21,7 @@ from blueprints.school_holidays import school_holidays_bp
 from blueprints.vocational import vocational_bp
 
 
-APP_VERSION = "v3.0.13.dev10"
+APP_VERSION = "v3.0.13.dev11"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -18560,11 +18560,21 @@ def _get_staffing_week_data(plan_id: int) -> dict:
         lead_label = "Leiter"
     db.close()
 
+    _voc_cache_w: dict = {}
+
     def is_absent(uid, iso):
-        return any(
+        if any(
             ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
             for ab in absences
-        )
+        ):
+            return True
+        key = (uid, iso)
+        if key not in _voc_cache_w:
+            voc = _get_vocational_school_entry(uid, iso)
+            # Ganztag (work_time_from/to fehlen) → nicht verfügbar
+            # Halbtag (work_time_from/to gesetzt) → noch Arbeitsanteil, nicht als absent werten
+            _voc_cache_w[key] = bool(voc and not (voc.get("work_time_from") and voc.get("work_time_to")))
+        return _voc_cache_w[key]
 
     result = {"monday": monday, "days": days, "slots": [], "lead_label": lead_label}
     for slot in slots:
@@ -18664,11 +18674,21 @@ def _get_staffing_month_data(plan_id: int) -> dict:
         lead_label_m = "Leiter"
     db.close()
 
+    _voc_cache_m: dict = {}
+
     def is_absent(uid, iso):
-        return any(
+        if any(
             ab["user_id"] == uid and ab["date_from"] <= iso <= ab["date_to"]
             for ab in absences
-        )
+        ):
+            return True
+        key = (uid, iso)
+        if key not in _voc_cache_m:
+            voc = _get_vocational_school_entry(uid, iso)
+            # Ganztag (work_time_from/to fehlen) → nicht verfügbar
+            # Halbtag (work_time_from/to gesetzt) → noch Arbeitsanteil, nicht als absent werten
+            _voc_cache_m[key] = bool(voc and not (voc.get("work_time_from") and voc.get("work_time_to")))
+        return _voc_cache_m[key]
 
     result = {"year": year, "month": month, "days": [], "accepted_dates": accepted_dates,
               "lead_label": lead_label_m}
