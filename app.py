@@ -19,7 +19,7 @@ from templates import layout as base_layout
 from translations import t, fmt_date as _fmt_date_i18n, fmt_time as _fmt_time_i18n, available_languages as _available_languages
 
 
-APP_VERSION = "v3.0.11"
+APP_VERSION = "v3.0.12"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
@@ -4517,19 +4517,6 @@ def balance_view():
 
       <hr>
 
-      <form method="post" action="/balance/start" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
-        <div>
-          <label>Jahresstart-Saldo {sel_year}</label><br>
-          <input name="start_balance" placeholder="+00:00 / -01:30" value="{start_hhmm}" style="min-width:160px;" required>
-          <div class="small">Format: +HH:MM oder -HH:MM</div>
-        </div>
-        <input type="hidden" name="y" value="{sel_year}">
-        <input type="hidden" name="m" value="{sel_month}">
-        <div><button class="btn" type="submit">Speichern</button></div>
-      </form>
-
-      <hr>
-
       <p class="small">Delta = Ist − Soll. Wochenenden, Feiertage und Abwesenheitstage zählen als Soll = 0. Flextage werden zusätzlich vom Gleitzeitkonto abgezogen.</p>
       <table style="border-collapse:collapse;width:100%;">
         <thead>
@@ -4640,9 +4627,10 @@ def balance_set_start():
     u = current_user()
 
     start_balance_raw = (request.form.get("start_balance") or "").strip()
+    back_param = (request.form.get("back") or "").strip()
     y = (request.form.get("y") or "").strip()
     m = (request.form.get("m") or "").strip()
-    back = f"/balance?y={y}&m={m}" if y and m else "/balance"
+    back = back_param if back_param else (f"/balance?y={y}&m={m}" if y and m else "/balance")
 
     try:
         mins = _parse_signed_hhmm_to_minutes(start_balance_raw)
@@ -8854,6 +8842,24 @@ def settings_view():
       </div>
     </div>""" if _voc_show else ""
 
+    # Startsaldo + Jahreswechsel für Settings-Karte
+    _cur_year = datetime.date.today().year
+    _sb_minutes = _get_start_balance_minutes(u["id"])
+    _sb_txt = _fmt_minutes_signed(_sb_minutes)
+    try:
+        _ro_db = connect()
+        _ro_row = _ro_db.execute("SELECT balance_rollover FROM users WHERE id=?", (u["id"],)).fetchone()
+        _ro_db.close()
+        _rollover_mode = str(_ro_row["balance_rollover"] or "manual") if _ro_row else "manual"
+    except Exception:
+        _rollover_mode = "manual"
+    _rollover_label_map = {
+        "manual":  t("admin.rollover_manual"),
+        "keep":    t("admin.rollover_keep"),
+        "forfeit": t("admin.rollover_forfeit"),
+    }
+    _rollover_lbl = _rollover_label_map.get(_rollover_mode, _rollover_mode)
+
     body = f"""
     {flash_html()}
 <style>
@@ -9069,7 +9075,32 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 4. Kontierung -->
+    <!-- 4. Gleitzeitkonto -->
+    <div class="acc">
+      <button class="acc-hdr" type="button" onclick="accToggle('acc-gleit')">
+        <span>⏱ Gleitzeitkonto</span><span class="acc-arr">▼</span>
+      </button>
+      <div class="acc-body" id="acc-gleit">
+        <div class="acc-inner">
+          <form method="post" action="/balance/start" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+            <div>
+              <label style="font-size:12px;color:var(--mu);">Jahresstart-Saldo {_cur_year}</label><br>
+              <input name="start_balance" placeholder="+00:00 / -01:30" value="{_sb_txt}" style="min-width:160px;" required>
+              <div class="small" style="color:var(--mu);margin-top:3px;">Format: +HH:MM oder -HH:MM</div>
+            </div>
+            <input type="hidden" name="back" value="/settings">
+            <div><button class="btn" type="submit">{t('btn.save')}</button></div>
+          </form>
+          <div class="acc-sub">
+            <div class="small" style="color:var(--mu);">{t('admin.balance_rollover')}</div>
+            <div style="font-size:14px;font-weight:600;margin-top:2px;">{_rollover_lbl}</div>
+            <div class="small" style="color:var(--mu);margin-top:2px;">{t('admin.balance_rollover_hint')}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. Kontierung -->
     <div class="acc">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-kont')">
         <span>{t('settings.kont_section')}</span><span class="acc-arr">▼</span>
@@ -9081,7 +9112,7 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 5. Standardzeiten / Vorlagen -->
+    <!-- 6. Standardzeiten / Vorlagen -->
     <div class="acc" id="acc-presets">
       <button class="acc-hdr" type="button" onclick="accToggle('acc-presets-body')">
         <span>{t('settings.presets')}</span><span class="acc-arr">▼</span>
@@ -9094,10 +9125,10 @@ function wizValidate(e){{
       </div>
     </div>
 
-    <!-- 6. Berufsschule -->
+    <!-- 7. Berufsschule -->
     {_voc_accordion}
 
-    <!-- 7. Kalender-Integration -->
+    <!-- 8. Kalender-Integration -->
     {_render_calendar_integration_section(
         cal_system, cal_types, cal_prefix, cal_token, _webcal_url, _ical_url,
         cal_auth_mode, _basic_webcal_url, _basic_ical_url,
