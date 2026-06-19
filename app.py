@@ -36,7 +36,7 @@ from blueprints.calendar import calendar_routes_bp
 from blueprints.dev import dev_bp
 
 
-APP_VERSION = "v3.0.15.dev3"
+APP_VERSION = "v3.0.15"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
