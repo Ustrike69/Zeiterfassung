@@ -1,7 +1,7 @@
 """
 Blueprint: Abwesenheiten.
 """
-from flask import Blueprint, request, redirect, url_for
+from flask import Blueprint, request, redirect, url_for, current_app
 from db import connect
 from auth import login_required, admin_required, current_user
 from translations import t
@@ -274,7 +274,7 @@ def absences_new_post():
         try:
             _sync_to_icloud(u["id"], new_id, "create")
         except Exception as _e:
-            app.logger.error("iCloud Sync Fehler (new): %s", _e)
+            current_app.logger.error("iCloud Sync Fehler (new): %s", _e)
         add_flash(t("absences.saved"), "success")
     return redirect(url_for("absences.absences_list"))
 
@@ -446,7 +446,7 @@ def absences_edit_post(absence_id: int):
     try:
         _sync_to_icloud(u["id"], absence_id, "update")
     except Exception as _e:
-        app.logger.error("iCloud Sync Fehler (edit): %s", _e)
+        current_app.logger.error("iCloud Sync Fehler (edit): %s", _e)
     add_flash(t("absences.updated"), "success")
     return redirect(url_for("absences.absences_list"))
 
@@ -470,7 +470,7 @@ def absences_delete(absence_id: int):
     try:
         _sync_to_icloud(u["id"], absence_id, "delete")
     except Exception as _e:
-        app.logger.error("iCloud Sync Fehler (delete): %s", _e)
+        current_app.logger.error("iCloud Sync Fehler (delete): %s", _e)
     db2 = connect()
     db2.execute("DELETE FROM absences WHERE id=? AND user_id=?", (absence_id, u["id"]))
     db2.commit()
@@ -615,6 +615,6 @@ def day_absence_add(day: str):
     try:
         _sync_to_icloud(u["id"], new_id, "create")
     except Exception as _e:
-        app.logger.error("iCloud Sync Fehler (day): %s", _e)
+        current_app.logger.error("iCloud Sync Fehler (day): %s", _e)
     add_flash(t("absences.saved"), "success")
     return redirect(f"/day/{day}")

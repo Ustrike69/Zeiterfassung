@@ -1,9 +1,9 @@
 """
 Blueprint: Benutzer-Einstellungen.
 """
-from flask import Blueprint, request, redirect, url_for
+from flask import Blueprint, request, redirect, url_for, current_app
 from db import connect
-from auth import login_required, admin_required, current_user
+from auth import login_required, admin_required, current_user, is_sysadmin
 from auth import set_password, set_totp, disable_totp, get_totp_row, update_totp_backup_codes
 from auth import set_language, authenticate, validate_password
 from translations import t
@@ -181,7 +181,7 @@ def settings_view():
         profile_tg = str(_tg_row["telegram_id"]) if _tg_row else ""
         wiz_enabled = bool(int(_tg_row["wizard_enabled"] or 0)) if _tg_row else False
         wiz_time = (_tg_row["reminder_time"] or "20:00") if _tg_row else "20:00"
-        app.logger.info("settings_view: wizard_enabled=%s reminder_time=%s", wiz_enabled, wiz_time)
+        current_app.logger.info("settings_view: wizard_enabled=%s reminder_time=%s", wiz_enabled, wiz_time)
     finally:
         _tg_db.close()
 
@@ -1377,7 +1377,7 @@ def settings_icloud_sync_all():
                 cal.save_event("\r\n".join(ev_lines) + "\r\n")
                 count += 1
             except Exception as _ev_e:
-                app.logger.warning("iCloud sync-all skip ab %s: %s", ab["id"], _ev_e)
+                current_app.logger.warning("iCloud sync-all skip ab %s: %s", ab["id"], _ev_e)
         _icloud_update_sync_time(u["id"])
         return jsonify(ok=True, message=f"{count} Events synchronisiert", count=count)
     except Exception as e:

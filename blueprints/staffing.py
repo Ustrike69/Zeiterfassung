@@ -1,7 +1,7 @@
 """
 Blueprint: Besetzungsplanung.
 """
-from flask import Blueprint, request, redirect, url_for, jsonify
+from flask import Blueprint, request, redirect, url_for, jsonify, current_app
 from db import connect
 from auth import login_required, admin_required, current_user, timemanager_required
 from translations import t
@@ -198,7 +198,7 @@ def staffing_override_create():
                     )
                 )
             except Exception as e:
-                app.logger.error(f"Override mail error: {e}")
+                current_app.logger.error(f"Override mail error: {e}")
 
     db.commit()
     db.close()
