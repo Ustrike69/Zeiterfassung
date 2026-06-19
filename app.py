@@ -22,7 +22,7 @@ from blueprints.vocational import vocational_bp
 from blueprints.admin import admin_bp
 
 
-APP_VERSION = "v3.0.14.dev1"
+APP_VERSION = "v3.0.14"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
