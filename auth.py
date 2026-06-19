@@ -418,20 +418,20 @@ def login_required(view):
         # 2FA pending: redirect to 2FA page for all protected routes
         if session.get("awaiting_2fa") and not session.get("user_id"):
             ep = request.endpoint
-            if ep not in ("login_2fa", "login_2fa_post"):
-                return redirect(url_for("login_2fa"))
+            if ep not in ("auth_routes.login_2fa", "auth_routes.login_2fa_post"):
+                return redirect(url_for("auth_routes.login_2fa"))
         if not session.get("user_id"):
-            return redirect(url_for("login", next=request.path))
+            return redirect(url_for("auth_routes.login", next=request.path))
         u = current_user()
         if not u or not u.get("is_active"):
             session.clear()
-            return redirect(url_for("login"))
+            return redirect(url_for("auth_routes.login"))
         ep = request.endpoint
         need_pw_change = u.get("must_change_password") or not u.get("password_compliant")
-        if need_pw_change and ep not in ("change_password", "change_password_post"):
-            return redirect(url_for("change_password"))
-        if not need_pw_change and not u.get("onboarding_done") and ep not in ("onboarding", "onboarding_post"):
-            return redirect(url_for("onboarding"))
+        if need_pw_change and ep not in ("auth_routes.change_password", "auth_routes.change_password_post"):
+            return redirect(url_for("auth_routes.change_password"))
+        if not need_pw_change and not u.get("onboarding_done") and ep not in ("core.onboarding", "core.onboarding_post"):
+            return redirect(url_for("core.onboarding"))
         return view(*args, **kwargs)
     return wrapped
 
@@ -442,7 +442,7 @@ def admin_required(view):
     def wrapped(*args, **kwargs):
         u = current_user()
         if not u:
-            return redirect(url_for("login", next=request.path))
+            return redirect(url_for("auth_routes.login", next=request.path))
         if not u.get("is_admin"):
             abort(403)
         return view(*args, **kwargs)
@@ -459,7 +459,7 @@ def hr_required(f):
     def wrapped(*args, **kwargs):
         u = current_user()
         if not u:
-            return redirect(url_for("login"))
+            return redirect(url_for("auth_routes.login"))
         if u.get("admin_role") not in ("sysadmin", "timemanager", "hr"):
             abort(403)
         return f(*args, **kwargs)
@@ -472,7 +472,7 @@ def sysadmin_required(view):
     def wrapped(*args, **kwargs):
         u = current_user()
         if not u:
-            return redirect(url_for("login", next=request.path))
+            return redirect(url_for("auth_routes.login", next=request.path))
         if u.get("admin_role") != "sysadmin":
             abort(403)
         return view(*args, **kwargs)
