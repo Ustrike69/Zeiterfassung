@@ -8,7 +8,9 @@ importiert, um den zirkulären Import (app.py → blueprint → app.py) zu verme
 """
 from flask import Blueprint, request, redirect, url_for, send_file, jsonify, session, render_template_string, abort
 import datetime
+import html as _html
 import re
+_re = re
 from db import connect
 from auth import login_required, admin_required, sysadmin_required, current_user, timemanager_required, is_sysadmin, is_timemanager, set_active, set_admin_role, set_password, set_must_change_password, unlock_account
 from calendar_seed import ALL_REGIONS, REGION_GROUPS
@@ -690,7 +692,7 @@ def _export_filename(prefix: str, date_from: str, date_to: str) -> str:
 @admin_bp.get("/admin/users")
 @sysadmin_required
 def admin_users():
-    from app import bootstrap, flash_html, layout, _fmt_date_de
+    from app import bootstrap, flash_html, layout, _fmt_date_de, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -766,7 +768,7 @@ def admin_users():
 @admin_bp.get("/admin/users/new")
 @sysadmin_required
 def admin_users_new():
-    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _date_input
+    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _date_input, APP_VERSION
     bootstrap()
     u = current_user()
     today_iso = datetime.date.today().isoformat()
@@ -871,7 +873,7 @@ def admin_users_new_post():
 @admin_bp.get("/admin/users/<int:user_id>/edit")
 @admin_required
 def admin_users_edit(user_id: int):
-    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _date_input, _fmt_date_de, _fmt_minutes, _region_picker, _sched_form_html, _normalize_schedule, _get_user_schedules_all, _get_user_schedule_for_day, _vacation_calc, _STANDARD_TYPE_NAMES
+    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _date_input, _fmt_date_de, _fmt_minutes, _region_picker, _sched_form_html, _normalize_schedule, _get_user_schedules_all, _get_user_schedule_for_day, _vacation_calc, _STANDARD_TYPE_NAMES, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -1726,7 +1728,7 @@ def admin_users_unlock(user_id: int):
 @admin_bp.route("/admin/user/<int:uid>/schedule", methods=["GET", "POST"])
 @timemanager_required
 def admin_user_schedule(uid: int):
-    from app import bootstrap, add_flash, flash_html, layout, _sched_daily_blocks_html, _normalize_schedule, _parse_sched_blocks_from_form, _sched_save_blocks, _sched_save_exceptions_from_form
+    from app import bootstrap, add_flash, flash_html, layout, _sched_daily_blocks_html, _normalize_schedule, _parse_sched_blocks_from_form, _sched_save_blocks, _sched_save_exceptions_from_form, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -1813,7 +1815,7 @@ def admin_user_schedule(uid: int):
 @admin_bp.route("/admin/users/<int:user_id>/presets", methods=["GET", "POST"])
 @timemanager_required
 def admin_user_presets(user_id: int):
-    from app import bootstrap, add_flash, flash_html, layout
+    from app import bootstrap, add_flash, flash_html, layout, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -1913,7 +1915,7 @@ def admin_user_presets(user_id: int):
 @admin_bp.get("/admin/users/<int:user_id>/vacation-carryover")
 @admin_required
 def admin_vacation_carryover(user_id: int):
-    from app import bootstrap, flash_html, layout, _date_input, _vacation_calc, _get_all_vacation_carryover_overrides
+    from app import bootstrap, flash_html, layout, _date_input, _vacation_calc, _get_all_vacation_carryover_overrides, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -2089,7 +2091,7 @@ def admin_impersonate_stop():
 @admin_bp.get("/admin/schedule/<int:user_id>/edit/<schedule_id>")
 @admin_required
 def admin_schedule_edit(user_id: int, schedule_id: str):
-    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _sched_daily_blocks_html, _normalize_schedule
+    from app import bootstrap, flash_html, layout, FORM_ASSETS_JS, _sched_daily_blocks_html, _normalize_schedule, APP_VERSION
     bootstrap()
     u = current_user()
     db = connect()
@@ -2226,7 +2228,7 @@ def admin_schedule_delete(user_id: int, schedule_id: int):
 @admin_bp.get("/admin/periods")
 @admin_required
 def admin_periods():
-    from app import bootstrap, flash_html, layout, _t_month_short
+    from app import bootstrap, flash_html, layout, _t_month_short, APP_VERSION
     bootstrap()
     u = current_user()
     today = datetime.date.today()
@@ -2337,7 +2339,7 @@ def admin_periods_unlock():
 @admin_bp.get("/admin")
 @admin_required
 def admin_home():
-    from app import bootstrap, flash_html, layout, _date_input, _fmt_minutes, _get_user_schedule_for_day, _get_visible_user_ids, _feature_enabled, _get_timezone, _t_month_short, _fmt_backup_size, _get_backup_config, _get_mail_config, _REGION_LABEL, _render_per_user_settings_section, _render_admin_overtime_section, _render_admin_absences_section, _render_appearance_section, _render_regional_section, _render_backup_section, _render_bot_section, _render_update_section, _render_overtime_defaults_section, _render_features_section, _render_school_holidays_section, _render_admin_teams_inline, _render_admin_staffing_inline
+    from app import bootstrap, flash_html, layout, _date_input, _fmt_minutes, _get_user_schedule_for_day, _get_visible_user_ids, _feature_enabled, _get_timezone, _t_month_short, _fmt_backup_size, _get_backup_config, _get_mail_config, _REGION_LABEL, _render_per_user_settings_section, _render_admin_overtime_section, _render_admin_absences_section, _render_appearance_section, _render_regional_section, _render_backup_section, _render_bot_section, _render_update_section, _render_overtime_defaults_section, _render_features_section, _render_school_holidays_section, _render_admin_teams_inline, _render_admin_staffing_inline, APP_VERSION
     bootstrap()
     u = current_user()
     today = datetime.date.today()
@@ -3632,6 +3634,7 @@ def _live_app_version() -> str:
                     return _m.group(1)
     except Exception:
         pass
+    from app import APP_VERSION
     return APP_VERSION
 
 
@@ -3826,7 +3829,7 @@ def admin_update_run():
 @admin_bp.get("/admin/mail-settings")
 @sysadmin_required
 def admin_mail_settings():
-    from app import bootstrap, flash_html, layout, _get_mail_config
+    from app import bootstrap, flash_html, layout, _get_mail_config, APP_VERSION
     bootstrap()
     u = current_user()
     cfg = _get_mail_config()
@@ -6065,7 +6068,7 @@ function updateLabelPreview(){{
 @admin_bp.get("/admin/absences")
 @admin_required
 def admin_absences():
-    from app import bootstrap, flash_html, layout, _render_admin_absences_section
+    from app import bootstrap, flash_html, layout, _render_admin_absences_section, APP_VERSION
     bootstrap()
     u = current_user()
     today = datetime.date.today()
