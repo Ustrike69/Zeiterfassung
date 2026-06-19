@@ -21,7 +21,7 @@ from blueprints.school_holidays import school_holidays_bp
 from blueprints.vocational import vocational_bp
 
 
-APP_VERSION = "v3.0.13.dev12"
+APP_VERSION = "v3.0.13"
 
 IS_DEV = os.environ.get("ZEITERFASSUNG_DEV_MODE") == "1"
 if IS_DEV:
